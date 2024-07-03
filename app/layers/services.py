@@ -1,0 +1,109 @@
+from app.layers.models import (
+    Layer,
+    LayerRead,
+    LayerCreate,
+    LayerUpdate,
+)
+from app.db import get_session, AsyncSession
+from fastapi import (
+    Depends,
+    APIRouter,
+    Query,
+    Response,
+    HTTPException,
+    BackgroundTasks,
+)
+from uuid import UUID
+from app.crud import CRUD
+
+router = APIRouter()
+
+
+crud = CRUD(Layer, LayerRead, LayerCreate, LayerUpdate)
+
+
+async def get_count(
+    response: Response,
+    filter: str = Query(None),
+    range: str = Query(None),
+    sort: str = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    count = await crud.get_total_count(
+        response=response,
+        sort=sort,
+        range=range,
+        filter=filter,
+        session=session,
+    )
+
+    return count
+
+
+async def get_data(
+    filter: str = Query(None),
+    sort: str = Query(None),
+    range: str = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    res = await crud.get_model_data(
+        sort=sort,
+        range=range,
+        filter=filter,
+        session=session,
+    )
+
+    return res
+
+
+async def get_one(
+    layer_id: UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    res = await crud.get_model_by_id(model_id=layer_id, session=session)
+
+    if not res:
+        raise HTTPException(
+            status_code=404, detail=f"ID: {layer_id} not found"
+        )
+    return res
+
+
+async def create_one(
+    data: dict,
+    session: AsyncSession,
+    background_tasks: BackgroundTasks,
+) -> Layer:
+    """Create a single layer
+
+    To be used in both create one and create many endpoints
+    """
+
+    obj = Layer.model_validate(data)
+
+    session.add(obj)
+
+    await session.commit()
+    await session.refresh(obj)
+
+    return obj
+
+
+async def update_one(
+    layer_id: UUID,
+    layer_update: LayerUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> Layer:
+    """Update a single layer"""
+
+    obj = await get_one(layer_id, session=session)
+
+    update_data = layer_update.model_dump(exclude_unset=True)
+
+    obj.sqlmodel_update(update_data)
+
+    session.add(obj)
+    await session.commit()
+    await session.refresh(obj)
+
+    return obj

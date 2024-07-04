@@ -18,6 +18,7 @@ asyncpg = "^0.29.0"
 # stac-fastapi-extensions = "^2.5.5.post1"
 # stac-fastapi-sqlalchemy = "^2.4.5"
 sqlmodel = "^0.0.19"
+alembic = "^1.13.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.3"

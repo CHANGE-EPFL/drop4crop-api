@@ -2,40 +2,41 @@ from sqlmodel import SQLModel, Field, UniqueConstraint
 from uuid import uuid4, UUID
 from sqlalchemy.sql import func
 import datetime
+from pydantic import constr
 
 
 class LayerBase(SQLModel):
-    layer_name: str = Field(
+    layer_name: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    crop: str = Field(
+    crop: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    water_model: str = Field(
+    water_model: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    climate_model: str = Field(
+    climate_model: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    scenario: str = Field(
+    scenario: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    variable: str = Field(
+    variable: str | None = Field(
         default=None,
         index=True,
         nullable=False,
     )
-    year: int = Field(
+    year: int | None = Field(
         default=None,
         index=True,
         nullable=False,

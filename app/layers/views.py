@@ -7,7 +7,7 @@ from app.db import get_session, AsyncSession
 from fastapi import (
     Depends,
     APIRouter,
-    Response,
+    Query,
     BackgroundTasks,
 )
 from uuid import UUID
@@ -19,8 +19,9 @@ from app.layers.services import (
     create_one,
     update_one,
     crud,
+    get_layers,
 )
-
+from typing import Any
 
 router = APIRouter()
 
@@ -34,15 +35,32 @@ async def get_layer(
     return obj
 
 
-@router.get("", response_model=list[LayerRead])
+@router.get("")
 async def get_all_layers(
-    response: Response,
-    layers: Layer = Depends(get_data),
-    total_count: int = Depends(get_count),
-) -> list[LayerRead]:
+    crop: str = Query(None),
+    water_model: str = Query(None),
+    climate_model: str = Query(None),
+    scenario: str = Query(None),
+    variable: str = Query(None),
+    year: int = Query(None),
+    layers: dict[tuple[str, str, str, str, str, int], LayerRead] = Depends(
+        get_layers
+    ),
+) -> Any:
     """Get all Layer data"""
+    results = [
+        layer
+        for key, layer in layers.items()
+        if (crop is None or crop.lower() == key[0])
+        and (water_model is None or water_model.lower() == key[1])
+        and (climate_model is None or climate_model.lower() == key[2])
+        and (scenario is None or scenario.lower() == key[3])
+        and (variable is None or variable.lower() == key[4])
+        and (year is None or year == key[5])
+    ]
 
-    return layers
+    print("Result count:", len(results))
+    return results
 
 
 @router.post("", response_model=LayerRead)

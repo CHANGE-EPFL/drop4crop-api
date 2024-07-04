@@ -13,8 +13,9 @@ from fastapi import (
     HTTPException,
     BackgroundTasks,
 )
-from uuid import UUID
+from uuid import UUID, uuid4
 from app.crud import CRUD
+from itertools import product
 
 router = APIRouter()
 
@@ -107,3 +108,76 @@ async def update_one(
     await session.refresh(obj)
 
     return obj
+
+
+def get_layers() -> dict[tuple[str, str, str, str, str, int], LayerRead]:
+    crops = [
+        "barley",
+        "potato",
+        "rice",
+        "soy",
+        "sugarcane",
+        "wheat",
+    ]
+    water_models = [
+        # "cwatm",
+        # "h08",
+        # "lpjml",
+        # "matsiro",
+        "pcr-globwb",
+        "watergap2",
+    ]
+    climate_models = [
+        "gfdl-esm2m",
+        "hadgem2-es",
+        "ipsl-cm5a-lr",
+        "miroc5",
+    ]
+    scenarios = [
+        "historical",
+        "rcp26",
+        "rcp60",
+        "rcp85",
+    ]
+    variables = [
+        # "vwc_sub",
+        # "vwcb_sub",
+        # "vwcg_sub",
+        # "vwcg_perc",
+        # "vwcb_perc",
+        "wf",
+        "wfb",
+        "wfg",
+        "etb",
+        "etg",
+        "rb",
+        "rg",
+        "wdb",
+        "wdg",
+    ]
+    years = list(range(2000, 2100, 10))
+
+    combinations = product(
+        crops, water_models, climate_models, scenarios, variables, years
+    )
+    layers = {
+        (
+            crop,
+            water_model,
+            climate_model,
+            scenario,
+            variable,
+            year,
+        ): LayerRead(
+            id=uuid4(),
+            crop=crop,
+            water_model=water_model,
+            climate_model=climate_model,
+            scenario=scenario,
+            variable=variable,
+            year=year,
+            layer_name=f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}".lower(),
+        )
+        for crop, water_model, climate_model, scenario, variable, year in combinations
+    }
+    return layers

@@ -22,6 +22,7 @@ from app.layers.services import (
     get_layers,
 )
 from typing import Any
+from sqlmodel import select
 
 router = APIRouter()
 
@@ -43,24 +44,29 @@ async def get_all_layers(
     scenario: str = Query(None),
     variable: str = Query(None),
     year: int = Query(None),
-    layers: dict[tuple[str, str, str, str, str, int], LayerRead] = Depends(
-        get_layers
-    ),
+    session: AsyncSession = Depends(get_session),
 ) -> Any:
     """Get all Layer data"""
-    results = [
-        layer
-        for key, layer in layers.items()
-        if (crop is None or crop.lower() == key[0])
-        and (water_model is None or water_model.lower() == key[1])
-        and (climate_model is None or climate_model.lower() == key[2])
-        and (scenario is None or scenario.lower() == key[3])
-        and (variable is None or variable.lower() == key[4])
-        and (year is None or year == key[5])
-    ]
 
-    print("Result count:", len(results))
-    return results
+    # Query for the layers that match query params, but only if not None
+    query = select(Layer)
+    if crop:
+        query = query.where(Layer.crop == crop.lower())
+    if water_model:
+        query = query.where(Layer.water_model == water_model.lower())
+    if climate_model:
+        query = query.where(Layer.climate_model == climate_model.lower())
+    if scenario:
+        query = query.where(Layer.scenario == scenario)
+    if variable:
+        query = query.where(Layer.variable == variable)
+    if year:
+        query = query.where(Layer.year == year)
+
+    result = await session.exec(query)
+    layers = result.all()
+
+    return layers
 
 
 @router.post("", response_model=LayerRead)

@@ -6,8 +6,15 @@ from app.models.config import KeycloakConfig
 from app.models.health import HealthCheck
 from app.routes.wms import router as wms_router
 from app.layers.views import router as layers_router
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 origins = ["*"]
 

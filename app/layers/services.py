@@ -181,3 +181,20 @@ def get_layers() -> dict[tuple[str, str, str, str, str, int], LayerRead]:
         for crop, water_model, climate_model, scenario, variable, year in combinations
     }
     return layers
+
+
+async def create_layers(session: AsyncSession):
+    layers = get_layers()
+
+    # Upload all results to the database
+    for key, value in layers.items():
+        layer_dict = value.model_dump()
+        layer_dict.pop("id")
+        obj = Layer.model_validate(layer_dict)
+
+        # print("OBJECT", obj)
+        session.add(obj)
+
+    await session.commit()
+
+    return

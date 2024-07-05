@@ -54,11 +54,11 @@ def get_health() -> HealthCheck:
 
 app.include_router(
     wms_router,
-    prefix="/wms",
+    prefix=f"{config.API_PREFIX}/wms",
     tags=["wms"],
 )
 app.include_router(
     layers_router,
-    prefix="/layers",
+    prefix=f"{config.API_PREFIX}/layers",
     tags=["layers"],
 )

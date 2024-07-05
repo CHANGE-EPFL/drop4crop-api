@@ -3,6 +3,25 @@ from uuid import uuid4, UUID
 from sqlalchemy.sql import func
 import datetime
 from pydantic import constr
+import enum
+
+
+class LayerVariables(str, enum.Enum):
+    crop = "crop"
+    water_model = "water_model"
+    climate_model = "climate_model"
+    scenario = "scenario"
+    variable = "variable"
+    year = "year"
+
+
+class LayerGroupsRead(SQLModel):
+    crop: list[str] = []
+    water_model: list[str] = []
+    climate_model: list[str] = []
+    scenario: list[str] = []
+    variable: list[str] = []
+    year: list[int] = []
 
 
 class LayerBase(SQLModel):
@@ -68,8 +87,8 @@ class Layer(LayerBase, table=True):
     )
 
 
-class LayerRead(LayerBase):
-    id: UUID
+class LayerRead(SQLModel):
+    layer_name: str
 
 
 class LayerCreate(LayerBase):

@@ -2,6 +2,8 @@ from app.layers.models import (
     Layer,
     LayerCreate,
     LayerRead,
+    LayerVariables,
+    LayerGroupsRead,
 )
 from app.db import get_session, AsyncSession
 from fastapi import (
@@ -20,11 +22,30 @@ from app.layers.services import (
     update_one,
     crud,
     get_layers,
+    create_layers,
 )
 from typing import Any
 from sqlmodel import select
 
 router = APIRouter()
+
+
+@router.get("/groups", response_model=LayerGroupsRead)
+async def get_groups(
+    session: AsyncSession = Depends(get_session),
+) -> LayerGroupsRead:
+    """Get all unique groups
+    This endpoint allows the menu to be populated with available keys
+    """
+
+    groups = {}
+    for group in LayerVariables:
+        # Get distinct values for each group
+        column = getattr(Layer, group.value)
+        res = await session.exec(select(column).distinct())
+        groups[group.value] = [row for row in res.all()]
+
+    return groups
 
 
 @router.get("/{layer_id}", response_model=LayerRead)
@@ -36,7 +57,7 @@ async def get_layer(
     return obj
 
 
-@router.get("")
+@router.get("", response_model=list[LayerRead])
 async def get_all_layers(
     crop: str = Query(None),
     water_model: str = Query(None),
@@ -45,8 +66,10 @@ async def get_all_layers(
     variable: str = Query(None),
     year: int = Query(None),
     session: AsyncSession = Depends(get_session),
-) -> Any:
+) -> list[LayerRead]:
     """Get all Layer data"""
+
+    # await create_layers(session=session)
 
     # Query for the layers that match query params, but only if not None
     query = select(Layer)

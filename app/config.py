@@ -4,7 +4,7 @@ from functools import lru_cache
 
 
 class Config(BaseSettings):
-    API_PREFIX: str = "/v1"
+    API_PREFIX: str = "/api"
 
     # PostGIS settings
     DB_HOST: str | None = None

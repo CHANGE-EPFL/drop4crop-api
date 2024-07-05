@@ -6,6 +6,8 @@ from functools import lru_cache
 class Config(BaseSettings):
     API_PREFIX: str = "/api"
 
+    GEOSERVER_URL: str
+
     # PostGIS settings
     DB_HOST: str | None = None
     DB_PORT: int | None = None  # 5432

@@ -4,7 +4,6 @@ from app.config import config
 
 from app.models.config import KeycloakConfig
 from app.models.health import HealthCheck
-from app.routes.wms import router as wms_router
 from app.layers.views import router as layers_router
 from contextlib import asynccontextmanager
 
@@ -37,7 +36,7 @@ async def get_keycloak_config() -> KeycloakConfig:
 
 
 @app.get(
-    "/healthz",
+    f"{config.API_PREFIX}/healthz",
     tags=["healthcheck"],
     summary="Perform a Health Check",
     response_description="Return HTTP Status Code 200 (OK)",
@@ -52,11 +51,11 @@ def get_health() -> HealthCheck:
     return HealthCheck(status="OK")
 
 
-app.include_router(
-    wms_router,
-    prefix=f"{config.API_PREFIX}/wms",
-    tags=["wms"],
-)
+@app.get(f"{config.API_PREFIX}/config/geoserver", response_model=str)
+def get_geoserver_config() -> str:
+    return config.GEOSERVER_URL
+
+
 app.include_router(
     layers_router,
     prefix=f"{config.API_PREFIX}/layers",

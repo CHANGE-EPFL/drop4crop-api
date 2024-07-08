@@ -78,7 +78,18 @@ class LayerBase(SQLModel):
 
 
 class Layer(LayerBase, table=True):
-    __table_args__ = (UniqueConstraint("id"),)
+    __table_args__ = (
+        UniqueConstraint("id"),
+        UniqueConstraint(
+            "crop",
+            "year",
+            "variable",
+            "scenario",
+            "climate_model",
+            "water_model",
+        ),
+        UniqueConstraint("layer_name"),
+    )
     iterator: int = Field(
         default=None,
         nullable=False,
@@ -94,7 +105,8 @@ class Layer(LayerBase, table=True):
 
 class LayerRead(LayerBase):
     id: UUID
-    geoserver: dict[str, Any] = {}
+    created_at: datetime.datetime | None = None
+    style_name: str | None = None
 
 
 class LayerCreate(LayerBase):
@@ -102,4 +114,4 @@ class LayerCreate(LayerBase):
 
 
 class LayerUpdate(LayerBase):
-    pass
+    style_name: str | None = None

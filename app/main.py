@@ -1,19 +1,13 @@
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import config
-
 from app.models.config import KeycloakConfig
 from app.models.health import HealthCheck
 from app.layers.views import router as layers_router
-from contextlib import asynccontextmanager
+from app.styles.views import router as styles_router
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 origins = ["*"]
 
@@ -60,4 +54,9 @@ app.include_router(
     layers_router,
     prefix=f"{config.API_PREFIX}/layers",
     tags=["layers"],
+)
+app.include_router(
+    styles_router,
+    prefix=f"{config.API_PREFIX}/styles",
+    tags=["styles"],
 )

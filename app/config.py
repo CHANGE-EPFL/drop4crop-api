@@ -7,6 +7,9 @@ class Config(BaseSettings):
     API_PREFIX: str = "/api"
 
     GEOSERVER_URL: str
+    GEOSERVER_USER: str
+    GEOSERVER_PASSWORD: str
+    GEOSERVER_WORKSPACE: str = "drop4crop"
 
     # PostGIS settings
     DB_HOST: str | None = None

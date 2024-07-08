@@ -16,7 +16,7 @@ from uuid import UUID
 from app.crud import CRUD
 from app.layers.services import (
     get_count,
-    get_data,
+    get_all,
     get_one,
     create_one,
     update_one,
@@ -59,37 +59,13 @@ async def get_layer(
 
 @router.get("", response_model=list[LayerRead])
 async def get_all_layers(
-    crop: str = Query(None),
-    water_model: str = Query(None),
-    climate_model: str = Query(None),
-    scenario: str = Query(None),
-    variable: str = Query(None),
-    year: int = Query(None),
+    data: Any = Depends(get_all),
     session: AsyncSession = Depends(get_session),
+    total_count: int = Depends(get_count),
 ) -> list[LayerRead]:
     """Get all Layer data"""
 
-    # await create_layers(session=session)
-
-    # Query for the layers that match query params, but only if not None
-    query = select(Layer)
-    if crop:
-        query = query.where(Layer.crop == crop.lower())
-    if water_model:
-        query = query.where(Layer.water_model == water_model.lower())
-    if climate_model:
-        query = query.where(Layer.climate_model == climate_model.lower())
-    if scenario:
-        query = query.where(Layer.scenario == scenario)
-    if variable:
-        query = query.where(Layer.variable == variable)
-    if year:
-        query = query.where(Layer.year == year)
-
-    result = await session.exec(query)
-    layers = result.all()
-
-    return layers
+    return data
 
 
 @router.post("", response_model=LayerRead)

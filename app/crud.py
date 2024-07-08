@@ -134,6 +134,10 @@ class CRUD:
                             )
 
                         query = query.filter(or_(*or_conditions))
+                    elif isinstance(value, int):
+                        query = query.filter(
+                            getattr(self.db_model, field) == value
+                        )
                     elif isinstance(value, bool):
                         if value is True:
                             query = query.filter(
@@ -237,6 +241,10 @@ class CRUD:
                             )
 
                         query = query.filter(or_(*or_conditions))
+                    elif isinstance(value, int):
+                        query = query.filter(
+                            getattr(self.db_model, field) == value
+                        )
                     elif isinstance(value, bool):
                         if value is True:
                             # If true, the field has a value and the value

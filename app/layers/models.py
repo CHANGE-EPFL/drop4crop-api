@@ -4,6 +4,7 @@ from sqlalchemy.sql import func
 import datetime
 from pydantic import constr
 import enum
+from typing import Any
 
 
 class LayerVariables(str, enum.Enum):
@@ -38,17 +39,17 @@ class LayerBase(SQLModel):
     water_model: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     climate_model: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     scenario: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     variable: str | None = Field(
         default=None,
@@ -58,6 +59,10 @@ class LayerBase(SQLModel):
     year: int | None = Field(
         default=None,
         index=True,
+        nullable=True,
+    )
+    enabled: bool = Field(
+        default=True,
         nullable=False,
     )
 
@@ -87,8 +92,9 @@ class Layer(LayerBase, table=True):
     )
 
 
-class LayerRead(SQLModel):
-    layer_name: str
+class LayerRead(LayerBase):
+    id: UUID
+    geoserver: dict[str, Any] = {}
 
 
 class LayerCreate(LayerBase):

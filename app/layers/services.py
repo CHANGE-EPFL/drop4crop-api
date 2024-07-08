@@ -16,6 +16,8 @@ from fastapi import (
 from uuid import UUID, uuid4
 from app.crud import CRUD
 from itertools import product
+import httpx
+from app.config import config
 
 router = APIRouter()
 
@@ -41,12 +43,13 @@ async def get_count(
     return count
 
 
-async def get_data(
+async def get_all(
     filter: str = Query(None),
     sort: str = Query(None),
     range: str = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
+
     res = await crud.get_model_data(
         sort=sort,
         range=range,
@@ -62,6 +65,18 @@ async def get_one(
     session: AsyncSession = Depends(get_session),
 ):
     res = await crud.get_model_by_id(model_id=layer_id, session=session)
+
+    res = LayerRead.model_validate(res)
+    # Get layer information from geoserver
+    async with httpx.AsyncClient() as client:
+        # Get layer styling information from geoserver
+        response = await client.get(
+            f"{config.GEOSERVER_URL}/rest/layers/{config.GEOSERVER_WORKSPACE}"
+            f":{res.layer_name}.json",
+            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+        )
+        if response.status_code == 200:
+            res.geoserver = response.json()
 
     if not res:
         raise HTTPException(

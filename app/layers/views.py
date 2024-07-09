@@ -2,6 +2,7 @@ from app.layers.models import (
     Layer,
     LayerCreate,
     LayerRead,
+    LayerReadAuthenticated,
     LayerVariables,
     LayerGroupsRead,
 )
@@ -17,18 +18,16 @@ from uuid import UUID
 from app.crud import CRUD
 from app.layers.services import (
     get_count,
-    get_all,
+    get_all_authenticated,
     get_one,
     create_one,
     update_one,
-    crud,
-    get_layers,
-    create_layers,
 )
 from typing import Any
 from sqlmodel import select
 import httpx
 from app.config import config
+from app.auth import require_admin, get_user_info, User
 
 router = APIRouter()
 
@@ -52,32 +51,73 @@ async def get_groups(
     return groups
 
 
-@router.get("/{layer_id}", response_model=LayerRead)
+@router.get("/map", response_model=list[LayerRead])
+async def get_all_map_layers(
+    session: AsyncSession = Depends(get_session),
+    crop: str = Query(...),
+    water_model: str | None = Query(...),
+    climate_model: str | None = Query(...),
+    scenario: str | None = Query(...),
+    variable: str | None = Query(...),
+    year: int | None = Query(...),
+) -> list[LayerRead]:
+    """Get all Layer data for the Drop4Crop map
+
+    Does not include disabled layers (enabled=False)
+    """
+
+    query = select(Layer).where(Layer.enabled == True)
+
+    if crop:
+        query = query.where(Layer.crop == crop)
+    if water_model:
+        query = query.where(Layer.water_model == water_model)
+    if climate_model:
+        query = query.where(Layer.climate_model == climate_model)
+    if scenario:
+        query = query.where(Layer.scenario == scenario)
+    if variable:
+        query = query.where(Layer.variable == variable)
+    if year:
+        query = query.where(Layer.year == year)
+
+    res = await session.exec(query)
+
+    return res.all()
+
+
+@router.get("/{layer_id}", response_model=LayerReadAuthenticated)
 async def get_layer(
     obj: CRUD = Depends(get_one),
-) -> LayerRead:
+    user: User = Depends(get_user_info),
+) -> LayerReadAuthenticated:
     """Get a layer by id"""
 
     return obj
 
 
-@router.get("", response_model=list[LayerRead])
+@router.get("", response_model=list[LayerReadAuthenticated])
 async def get_all_layers(
-    data: Any = Depends(get_all),
+    data: Any = Depends(get_all_authenticated),
     session: AsyncSession = Depends(get_session),
     total_count: int = Depends(get_count),
-) -> list[LayerRead]:
-    """Get all Layer data"""
+    user: User = Depends(require_admin),
+) -> list[LayerReadAuthenticated]:
+    """Get all Layer data
+
+    If token and user is admin, return additional fields
+    """
 
     return data
 
 
-@router.post("", response_model=LayerRead)
+@router.post("", response_model=LayerReadAuthenticated)
 async def create_layer(
     create_obj: LayerCreate,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
-) -> LayerRead:
+    user: User = Depends(require_admin),
+) -> LayerReadAuthenticated:
     """Creates a layer data record"""
 
     obj = await create_one(create_obj.model_dump(), session, background_tasks)
@@ -85,10 +125,11 @@ async def create_layer(
     return obj
 
 
-@router.put("/{layer_id}", response_model=LayerRead)
+@router.put("/{layer_id}", response_model=LayerReadAuthenticated)
 async def update_layer(
     updated_layer: Layer = Depends(update_one),
-) -> LayerRead:
+    user: User = Depends(require_admin),
+) -> LayerReadAuthenticated:
     """Update a layer by id"""
 
     return updated_layer
@@ -115,6 +156,7 @@ async def update_layer(
 async def delete_layer(
     layer: LayerRead = Depends(get_one),
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> str:
     """Delete a layer by id"""
 

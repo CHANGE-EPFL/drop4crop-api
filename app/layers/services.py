@@ -1,6 +1,7 @@
 from app.layers.models import (
     Layer,
     LayerRead,
+    LayerReadAuthenticated,
     LayerCreate,
     LayerUpdate,
 )
@@ -43,7 +44,7 @@ async def get_count(
     return count
 
 
-async def get_all(
+async def get_all_authenticated(
     filter: str = Query(None),
     sort: str = Query(None),
     range: str = Query(None),
@@ -57,33 +58,34 @@ async def get_all(
         session=session,
     )
 
-    # read_layers = []
-    # for layer in res:
-    #     obj = LayerRead.model_validate(layer)
-    #     async with httpx.AsyncClient() as client:
-    #         # Get layer styling information from geoserver
-    #         response = await client.get(
-    #             f"{config.GEOSERVER_URL}/rest/layers/{config.GEOSERVER_WORKSPACE}"
-    #             f":{layer.layer_name}.json",
-    #             auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
-    #         )
-    #         if response.status_code == 200:
-    #             obj.style_name = response.json()["layer"]["defaultStyle"][
-    #                 "name"
-    #             ]
-    #             obj.created_at = response.json()["layer"]["dateCreated"]
+    read_layers = []
+    for layer in res:
+        obj = LayerReadAuthenticated.model_validate(layer)
+        async with httpx.AsyncClient() as client:
+            # Get layer styling information from geoserver
+            response = await client.get(
+                f"{config.GEOSERVER_URL}/rest/layers/"
+                f"{config.GEOSERVER_WORKSPACE}"
+                f":{layer.layer_name}.json",
+                auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+            )
+            if response.status_code == 200:
+                obj.style_name = response.json()["layer"]["defaultStyle"][
+                    "name"
+                ]
+                obj.created_at = response.json()["layer"]["dateCreated"]
 
-    #     read_layers.append(obj)
+        read_layers.append(obj)
 
-    return res
+    return read_layers
 
 
 async def get_one(
     layer_id: UUID,
     session: AsyncSession = Depends(get_session),
-):
+) -> LayerReadAuthenticated:
     res = await crud.get_model_by_id(model_id=layer_id, session=session)
-    res = LayerRead.model_validate(res)
+    res = LayerReadAuthenticated.model_validate(res)
     # Get layer information from geoserver
     async with httpx.AsyncClient() as client:
         # Get layer styling information from geoserver

@@ -1,10 +1,11 @@
-from fastapi import Query, APIRouter, Response, HTTPException
+from fastapi import Query, APIRouter, Response, HTTPException, Depends
 from typing import Any
 import httpx
 import json
 from app.config import config
 from app.styles.models import StyleCreate
 import re
+from app.auth import require_admin, User
 
 router = APIRouter()
 
@@ -12,6 +13,7 @@ router = APIRouter()
 @router.get("/{style_id}")
 async def get_style(
     style_id: str,
+    user: User = Depends(require_admin),
 ):
     """Get a style by id
 
@@ -52,6 +54,7 @@ async def get_all_styles(
     filter: str = Query(None),
     range: str = Query(None),
     sort: str = Query(None),
+    user: User = Depends(require_admin),
 ) -> list[Any]:
     """Get all styles from geoserver"""
 
@@ -96,6 +99,7 @@ async def get_all_styles(
 @router.post("")
 async def create_style(
     style: StyleCreate,
+    user: User = Depends(require_admin),
 ):
     """Create a style on geoserver"""
 
@@ -163,6 +167,7 @@ async def create_style(
 async def update_style(
     style_id: str,
     style: StyleCreate,
+    user: User = Depends(require_admin),
 ):
     """Update a style on geoserver"""
 
@@ -230,6 +235,7 @@ async def update_style(
 @router.delete("/{style_id}")
 async def delete_style(
     style_id: str,
+    user: User = Depends(require_admin),
 ) -> None:
     """Delete a style"""
 

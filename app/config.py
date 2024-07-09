@@ -11,6 +11,17 @@ class Config(BaseSettings):
     GEOSERVER_PASSWORD: str
     GEOSERVER_WORKSPACE: str = "drop4crop"
 
+    # Common Keycloaksettings
+    KEYCLOAK_REALM: str
+    KEYCLOAK_URL: str
+
+    # Keycloak Admin settings
+    KEYCLOAK_API_ID: str
+    KEYCLOAK_API_SECRET: str
+
+    # Keycloak UI settings
+    KEYCLOAK_CLIENT_ID: str
+
     # PostGIS settings
     DB_HOST: str | None = None
     DB_PORT: int | None = None  # 5432

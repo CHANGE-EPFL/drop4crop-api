@@ -5,7 +5,7 @@ from app.models.config import KeycloakConfig
 from app.models.health import HealthCheck
 from app.layers.views import router as layers_router
 from app.styles.views import router as styles_router
-
+from app.users.views import router as users_router
 
 app = FastAPI()
 
@@ -59,4 +59,9 @@ app.include_router(
     styles_router,
     prefix=f"{config.API_PREFIX}/styles",
     tags=["styles"],
+)
+app.include_router(
+    users_router,
+    prefix=f"{config.API_PREFIX}/users",
+    tags=["users"],
 )

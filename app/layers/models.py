@@ -103,8 +103,13 @@ class Layer(LayerBase, table=True):
     )
 
 
-class LayerRead(LayerBase):
+class LayerRead(SQLModel):
+    layer_name: str | None
+
+
+class LayerReadAuthenticated(LayerBase):
     id: UUID
+    enabled: bool
     created_at: datetime.datetime | None = None
     style_name: str | None = None
 

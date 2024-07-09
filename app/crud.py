@@ -73,7 +73,7 @@ class CRUD:
         """
 
         sort = json.loads(sort) if sort else []
-        range = json.loads(range) if range else []
+        range = json.loads(range) if range else [0, 10]
         filter = json.loads(filter) if filter else {}
 
         query = select(self.db_model)
@@ -97,12 +97,10 @@ class CRUD:
                             and prop_details.get("format") != "uuid"
                             and prop_details.get("format") != "date-time"
                         ):
-                            # Apply a LIKE filter for string matching case
+                            # Apply an equality filter for string matching case
                             # insensitive
                             or_conditions.append(
-                                getattr(self.db_model, prop_name).ilike(
-                                    f"%{str(value)}%"
-                                )
+                                getattr(self.db_model, prop_name) == value
                             )
 
                     query = query.filter(or_(*or_conditions))
@@ -128,9 +126,7 @@ class CRUD:
                         or_conditions = []
                         for v in value:
                             or_conditions.append(
-                                getattr(self.db_model, field).like(
-                                    f"%{str(v)}%"
-                                )
+                                getattr(self.db_model, field) == v
                             )
 
                         query = query.filter(or_(*or_conditions))
@@ -148,11 +144,9 @@ class CRUD:
                                 ~getattr(self.db_model, field).has()
                             )
                     else:
-                        # Apply a LIKE filter for string matching
+                        # Apply an equality filter for string matching
                         query = query.filter(
-                            getattr(self.db_model, field).like(
-                                f"%{str(value)}%"
-                            )
+                            getattr(self.db_model, field) == value
                         )
 
         if len(sort) == 2:
@@ -207,9 +201,7 @@ class CRUD:
                             and prop_details.get("format") != "date-time"
                         ):
                             or_conditions.append(
-                                getattr(self.db_model, prop_name).ilike(
-                                    f"%{str(value)}%"
-                                )
+                                getattr(self.db_model, prop_name) == value
                             )
 
                     query = query.filter(or_(*or_conditions))
@@ -235,9 +227,7 @@ class CRUD:
                         or_conditions = []
                         for v in value:
                             or_conditions.append(
-                                getattr(self.db_model, field).like(
-                                    f"%{str(v)}%"
-                                )
+                                getattr(self.db_model, field) == v
                             )
 
                         query = query.filter(or_(*or_conditions))
@@ -256,11 +246,9 @@ class CRUD:
                                 ~getattr(self.db_model, field).has()
                             )
                     else:
-                        # Apply a LIKE filter for string matching
+                        # Apply an equality filter for string matching
                         query = query.filter(
-                            getattr(self.db_model, field).like(
-                                f"%{str(value)}%"
-                            )
+                            getattr(self.db_model, field) == value
                         )
 
         count = await session.exec(query)

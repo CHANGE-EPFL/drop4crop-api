@@ -65,6 +65,10 @@ class LayerBase(SQLModel):
         default=True,
         nullable=False,
     )
+    style_name: str | None = Field(
+        default=None,
+        nullable=True,
+    )
 
     last_updated: datetime.datetime = Field(
         default_factory=datetime.datetime.now,
@@ -110,7 +114,7 @@ class LayerRead(SQLModel):
 class LayerReadAuthenticated(LayerBase):
     id: UUID
     enabled: bool
-    created_at: datetime.datetime | None = None
+    created_at: str | None = None
     style_name: str | None = None
 
 
@@ -120,3 +124,8 @@ class LayerCreate(LayerBase):
 
 class LayerUpdate(LayerBase):
     style_name: str | None = None
+
+
+class LayerUpdateBatch(SQLModel):
+    ids: list[UUID]
+    data: Any

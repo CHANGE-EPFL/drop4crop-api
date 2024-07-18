@@ -19,6 +19,7 @@ from app.crud import CRUD
 from itertools import product
 import httpx
 from app.config import config
+from app.layers.geoserver import update_style_in_geoserver
 
 router = APIRouter()
 
@@ -61,19 +62,6 @@ async def get_all_authenticated(
     read_layers = []
     for layer in res:
         obj = LayerReadAuthenticated.model_validate(layer)
-        async with httpx.AsyncClient() as client:
-            # Get layer styling information from geoserver
-            response = await client.get(
-                f"{config.GEOSERVER_URL}/rest/layers/"
-                f"{config.GEOSERVER_WORKSPACE}"
-                f":{layer.layer_name}.json",
-                auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
-            )
-            if response.status_code == 200:
-                obj.style_name = response.json()["layer"]["defaultStyle"][
-                    "name"
-                ]
-                obj.created_at = response.json()["layer"]["dateCreated"]
 
         read_layers.append(obj)
 
@@ -128,6 +116,7 @@ async def create_one(
 async def update_one(
     layer_id: UUID,
     layer_update: LayerUpdate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> Layer:
     """Update a single layer"""
@@ -136,38 +125,16 @@ async def update_one(
 
     update_data = layer_update.model_dump(exclude_unset=True)
 
-    # If the style_name is updated, update the style in geoserver but first
-    # check that the style exists before trying
+    # If the style_name is updated, update the style in geoserver
     if "style_name" in update_data:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{config.GEOSERVER_URL}/rest/styles/{update_data['style_name']}.json",
-                auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
-            )
-            if response.status_code > 299:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=response.text,
-                )
-
-            # Update the style in geoserver
-            response = await client.put(
-                f"{config.GEOSERVER_URL}/rest/layers/{config.GEOSERVER_WORKSPACE}"
-                f":{obj.layer_name}",
-                auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
-                json={
-                    "layer": {
-                        "defaultStyle": {
-                            "name": update_data["style_name"],
-                        }
-                    }
-                },
-            )
-            if response.status_code > 299:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=response.text,
-                )
+        background_tasks.add_task(
+            update_style_in_geoserver,
+            layer_id,
+            session,
+            obj.layer_name,
+            update_data["style_name"],
+        )
+        update_data.pop("style_name")
 
     obj.sqlmodel_update(update_data)
 

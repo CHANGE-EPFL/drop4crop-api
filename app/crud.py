@@ -160,7 +160,9 @@ class CRUD:
 
         if len(range):
             start, end = range
-            query = query.offset(start).limit(end - start)
+            query = query.offset(start).limit(
+                (end - start) + 1  # Account for offset
+            )
 
         res = await session.exec(query)
 

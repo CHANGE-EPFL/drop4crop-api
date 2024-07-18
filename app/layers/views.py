@@ -2,9 +2,11 @@ from app.layers.models import (
     Layer,
     LayerCreate,
     LayerRead,
+    LayerUpdate,
     LayerReadAuthenticated,
     LayerVariables,
     LayerGroupsRead,
+    LayerUpdateBatch,
 )
 from app.db import get_session, AsyncSession
 from fastapi import (
@@ -125,6 +127,28 @@ async def create_layer(
     return obj
 
 
+@router.put("/batch", response_model=list[LayerReadAuthenticated])
+async def update_many(
+    layer_batch: LayerUpdateBatch,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> list[LayerReadAuthenticated]:
+    """Update plots from a list of PlotUpdate objects"""
+
+    objs = []
+    for id in layer_batch.ids:
+        update_obj = LayerUpdate.model_validate(layer_batch.data)
+        obj = await update_one(
+            layer_id=id,
+            layer_update=update_obj,
+            session=session,
+            background_tasks=background_tasks,
+        )
+        objs.append(obj)
+
+    return objs
+
+
 @router.put("/{layer_id}", response_model=LayerReadAuthenticated)
 async def update_layer(
     updated_layer: Layer = Depends(update_one),
@@ -161,6 +185,7 @@ async def delete_layer(
     """Delete a layer by id"""
 
     id = layer.id
+
     # First delete the coveragestore from geoserver
     # Then delete the layer from the database
     async with httpx.AsyncClient() as client:

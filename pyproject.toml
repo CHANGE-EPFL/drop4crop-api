@@ -17,6 +17,7 @@ sqlmodel = "^0.0.19"
 alembic = "^1.13.2"
 python-keycloak = "^3.7.0"
 tenacity = "^8.5.0"
+gdal = "3.9.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.3"

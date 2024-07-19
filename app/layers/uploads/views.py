@@ -12,6 +12,10 @@ from uuid import uuid4
 from typing import Any, Annotated
 from collections import defaultdict
 from app.auth import require_admin, User
+from app.db import get_session, AsyncSession
+from sqlmodel import select
+from app.layers.models import Layer
+
 
 router = APIRouter()
 
@@ -24,7 +28,6 @@ async def upload_file(
     request: Request,
     upload_length: int = Header(..., alias="Upload-Length"),
     content_type: str = Header(..., alias="Content-Type"),
-    transect_id: str = Header(None, alias="Transect-Id"),
     *,
     background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
@@ -39,9 +42,10 @@ async def upload_file(
             "parts": [],
             "data": bytearray(upload_length),
             "user": user,
-            "transect_id": transect_id,
             "content_type": content_type,
         }
+
+        print(f"Created object {object_id} with {upload_length} bytes")
 
     except Exception as e:
         print(e)
@@ -65,14 +69,61 @@ async def upload_chunk(
     *,
     background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
 ):
     """Handle chunked file upload"""
 
     # Clean " from patch
     patch = patch.replace('"', "")
+    # Extract filename into variables. Structure is:
+    # {crop}_{watermodel}_{climatemodel}_{scenario}_{variable}_{year}.tif
+    try:
+        crop, water_model, climate_model, scenario, variable, year = (
+            # Remove file extension then split by _
+            upload_name.lower()
+            .split(".")[0]
+            .split("_")
+        )
+        print(crop, water_model, climate_model, scenario, variable, year)
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Invalid filename, must be in the format "
+                "{crop}_{watermodel}_{climatemodel}_{scenario}_"
+                "{variable}_{year}.tif",
+            },
+        )
+
+    # Query DB to check if the layers exist, if they do do not accept the
+    query = select(Layer).where(
+        Layer.crop == crop,
+        Layer.water_model == water_model,
+        Layer.climate_model == climate_model,
+        Layer.scenario == scenario,
+        Layer.variable == variable,
+        Layer.year == int(year),
+    )
+
+    layer = await session.exec(query)
+    layer = layer.one_or_none()
+
+    if layer:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Layer already exists",
+            },
+        )
 
     # Retrieve the object from in-memory storage
     if patch not in file_storage:
+        print(
+            f"Layer exists ! Crop: {crop}, Water Model: {water_model}, "
+            f"Climate Model: {climate_model}, Scenario: {scenario}, "
+            f"Variable: {variable}, Year: {year}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Object not found",
@@ -123,6 +174,7 @@ async def upload_chunk(
                 "parts_count": len(object["parts"]),
             }
             print(file_info)
+            print("LET'S UPLOAD TO GEOSERVER HERE")
             return file_info
 
     except Exception as e:

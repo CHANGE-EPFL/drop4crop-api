@@ -451,6 +451,19 @@ typer = ">=0.12.3"
 standard = ["fastapi", "uvicorn[standard] (>=0.15.0)"]
 
 [[package]]
+name = "gdal"
+version = "3.9.0"
+description = "GDAL: Geospatial Data Abstraction Library"
+optional = false
+python-versions = ">=3.8.0"
+files = [
+    {file = "GDAL-3.9.0.tar.gz", hash = "sha256:7c2a857cf903b9921357e0dfae593f2fe6f7dcd2ea42600577d5fc3c864fb066"},
+]
+
+[package.extras]
+numpy = ["numpy (>1.0.0)"]
+
+[[package]]
 name = "greenlet"
 version = "3.0.3"
 description = "Lightweight in-process concurrent programming"
@@ -1753,4 +1766,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "fad84cebab04ea91cc55d4d0acc97bf350a4ca6f2a8ab31197d16064180efdb5"
+content-hash = "809b149731917ce4a379a852ff356a14ab99c6c23a6433b048d7ba10c6e1a126"

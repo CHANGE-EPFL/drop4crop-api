@@ -6,6 +6,8 @@ from app.db import AsyncSession
 from tenacity import retry, stop_after_attempt, wait_fixed
 from uuid import UUID
 from sqlmodel import select
+from osgeo import gdal, gdalconst
+import os
 
 
 async def get_layer_style(layer_name: str) -> str:
@@ -82,3 +84,70 @@ async def update_local_db_with_layer_style(
 
     session.add(obj)
     await session.commit()
+
+
+def convert_to_cog_in_memory(input_bytes: bytes) -> bytes:
+    """Convert in-memory GeoTIFF to Cloud Optimized GeoTIFF in memory using GDAL"""
+
+    print("Converting to COG")
+    # Create an in-memory file from the input bytes
+    input_filename = "/vsimem/input.tif"
+    gdal.FileFromMemBuffer(input_filename, input_bytes)
+
+    # Output in-memory file for the COG
+    output_filename = "/vsimem/output-cog.tif"
+    options = gdal.TranslateOptions(
+        format="COG", creationOptions=["OVERVIEWS=NONE"]
+    )
+    gdal.Translate(output_filename, input_filename, options=options)
+
+    # Read the in-memory COG file back to a byte array
+    output_ds = gdal.VSIFOpenL(output_filename, "rb")
+    gdal.VSIFSeekL(output_ds, 0, os.SEEK_END)
+    size = gdal.VSIFTellL(output_ds)
+    gdal.VSIFSeekL(output_ds, 0, os.SEEK_SET)
+    cog_bytes = gdal.VSIFReadL(1, size, output_ds)
+    gdal.VSIFCloseL(output_ds)
+
+    # Clean up in-memory files
+    gdal.Unlink(input_filename)
+    gdal.Unlink(output_filename)
+    print("COG conversion successful")
+
+    return cog_bytes
+
+
+async def upload_bytes(data: bytes):
+    """Async bytes generator to yield byte content to AsyncClient"""
+    yield data
+
+
+async def upload_cog_to_geoserver(cog_bytes: bytes, store_name: str):
+    """Upload COG to GeoServer"""
+    url = f"{config.GEOSERVER_URL}/rest/workspaces/{config.GEOSERVER_WORKSPACE}/coveragestores/{store_name}/file.geotiff"
+    headers = {"Content-type": "image/tiff"}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.put(
+            url,
+            headers=headers,
+            content=upload_bytes(cog_bytes),
+            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+        )
+        print("STATUS CODE", response.status_code)
+        if response.status_code == 201:
+            print(f"Successfully uploaded and published COG for {store_name}")
+        else:
+            print(
+                f"Failed to upload and publish COG for {store_name}: {response.content}"
+            )
+            response.raise_for_status()
+
+
+async def process_and_upload_geotiff(input_bytes: bytes, store_name: str):
+    """Process in-memory GeoTIFF to COG and upload to GeoServer"""
+    try:
+        cog_bytes = convert_to_cog_in_memory(input_bytes)
+        await upload_cog_to_geoserver(cog_bytes, store_name)
+    except Exception as e:
+        print(f"Exception occurred for {store_name}: {e}")

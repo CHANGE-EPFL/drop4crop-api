@@ -15,7 +15,7 @@ from app.auth import require_admin, User
 from app.db import get_session, AsyncSession
 from sqlmodel import select
 from app.layers.models import Layer
-
+from app.geoserver.services import process_and_upload_geotiff
 
 router = APIRouter()
 
@@ -175,6 +175,14 @@ async def upload_chunk(
             }
             print(file_info)
             print("LET'S UPLOAD TO GEOSERVER HERE")
+            layer_name = (
+                f"{crop}_{water_model}_{climate_model}_"
+                f"{scenario}_{variable}_{year}"
+            )
+            res = await process_and_upload_geotiff(
+                object["data"],
+                layer_name,
+            )
             return file_info
 
     except Exception as e:

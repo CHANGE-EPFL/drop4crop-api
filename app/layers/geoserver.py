@@ -62,3 +62,23 @@ async def update_style_in_geoserver(
         obj.style_name = updated_layer
         session.add(obj)
         await session.commit()
+
+
+async def update_local_db_with_layer_style(
+    layer_id: UUID,
+    session: AsyncSession,
+) -> None:
+    """Update the layer style in the database from geoserver
+
+    As we keep the style name in the database, we need a way to fix it if
+    something pushes it out of sync
+    """
+
+    res = await session.exec(select(Layer).where(Layer.id == layer_id))
+    obj = res.one_or_none()
+
+    # Get style name from geoserver
+    obj.style_name = await get_layer_style(layer_name=obj.layer_name)
+
+    session.add(obj)
+    await session.commit()

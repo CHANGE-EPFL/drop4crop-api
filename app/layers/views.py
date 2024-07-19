@@ -30,8 +30,36 @@ from sqlmodel import select
 import httpx
 from app.config import config
 from app.auth import require_admin, get_user_info, User
+from app.layers.geoserver import update_local_db_with_layer_style
 
 router = APIRouter()
+
+
+@router.post("/sync_styles", response_model=bool)
+async def sync_style_from_geoserver_to_all_layers(
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> bool:
+    """Syncs the style from geoserver to all layers"""
+
+    # Get all layers
+    query = select(
+        Layer,
+        Layer.id,
+    )
+    res = await session.exec(query)
+    layers = res.all()
+
+    for layer in layers:
+        # Get the style from geoserver
+        background_tasks.add_task(
+            update_local_db_with_layer_style,
+            layer_id=layer.id,
+            session=session,
+        )
+
+    return True
 
 
 @router.get("/groups", response_model=LayerGroupsRead)
@@ -91,7 +119,7 @@ async def get_all_map_layers(
 @router.get("/{layer_id}", response_model=LayerReadAuthenticated)
 async def get_layer(
     obj: CRUD = Depends(get_one),
-    user: User = Depends(get_user_info),
+    user: User = Depends(require_admin),
 ) -> LayerReadAuthenticated:
     """Get a layer by id"""
 
@@ -132,6 +160,7 @@ async def update_many(
     layer_batch: LayerUpdateBatch,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> list[LayerReadAuthenticated]:
     """Update plots from a list of PlotUpdate objects"""
 

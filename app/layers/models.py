@@ -70,6 +70,15 @@ class LayerBase(SQLModel):
         nullable=True,
     )
 
+    uploaded_at: datetime.datetime = Field(
+        default_factory=datetime.datetime.now,
+        title="Uploaded At",
+        description="Date and time when the record was uploaded",
+        sa_column_kwargs={
+            "default": func.now(),
+        },
+    )
+
     last_updated: datetime.datetime = Field(
         default_factory=datetime.datetime.now,
         title="Last Updated",

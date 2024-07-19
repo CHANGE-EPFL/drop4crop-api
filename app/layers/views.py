@@ -16,7 +16,6 @@ from fastapi import (
     Query,
     BackgroundTasks,
 )
-from uuid import UUID
 from app.crud import CRUD
 from app.layers.services import (
     get_count,
@@ -29,10 +28,14 @@ from typing import Any
 from sqlmodel import select
 import httpx
 from app.config import config
-from app.auth import require_admin, get_user_info, User
-from app.layers.geoserver import update_local_db_with_layer_style
+from app.auth import require_admin, User
+from app.geoserver.services import update_local_db_with_layer_style
+from app.layers.uploads.views import router as uploads_router
+
 
 router = APIRouter()
+
+router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
 
 
 @router.post("/sync_styles", response_model=bool)

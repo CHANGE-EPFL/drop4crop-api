@@ -19,7 +19,7 @@ from app.crud import CRUD
 from itertools import product
 import httpx
 from app.config import config
-from app.layers.geoserver import update_style_in_geoserver
+from app.geoserver.services import update_style_in_geoserver
 
 router = APIRouter()
 

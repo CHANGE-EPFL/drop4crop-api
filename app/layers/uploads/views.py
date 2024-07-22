@@ -111,7 +111,7 @@ async def upload_chunk(
 
     if layer:
         raise HTTPException(
-            status_code=400,
+            status_code=409,
             detail={
                 "message": "Layer already exists",
             },
@@ -173,17 +173,40 @@ async def upload_chunk(
                 "upload_name": upload_name,
                 "parts_count": len(object["parts"]),
             }
-            print(file_info)
-            print("LET'S UPLOAD TO GEOSERVER HERE")
+
             layer_name = (
                 f"{crop}_{water_model}_{climate_model}_"
                 f"{scenario}_{variable}_{year}"
             )
-            res = await process_and_upload_geotiff(
-                object["data"],
-                layer_name,
+            try:
+                await process_and_upload_geotiff(
+                    object["data"],
+                    layer_name,
+                )
+            except Exception as e:
+                print(e)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload file: {e}",
+                )
+
+            # Create database object
+            layer = Layer(
+                crop=crop,
+                water_model=water_model,
+                climate_model=climate_model,
+                scenario=scenario,
+                variable=variable,
+                year=int(year),
+                layer_name=layer_name,
             )
-            return file_info
+
+            # Save to DB
+            session.add(layer)
+            await session.commit()
+            await session.refresh(layer)
+
+            return layer
 
     except Exception as e:
         print(e)

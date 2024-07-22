@@ -19,7 +19,11 @@ from app.crud import CRUD
 from itertools import product
 import httpx
 from app.config import config
-from app.geoserver.services import update_style_in_geoserver
+from app.geoserver.services import (
+    update_style_in_geoserver,
+    delete_coveragestore,
+    delete_coveragestore_files,
+)
 
 router = APIRouter()
 
@@ -71,20 +75,8 @@ async def get_all_authenticated(
 async def get_one(
     layer_id: UUID,
     session: AsyncSession = Depends(get_session),
-) -> LayerReadAuthenticated:
+) -> LayerRead:
     res = await crud.get_model_by_id(model_id=layer_id, session=session)
-    res = LayerReadAuthenticated.model_validate(res)
-    # Get layer information from geoserver
-    async with httpx.AsyncClient() as client:
-        # Get layer styling information from geoserver
-        response = await client.get(
-            f"{config.GEOSERVER_URL}/rest/layers/{config.GEOSERVER_WORKSPACE}"
-            f":{res.layer_name}.json",
-            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
-        )
-        if response.status_code == 200:
-            res.style_name = response.json()["layer"]["defaultStyle"]["name"]
-            res.created_at = response.json()["layer"]["dateCreated"]
 
     if not res:
         raise HTTPException(
@@ -147,91 +139,30 @@ async def update_one(
     return obj
 
 
-def get_layers() -> dict[tuple[str, str, str, str, str, int], LayerRead]:
-    crops = [
-        "barley",
-        "potato",
-        "rice",
-        "soy",
-        "sugarcane",
-        "wheat",
-    ]
-    water_models = [
-        # "cwatm",
-        # "h08",
-        # "lpjml",
-        # "matsiro",
-        "pcr-globwb",
-        "watergap2",
-    ]
-    climate_models = [
-        "gfdl-esm2m",
-        "hadgem2-es",
-        "ipsl-cm5a-lr",
-        "miroc5",
-    ]
-    scenarios = [
-        "historical",
-        "rcp26",
-        "rcp60",
-        "rcp85",
-    ]
-    variables = [
-        # "vwc_sub",
-        # "vwcb_sub",
-        # "vwcg_sub",
-        # "vwcg_perc",
-        # "vwcb_perc",
-        "wf",
-        "wfb",
-        "wfg",
-        "etb",
-        "etg",
-        "rb",
-        "rg",
-        "wdb",
-        "wdg",
-    ]
-    years = list(range(2000, 2100, 10))
+async def delete_one(
+    layer_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> UUID:
+    """Delete a single layer"""
+    obj = await crud.get_model_by_id(model_id=layer_id, session=session)
 
-    combinations = product(
-        crops, water_models, climate_models, scenarios, variables, years
-    )
-    layers = {
-        (
-            crop,
-            water_model,
-            climate_model,
-            scenario,
-            variable,
-            year,
-        ): LayerRead(
-            id=uuid4(),
-            crop=crop,
-            water_model=water_model,
-            climate_model=climate_model,
-            scenario=scenario,
-            variable=variable,
-            year=year,
-            layer_name=f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}".lower(),
+    if not obj:
+        raise HTTPException(
+            status_code=404, detail=f"ID: {layer_id} not found"
         )
-        for crop, water_model, climate_model, scenario, variable, year in combinations
-    }
-    return layers
+    try:
+        await delete_coveragestore(obj.layer_name)
+        await delete_coveragestore_files(obj.layer_name)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Error deleting layer from geoserver. ",
+                "error": str(e),
+            },
+        )
 
-
-async def create_layers(session: AsyncSession):
-    layers = get_layers()
-
-    # Upload all results to the database
-    for key, value in layers.items():
-        layer_dict = value.model_dump()
-        layer_dict.pop("id")
-        obj = Layer.model_validate(layer_dict)
-
-        # print("OBJECT", obj)
-        session.add(obj)
-
+    await session.delete(obj)
     await session.commit()
 
-    return
+    return layer_id

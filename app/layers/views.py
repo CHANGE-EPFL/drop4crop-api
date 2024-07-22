@@ -23,14 +23,20 @@ from app.layers.services import (
     get_one,
     create_one,
     update_one,
+    delete_one,
 )
 from typing import Any
 from sqlmodel import select
 import httpx
 from app.config import config
 from app.auth import require_admin, User
-from app.geoserver.services import update_local_db_with_layer_style
+from app.geoserver.services import (
+    update_local_db_with_layer_style,
+    delete_coveragestore,
+    delete_coveragestore_files,
+)
 from app.layers.uploads.views import router as uploads_router
+from uuid import UUID
 
 
 router = APIRouter()
@@ -121,10 +127,29 @@ async def get_all_map_layers(
 
 @router.get("/{layer_id}", response_model=LayerReadAuthenticated)
 async def get_layer(
-    obj: CRUD = Depends(get_one),
+    obj: LayerRead = Depends(get_one),
     user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
 ) -> LayerReadAuthenticated:
     """Get a layer by id"""
+
+    res = LayerReadAuthenticated.model_validate(obj)
+
+    # Get layer information from geoserver
+    async with httpx.AsyncClient() as client:
+        # Get layer styling information from geoserver
+        response = await client.get(
+            f"{config.GEOSERVER_URL}/rest/layers/{config.GEOSERVER_WORKSPACE}"
+            f":{res.layer_name}.json",
+            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+        )
+        if response.status_code == 200:
+            res.style_name = response.json()["layer"]["defaultStyle"]["name"]
+            res.created_at = response.json()["layer"]["dateCreated"]
+
+    if res.style_name != obj.style_name:
+        # Update the style in the database
+        update_local_db_with_layer_style(layer_id=res.id, session=session)
 
     return obj
 
@@ -191,50 +216,28 @@ async def update_layer(
     return updated_layer
 
 
-# @router.delete("/batch", response_model=list[str])
-# async def delete_batch(
-#     ids: list[UUID],
-#     session: AsyncSession = Depends(get_session),
-# ) -> list[str]:
-#     """Delete by a list of ids"""
+@router.delete("/batch", response_model=list[UUID])
+async def delete_batch(
+    ids: list[UUID],
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> list[UUID]:
+    """Delete by a list of ids"""
 
-#     for id in ids:
-#         obj = await crud.get_model_by_id(model_id=id, session=session)
-#         if obj:
-#             await session.delete(obj)
+    deleted_ids = []
+    for id in ids:
+        # Delete the layer from geoserver
+        background_tasks.add_task(delete_one, id, session)
+        deleted_ids.append(id)
 
-#     await session.commit()
-
-#     return [str(obj_id) for obj_id in ids]
+    return deleted_ids
 
 
 @router.delete("/{layer_id}")
 async def delete_layer(
-    layer: LayerRead = Depends(get_one),
-    session: AsyncSession = Depends(get_session),
+    layer: UUID = Depends(delete_one),
     user: User = Depends(require_admin),
-) -> str:
+) -> Any:
     """Delete a layer by id"""
 
-    id = layer.id
-
-    # First delete the coveragestore from geoserver
-    # Then delete the layer from the database
-    async with httpx.AsyncClient() as client:
-        url = (
-            f"{config.GEOSERVER_URL}/rest/workspaces/"
-            f"{config.GEOSERVER_WORKSPACE}/coveragestores/{layer.layer_name}"
-        )
-        auth = (config.GEOSERVER_USER, config.GEOSERVER_PASSWORD)
-        res = await client.delete(url, auth=auth, params={"recurse": "true"})
-
-    if res.status_code > 299:
-        raise HTTPException(
-            status_code=res.status_code,
-            detail=res.text,
-        )
-
-    await session.delete(layer)
-    await session.commit()
-
-    return id
+    return layer

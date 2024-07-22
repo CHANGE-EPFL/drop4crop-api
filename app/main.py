@@ -47,7 +47,7 @@ def get_health() -> HealthCheck:
 
 @app.get(f"{config.API_PREFIX}/config/geoserver", response_model=str)
 def get_geoserver_config() -> str:
-    return config.GEOSERVER_URL
+    return config.GEOSERVER_URL + "/drop4crop/wms"
 
 
 app.include_router(

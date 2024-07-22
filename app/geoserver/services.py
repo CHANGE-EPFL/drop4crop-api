@@ -3,13 +3,14 @@ import httpx
 from app.config import config
 from app.layers.models import Layer
 from app.db import AsyncSession
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential
 from uuid import UUID
 from sqlmodel import select
 from osgeo import gdal, gdalconst
 import os
 
 
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
 async def get_layer_style(layer_name: str) -> str:
     """Get layer style from geoserver"""
 
@@ -25,7 +26,7 @@ async def get_layer_style(layer_name: str) -> str:
             return response.json()["layer"]["defaultStyle"]["name"]
 
 
-@retry(stop=stop_after_attempt(25), wait=wait_fixed(2))
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
 async def update_style_in_geoserver(
     layer_id: UUID,
     session: AsyncSession,
@@ -87,7 +88,7 @@ async def update_local_db_with_layer_style(
 
 
 def convert_to_cog_in_memory(input_bytes: bytes) -> bytes:
-    """Convert in-memory GeoTIFF to Cloud Optimized GeoTIFF in memory using GDAL"""
+    """Convert in-memory GeoTIFF to Cloud Optimized GeoTIFF using GDAL"""
 
     print("Converting to COG")
     # Create an in-memory file from the input bytes
@@ -122,9 +123,14 @@ async def upload_bytes(data: bytes):
     yield data
 
 
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
 async def upload_cog_to_geoserver(cog_bytes: bytes, store_name: str):
     """Upload COG to GeoServer"""
-    url = f"{config.GEOSERVER_URL}/rest/workspaces/{config.GEOSERVER_WORKSPACE}/coveragestores/{store_name}/file.geotiff"
+    url = (
+        f"{config.GEOSERVER_URL}/rest/workspaces"
+        f"/{config.GEOSERVER_WORKSPACE}/coveragestores"
+        f"/{store_name}/file.geotiff"
+    )
     headers = {"Content-type": "image/tiff"}
 
     async with httpx.AsyncClient() as client:
@@ -139,7 +145,8 @@ async def upload_cog_to_geoserver(cog_bytes: bytes, store_name: str):
             print(f"Successfully uploaded and published COG for {store_name}")
         else:
             print(
-                f"Failed to upload and publish COG for {store_name}: {response.content}"
+                f"Failed to upload and publish COG for {store_name}: "
+                f"{response.content}"
             )
             response.raise_for_status()
 
@@ -151,3 +158,68 @@ async def process_and_upload_geotiff(input_bytes: bytes, store_name: str):
         await upload_cog_to_geoserver(cog_bytes, store_name)
     except Exception as e:
         print(f"Exception occurred for {store_name}: {e}")
+
+
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
+async def delete_coveragestore(
+    store_name: str,
+) -> None:
+    """Delete coveragestore from geoserver"""
+
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(
+            f"{config.GEOSERVER_URL}/rest/workspaces/"
+            f"{config.GEOSERVER_WORKSPACE}/coveragestores/"
+            f"{store_name}",
+            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+            params={"purge": "all", "recurse": "true"},
+        )
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            if response.status_code == 404:
+                print(
+                    f"Coveragestore {config.GEOSERVER_WORKSPACE}:{store_name} "
+                    f"not found"
+                )
+                return
+            else:
+                raise e
+
+    print(f"Deleted coveragestore {config.GEOSERVER_WORKSPACE}:{store_name}")
+
+
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
+async def delete_coveragestore_files(
+    store_name: str,
+) -> None:
+    """Delete the files associated with a coveragestore"""
+    # Now delete the files. Geoserver doesn't do this in the above call,
+    # so we need to do it manually. The assumption here is that the
+    # folder name is the same as the store name
+    async with httpx.AsyncClient() as client:
+
+        response = await client.delete(
+            f"{config.GEOSERVER_URL}/rest/resource/data/"
+            f"{config.GEOSERVER_WORKSPACE}/{store_name}",
+            auth=(config.GEOSERVER_USER, config.GEOSERVER_PASSWORD),
+        )
+
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            if response.status_code == 404:
+                print(
+                    f"Files for coveragestore {config.GEOSERVER_WORKSPACE}:"
+                    f"{store_name} not found"
+                )
+                return
+            else:
+                raise e
+
+    print(
+        f"Deleted files for coveragestore :"
+        f"{config.GEOSERVER_WORKSPACE}:{store_name}"
+    )
+
+    return

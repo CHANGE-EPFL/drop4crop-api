@@ -126,12 +126,32 @@ class Layer(LayerBase, table=True):
         link_model=LayerCountryLink,
         sa_relationship_kwargs={"lazy": "selectin"},
     )
+    country_values: list[LayerCountryLink] = Relationship(
+        back_populates="layer",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+
+
+class CountrySimple(SQLModel):
+    """Without geometry"""
+
+    id: UUID
+    name: str
+    iso_a2: str
+    iso_a3: str
+    iso_n3: int
+
+
+class CountryValue(SQLModel):
+    value: float | None = None
+    country: CountrySimple | None = None
 
 
 class LayerRead(SQLModel):
     layer_name: str | None
     global_average: float | None
-    countries: list[Any] = []
+    countries: list[CountrySimple] = []
+    country_values: list[CountryValue] = []
 
 
 class LayerReadAuthenticated(LayerBase):

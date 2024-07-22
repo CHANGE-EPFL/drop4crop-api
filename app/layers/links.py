@@ -1,5 +1,10 @@
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, Relationship
 from uuid import UUID
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.layers.models import Layer
+    from app.countries.models import Country
 
 
 class LayerCountryLink(SQLModel, table=True):
@@ -17,4 +22,13 @@ class LayerCountryLink(SQLModel, table=True):
         default=None,
         nullable=True,
         index=True,
+    )
+
+    layer: "Layer" = Relationship(
+        back_populates="country_values",
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+    country: "Country" = Relationship(
+        back_populates="layer_values",
+        sa_relationship_kwargs={"lazy": "selectin"},
     )

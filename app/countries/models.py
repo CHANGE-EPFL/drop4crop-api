@@ -48,4 +48,10 @@ class Country(SQLModel, table=True):
     layers: list["Layer"] = Relationship(
         back_populates="countries",
         link_model=LayerCountryLink,
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
+
+    layer_values: list[LayerCountryLink] = Relationship(
+        back_populates="country",
+        sa_relationship_kwargs={"lazy": "selectin"},
     )

@@ -18,6 +18,10 @@ alembic = "^1.13.2"
 python-keycloak = "^3.7.0"
 tenacity = "^8.5.0"
 gdal = "3.9.0"
+geoalchemy2 = "^0.15.2"
+shapely = "^2.0.5"
+pyproj = "^3.6.1"
+geos = "^0.2.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.3"

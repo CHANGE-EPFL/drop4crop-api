@@ -1,10 +1,18 @@
-from sqlmodel import Field, SQLModel, Column
-from typing import Any
+from sqlmodel import Field, SQLModel, Column, UniqueConstraint, Relationship
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4, UUID
 from geoalchemy2 import Geometry
+from app.layers.links import LayerCountryLink
+
+if TYPE_CHECKING:
+    from app.layers.models import Layer
 
 
 class Country(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("id"),
+        UniqueConstraint("name"),
+    )
     iterator: int = Field(
         default=None,
         nullable=False,
@@ -35,4 +43,9 @@ class Country(SQLModel, table=True):
     )
     geom: Any = Field(
         default=None, sa_column=Column(Geometry("MULTIPOLYGON", srid=4326))
+    )
+
+    layers: list["Layer"] = Relationship(
+        back_populates="countries",
+        link_model=LayerCountryLink,
     )

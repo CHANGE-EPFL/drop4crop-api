@@ -1,10 +1,12 @@
-from sqlmodel import SQLModel, Field, UniqueConstraint
+from sqlmodel import SQLModel, Field, UniqueConstraint, Relationship
 from uuid import uuid4, UUID
 from sqlalchemy.sql import func
 import datetime
 from pydantic import constr
 import enum
-from typing import Any
+from typing import Any, TYPE_CHECKING
+from app.layers.links import LayerCountryLink
+from app.countries.models import Country
 
 
 class LayerVariables(str, enum.Enum):
@@ -69,6 +71,11 @@ class LayerBase(SQLModel):
         default=None,
         nullable=True,
     )
+    global_average: float | None = Field(
+        default=None,
+        index=True,
+        nullable=True,
+    )
 
     uploaded_at: datetime.datetime = Field(
         default_factory=datetime.datetime.now,
@@ -114,10 +121,17 @@ class Layer(LayerBase, table=True):
         index=True,
         nullable=False,
     )
+    countries: list[Country] = Relationship(
+        back_populates="layers",
+        link_model=LayerCountryLink,
+        sa_relationship_kwargs={"lazy": "selectin"},
+    )
 
 
 class LayerRead(SQLModel):
     layer_name: str | None
+    global_average: float | None
+    countries: list[Any] = []
 
 
 class LayerReadAuthenticated(LayerBase):

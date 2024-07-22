@@ -10,6 +10,7 @@ from sqlmodel import SQLModel
 from geoalchemy2 import alembic_helpers
 from app.layers.models import Layer  # noqa
 from app.countries.models import Country  # noqa
+from app.layers.links import LayerCountryLink  # noqa
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

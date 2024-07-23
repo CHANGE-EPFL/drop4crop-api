@@ -8,23 +8,7 @@ if TYPE_CHECKING:
     from app.layers.models import Layer
 
 
-class Country(SQLModel, table=True):
-    __table_args__ = (
-        UniqueConstraint("id"),
-        UniqueConstraint("name"),
-    )
-    iterator: int = Field(
-        default=None,
-        nullable=False,
-        primary_key=True,
-        index=True,
-    )
-    id: UUID = Field(
-        default_factory=uuid4,
-        index=True,
-        nullable=False,
-    )
-
+class CountryBase(SQLModel):
     name: str = Field(
         index=True,
         nullable=False,
@@ -41,14 +25,28 @@ class Country(SQLModel, table=True):
         index=True,
         nullable=False,
     )
+
     geom: Any = Field(
-        default=None, sa_column=Column(Geometry("MULTIPOLYGON", srid=4326))
+        default=None,
+        sa_column=Column(Geometry("MULTIPOLYGON", srid=4326)),
     )
 
-    layers: list["Layer"] = Relationship(
-        back_populates="countries",
-        link_model=LayerCountryLink,
-        sa_relationship_kwargs={"lazy": "selectin"},
+
+class Country(CountryBase, table=True):
+    __table_args__ = (
+        UniqueConstraint("id"),
+        UniqueConstraint("name"),
+    )
+    iterator: int = Field(
+        default=None,
+        nullable=False,
+        primary_key=True,
+        index=True,
+    )
+    id: UUID = Field(
+        default_factory=uuid4,
+        index=True,
+        nullable=False,
     )
 
     layer_values: list[LayerCountryLink] = Relationship(

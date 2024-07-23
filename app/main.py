@@ -6,6 +6,7 @@ from app.models.health import HealthCheck
 from app.layers.views import router as layers_router
 from app.styles.views import router as styles_router
 from app.users.views import router as users_router
+from app.countries.views import router as countries_router
 
 app = FastAPI()
 
@@ -64,4 +65,9 @@ app.include_router(
     users_router,
     prefix=f"{config.API_PREFIX}/users",
     tags=["users"],
+)
+app.include_router(
+    countries_router,
+    prefix=f"{config.API_PREFIX}/countries",
+    tags=["countries"],
 )

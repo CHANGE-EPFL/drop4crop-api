@@ -121,11 +121,7 @@ class Layer(LayerBase, table=True):
         index=True,
         nullable=False,
     )
-    countries: list[Country] = Relationship(
-        back_populates="layers",
-        link_model=LayerCountryLink,
-        sa_relationship_kwargs={"lazy": "selectin"},
-    )
+
     country_values: list[LayerCountryLink] = Relationship(
         back_populates="layer",
         sa_relationship_kwargs={"lazy": "selectin"},
@@ -150,7 +146,6 @@ class CountryValue(SQLModel):
 class LayerRead(SQLModel):
     layer_name: str | None
     global_average: float | None
-    countries: list[CountrySimple] = []
     country_values: list[CountryValue] = []
 
 

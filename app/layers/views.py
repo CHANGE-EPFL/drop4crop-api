@@ -15,6 +15,7 @@ from fastapi import (
     APIRouter,
     Query,
     BackgroundTasks,
+    Request,
 )
 from app.crud import CRUD
 from app.layers.services import (
@@ -37,11 +38,20 @@ from app.geoserver.services import (
 )
 from app.layers.uploads.views import router as uploads_router
 from uuid import UUID
-
+from fastapi.responses import Response
+import aioboto3
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+from fastapi.responses import JSONResponse
+from rasterio.io import MemoryFile
+import rasterio
+from app.s3.services import get_s3
 
 router = APIRouter()
 
 router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
+
+
+TEMP_LAYERNAME: str = "barley_yielf_cog"
 
 
 @router.post("/sync_styles", response_model=bool)
@@ -123,6 +133,146 @@ async def get_all_map_layers(
     res = await session.exec(query)
 
     return res.all()
+
+
+@router.get("/{layer_id}/value")
+async def get_pixel_value(
+    layer_id: str,
+    lat: float,
+    lon: float,
+    s3: aioboto3.Session = Depends(get_s3),
+):
+
+    try:
+        s3_response = await s3.get_object(
+            Bucket=config.S3_BUCKET_ID,
+            Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+        )
+        content = await s3_response["Body"].read()
+
+        with MemoryFile(content) as memfile:
+            with memfile.open() as dataset:
+                # Convert lat/lon to dataset coordinates
+                row, col = dataset.index(lon, lat)
+                rows, cols = rasterio.transform.rowcol(
+                    dataset.transform, [lon], [lat]
+                )
+                # Get the pixel value at coordinates
+                value = dataset.read(1)[row, col]
+
+                return JSONResponse(content={"value": value})
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{layer_id}/cog")
+async def get_layer_cog(
+    # obj: LayerRead = Depends(get_one),
+    # user: User = Depends(require_admin),
+    request: Request,
+    layer_id: str,
+    session: AsyncSession = Depends(get_session),
+    s3: aioboto3.Session = Depends(get_s3),
+) -> LayerReadAuthenticated:
+    """Get the cog of a layer by its UUID"""
+    print(layer_id)
+
+    try:
+        range_header = request.headers.get("range")
+        if range_header:
+            range_value = range_header.strip().replace("bytes=", "")
+            start, end = range_value.split("-")
+            start = int(start) if start else None
+            end = int(end) if end else None
+
+            # Get the object from S3
+            s3_response = await s3.get_object(
+                Bucket=config.S3_BUCKET_ID,
+                # Key=f"{S3_PREFIX}/{obj.layer_name}.tif",
+                Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+                Range=f"bytes={start}-{end}",
+            )
+            content = await s3_response["Body"].read()
+
+            # Set the appropriate headers for COG tiling
+            headers = {
+                "Content-Type": "image/tiff",
+                # 'Content-Disposition': f'inline; filename="{file_key}"',
+                "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Range",
+                "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(s3_response["ContentLength"]),
+            }
+            return Response(content, status_code=206, headers=headers)
+        else:
+            # Get the object from S3
+            s3_response = await s3.get_object(
+                Bucket=config.S3_BUCKET_ID,
+                # Key=f"{S3_PREFIX}/{obj.layer_name}.tif",
+                Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+            )
+            content = await s3_response["Body"].read()
+
+            headers = {
+                "Content-Type": "image/tiff",
+                # "Content-Disposition": f'inline; filename="{obj.layer_name}.tif"',
+                "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Range",
+                "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(s3_response["ContentLength"]),
+            }
+
+            return Response(content, headers=headers)
+
+    except s3.exceptions.NoSuchKey:
+        raise HTTPException(status_code=404, detail="File not found")
+    except NoCredentialsError:
+        raise HTTPException(
+            status_code=500, detail="Credentials not available"
+        )
+    except PartialCredentialsError:
+        raise HTTPException(status_code=500, detail="Incomplete credentials")
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.head("/{layer_id}/cog")
+async def get_layer_cog_head(
+    # obj: LayerRead = Depends(get_one),
+    # user: User = Depends(require_admin),
+    layer_id: str,
+    session: AsyncSession = Depends(get_session),
+    s3: aioboto3.Session = Depends(get_s3),
+) -> LayerReadAuthenticated:
+    """Get the head of a layer by its UUID"""
+
+    try:
+        s3_response = await s3.head_object(
+            Bucket=config.S3_BUCKET_ID,
+            Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+        )
+        headers = {
+            "Content-Type": "image/tiff",
+            "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Range",
+            "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(s3_response["ContentLength"]),
+        }
+
+        return Response(headers=headers)
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{layer_id}", response_model=LayerReadAuthenticated)

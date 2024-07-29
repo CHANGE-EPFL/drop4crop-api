@@ -33,6 +33,13 @@ class Config(BaseSettings):
 
     DB_URL: str | None = None
 
+    # S3 settings
+    S3_BUCKET_ID: str
+    S3_URL: str
+    S3_ACCESS_KEY: str
+    S3_SECRET_KEY: str
+    S3_PREFIX: str
+
     @model_validator(mode="after")
     @classmethod
     def form_db_url(cls, values: dict) -> dict:

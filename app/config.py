@@ -40,6 +40,9 @@ class Config(BaseSettings):
     S3_SECRET_KEY: str
     S3_PREFIX: str
 
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
+
     @model_validator(mode="after")
     @classmethod
     def form_db_url(cls, values: dict) -> dict:

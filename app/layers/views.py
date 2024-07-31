@@ -45,13 +45,63 @@ from fastapi.responses import JSONResponse
 from rasterio.io import MemoryFile
 import rasterio
 from app.s3.services import get_s3
+import base64
 
 router = APIRouter()
 
 router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
 
 
-TEMP_LAYERNAME: str = "barley_yielf_cog"
+# TEMP_LAYERNAME: str = "barley-yield-google-blocksize-low"
+TEMP_LAYERNAME: str = "BARLEY_Yield_cogeo"
+# TEMP_LAYERNAME: str = "barley_yielf_cog_no_overviews"
+# TEMP_LAYERNAME: str = "barley_pcr-globwb_hadgem2-es_historical_etb_2000"
+
+
+@router.get("/tile/{z}/{x}/{y}.{image_format}")
+async def get_tile(
+    z: int,
+    x: int,
+    y: int,
+    image_format: str,
+    s3: aioboto3.Session = Depends(get_s3),
+):
+    """Get tile from S3 bucket and serve
+
+    Get signed S3 URL and give to titiler to serve back to client
+    """
+
+    signed_url = await s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={
+            "Bucket": config.S3_BUCKET_ID,
+            "Key": f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+        },
+        # ExpiresIn=10000,
+    )
+    print(signed_url)
+
+    url, params = signed_url.split("?")
+    encoded_params = base64.b64encode(params.encode())
+    # signed_url
+    # url_b64 = base64.b64encode(signed_url.encode())
+    print(url)
+    print(encoded_params)
+    # print()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"http://titiler:8000/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png",
+            # f"http://titiler:8000/cog/info",
+            params={
+                "url": url,
+                "url_params": encoded_params.decode(),
+            },
+        )
+
+        print(response.status_code)
+        print(response.content)
+
+        return Response(content=response.content)
 
 
 @router.post("/sync_styles", response_model=bool)
@@ -167,7 +217,7 @@ async def get_pixel_value(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{layer_id}/cog")
+@router.get("/cogs/{layer_id}")
 async def get_layer_cog(
     # obj: LayerRead = Depends(get_one),
     # user: User = Depends(require_admin),
@@ -178,10 +228,14 @@ async def get_layer_cog(
 ) -> LayerReadAuthenticated:
     """Get the cog of a layer by its UUID"""
     print(layer_id)
+    print(request.headers)
 
     try:
         range_header = request.headers.get("range")
+        print(f"Range header pre if: {range_header}")
+
         if range_header:
+            print(f"Range header: {range_header}")
             range_value = range_header.strip().replace("bytes=", "")
             start, end = range_value.split("-")
             start = int(start) if start else None
@@ -191,36 +245,49 @@ async def get_layer_cog(
             s3_response = await s3.get_object(
                 Bucket=config.S3_BUCKET_ID,
                 # Key=f"{S3_PREFIX}/{obj.layer_name}.tif",
-                Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+                Key=f"{config.S3_PREFIX}/{layer_id}",
                 Range=f"bytes={start}-{end}",
             )
             content = await s3_response["Body"].read()
+            # print(f"S3 Resposne: {s3_response}")
+            # Make a request to get total size of file to return in header
+            # s3_response_total = await s3.head_object(
+            #     Bucket=config.S3_BUCKET_ID,
+            #     Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+            # )
+
+            # total_size = s3_response_total["ContentLength"]
+            # print(f"Total size: {total_size}")
 
             # Set the appropriate headers for COG tiling
             headers = {
                 "Content-Type": "image/tiff",
                 # 'Content-Disposition': f'inline; filename="{file_key}"',
-                "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+                "Content-Disposition": f'inline; filename="{layer_id}"',
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "Range",
                 "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(s3_response["ContentLength"]),
+                "Content-Range": str(s3_response["ContentRange"]),
             }
             return Response(content, status_code=206, headers=headers)
         else:
-            # Get the object from S3
+            # We don't really want to return the whole file, so we return a 206
+            # with a small chunk of the file
+            print("NO HEADER PROVIDED!")
             s3_response = await s3.get_object(
                 Bucket=config.S3_BUCKET_ID,
                 # Key=f"{S3_PREFIX}/{obj.layer_name}.tif",
-                Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+                Key=f"{config.S3_PREFIX}/{layer_id}",
+                # Range="bytes=0-1000",
             )
             content = await s3_response["Body"].read()
 
             headers = {
                 "Content-Type": "image/tiff",
                 # "Content-Disposition": f'inline; filename="{obj.layer_name}.tif"',
-                "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+                "Content-Disposition": f'inline; filename="{layer_id}"',
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "Range",
                 "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",
@@ -240,10 +307,15 @@ async def get_layer_cog(
         raise HTTPException(status_code=500, detail="Incomplete credentials")
     except Exception as e:
         print(e)
+        # Print also the function name
+        import traceback
+
+        print(traceback.format_exc())
+
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.head("/{layer_id}/cog")
+@router.head("/cogs/{layer_id}")
 async def get_layer_cog_head(
     # obj: LayerRead = Depends(get_one),
     # user: User = Depends(require_admin),
@@ -256,11 +328,11 @@ async def get_layer_cog_head(
     try:
         s3_response = await s3.head_object(
             Bucket=config.S3_BUCKET_ID,
-            Key=f"{config.S3_PREFIX}/{TEMP_LAYERNAME}.tif",
+            Key=f"{config.S3_PREFIX}/{layer_id}",
         )
         headers = {
             "Content-Type": "image/tiff",
-            "Content-Disposition": f'inline; filename="{TEMP_LAYERNAME}.tif"',
+            "Content-Disposition": f'inline; filename="{layer_id}"',
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "Range",
             "Access-Control-Expose-Headers": "Content-Length,Content-Range,Accept-Ranges",

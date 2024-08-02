@@ -6,7 +6,9 @@ ENV PYTHONPATH="$PYTHONPATH:/app"
 
 WORKDIR /app
 
-RUN apk add --no-cache gcc python3-dev geos-dev proj-util proj-dev musl-dev linux-headers gdal-dev build-base
+RUN apk add --no-cache gcc python3-dev geos-dev proj-util proj-dev musl-dev \
+    linux-headers gdal-dev build-base gdal libpng-dev libpng \
+    libjpeg-turbo-dev libjpeg-turbo libwebp-dev libwebp gdal-driver-png
 COPY poetry.lock pyproject.toml /app/
 RUN poetry config virtualenvs.create false
 RUN poetry install --no-interaction --without dev

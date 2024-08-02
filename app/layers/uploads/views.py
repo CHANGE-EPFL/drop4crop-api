@@ -53,7 +53,7 @@ async def upload_file(
         # Create multipart upload and add the upload id to the object
         response = await s3.create_multipart_upload(
             Bucket=config.S3_BUCKET_ID,
-            Key=str(obj.id),
+            Key=f"{config.S3_PREFIX}/{str(obj.id)}",
         )
 
         if "UploadId" not in response:
@@ -183,7 +183,7 @@ async def upload_chunk(
         )
         part = await s3.upload_part(
             Bucket=config.S3_BUCKET_ID,
-            Key=str(layer.id),
+            Key=f"{config.S3_PREFIX}/{str(layer.id)}",
             UploadId=layer.upload_id,
             PartNumber=part_number,
             Body=data,
@@ -215,7 +215,7 @@ async def upload_chunk(
             ]
             res = await s3.complete_multipart_upload(
                 Bucket=config.S3_BUCKET_ID,
-                Key=str(layer.id),
+                Key=f"{config.S3_PREFIX}/{str(layer.id)}",
                 UploadId=layer.upload_id,
                 MultipartUpload={"Parts": parts_list},
             )

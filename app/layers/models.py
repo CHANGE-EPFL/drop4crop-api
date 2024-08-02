@@ -7,6 +7,7 @@ import enum
 from typing import Any, TYPE_CHECKING
 from app.layers.links import LayerCountryLink
 from app.countries.models import Country
+from sqlalchemy import Column, JSON
 
 
 class LayerVariables(str, enum.Enum):
@@ -31,12 +32,12 @@ class LayerBase(SQLModel):
     layer_name: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     crop: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     water_model: str | None = Field(
         default=None,
@@ -56,7 +57,7 @@ class LayerBase(SQLModel):
     variable: str | None = Field(
         default=None,
         index=True,
-        nullable=False,
+        nullable=True,
     )
     year: int | None = Field(
         default=None,
@@ -64,7 +65,7 @@ class LayerBase(SQLModel):
         nullable=True,
     )
     enabled: bool = Field(
-        default=True,
+        default=False,
         nullable=False,
     )
     style_name: str | None = Field(
@@ -76,6 +77,14 @@ class LayerBase(SQLModel):
         index=True,
         nullable=True,
     )
+    processing_has_started: bool = Field(default=False)
+    processing_completed_successfully: bool = Field(default=False)
+    processing_message: str | None = Field(default=None)
+    last_part_received_utc: datetime.datetime | None = Field(default=None)
+    all_parts_received: bool = Field(default=False)
+    parts: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON))
+    upload_id: str | None = Field(default=None)
+    filename: str | None = Field(default=None)
 
     uploaded_at: datetime.datetime = Field(
         default_factory=datetime.datetime.now,
@@ -95,6 +104,9 @@ class LayerBase(SQLModel):
             "server_default": func.now(),
         },
     )
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class Layer(LayerBase, table=True):
@@ -124,7 +136,10 @@ class Layer(LayerBase, table=True):
 
     country_values: list[LayerCountryLink] = Relationship(
         back_populates="layer",
-        sa_relationship_kwargs={"lazy": "selectin"},
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+            "cascade": "all,delete,delete-orphan",
+        },
     )
 
 
@@ -145,6 +160,7 @@ class CountryValue(SQLModel):
 
 class LayerRead(SQLModel):
     layer_name: str | None
+    id: UUID
     global_average: float | None
     country_values: list[CountryValue] = []
 

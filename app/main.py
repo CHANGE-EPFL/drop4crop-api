@@ -138,7 +138,7 @@ class S3Reader(Reader):
     def _read(self, url: str):
         response = self.client.get_object(
             Bucket=config.S3_BUCKET_ID,
-            Key=f"{config.S3_PREFIX}/{url}.tif",
+            Key=f"{config.S3_PREFIX}/{url}",
         )
         return response["Body"].read()
 

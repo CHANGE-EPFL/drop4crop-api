@@ -150,17 +150,17 @@ async def delete_one(
         raise HTTPException(
             status_code=404, detail=f"ID: {layer_id} not found"
         )
-    try:
-        await delete_coveragestore(obj.layer_name)
-        await delete_coveragestore_files(obj.layer_name)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Error deleting layer from geoserver. ",
-                "error": str(e),
-            },
-        )
+    # try:
+    #     await delete_coveragestore(obj.layer_name)
+    #     await delete_coveragestore_files(obj.layer_name)
+    # except Exception as e:
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail={
+    #             "message": "Error deleting layer from geoserver. ",
+    #             "error": str(e),
+    #         },
+    #     )
 
     await session.delete(obj)
     await session.commit()

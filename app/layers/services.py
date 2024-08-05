@@ -92,9 +92,8 @@ async def get_one(
 
 
 async def create_one(
-    data: dict,
-    session: AsyncSession,
-    background_tasks: BackgroundTasks,
+    data: LayerCreate,
+    session: AsyncSession = Depends(get_session),
 ) -> Layer:
     """Create a single layer
 
@@ -114,7 +113,6 @@ async def create_one(
 async def update_one(
     layer_id: UUID,
     layer_update: LayerUpdate,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> Layer:
     """Update a single layer"""
@@ -122,17 +120,6 @@ async def update_one(
     obj = await crud.get_model_by_id(model_id=layer_id, session=session)
 
     update_data = layer_update.model_dump(exclude_unset=True)
-
-    # If the style_name is updated, update the style in geoserver
-    if "style_name" in update_data:
-        background_tasks.add_task(
-            update_style_in_geoserver,
-            layer_id,
-            session,
-            obj.layer_name,
-            update_data["style_name"],
-        )
-        update_data.pop("style_name")
 
     obj.sqlmodel_update(update_data)
 

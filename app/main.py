@@ -162,10 +162,35 @@ async def ColorMapParams(
     if not layer:
         raise HTTPException(status_code=404, detail="Layer not found")
 
+    if layer.style and layer.style.style:
+        style = layer.style.style
+        print(f"Using style from DB for {url}: {style}")
+
+        # Sort the style array by the 'value' field
+        style_sorted = sorted(style, key=lambda x: x["value"])
+
+        # Create the colormap with end values being the start of the next
+        colormap = []
+        for i in range(len(style_sorted)):
+            start = style_sorted[i]["value"]
+            end = (
+                style_sorted[i + 1]["value"]
+                if i + 1 < len(style_sorted)
+                else start + 1.0
+            )  # or some logical end value
+            color = [
+                style_sorted[i]["red"],
+                style_sorted[i]["green"],
+                style_sorted[i]["blue"],
+                style_sorted[i]["opacity"],
+            ]
+            colormap.append([[start, end], color])
+
+        print("USING COLORMAP:", colormap)
+        return colormap
+
     min_value = layer.min_value
     max_value = layer.max_value
-
-    print("Min value:", min_value, "Max value:", max_value)
 
     num_segments = 10
     colors = [
@@ -189,7 +214,6 @@ async def ColorMapParams(
         end = min_value + (i + 1) * step
         color = colors[i % len(colors)]
         colormap.append([[start, end], color])
-        print(f"Segment {i}: [{start}, {end}] with color {color}")
 
     return colormap
 

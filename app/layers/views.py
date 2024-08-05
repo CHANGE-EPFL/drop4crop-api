@@ -150,14 +150,10 @@ async def get_all_layers(
 
 @router.post("", response_model=LayerReadAuthenticated)
 async def create_layer(
-    create_obj: LayerCreate,
-    background_tasks: BackgroundTasks,
-    session: AsyncSession = Depends(get_session),
+    obj: LayerRead = Depends(create_one),
     user: User = Depends(require_admin),
 ) -> LayerReadAuthenticated:
     """Creates a layer data record"""
-
-    obj = await create_one(create_obj.model_dump(), session, background_tasks)
 
     return obj
 
@@ -165,7 +161,6 @@ async def create_layer(
 @router.put("/batch", response_model=list[LayerReadAuthenticated])
 async def update_many(
     layer_batch: LayerUpdateBatch,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> list[LayerReadAuthenticated]:
@@ -178,7 +173,6 @@ async def update_many(
             layer_id=id,
             layer_update=update_obj,
             session=session,
-            background_tasks=background_tasks,
         )
         objs.append(obj)
 

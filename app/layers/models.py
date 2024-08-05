@@ -2,12 +2,10 @@ from sqlmodel import SQLModel, Field, UniqueConstraint, Relationship
 from uuid import uuid4, UUID
 from sqlalchemy.sql import func
 import datetime
-from pydantic import constr
 import enum
-from typing import Any, TYPE_CHECKING
+from typing import Any
 from app.layers.links import LayerCountryLink
-from app.countries.models import Country
-from sqlalchemy import Column, JSON
+from app.styles.models import Style
 
 
 class LayerVariables(str, enum.Enum):
@@ -68,7 +66,8 @@ class LayerBase(SQLModel):
         default=False,
         nullable=False,
     )
-    style_name: str | None = Field(
+    style_id: UUID | None = Field(
+        foreign_key="style.id",
         default=None,
         nullable=True,
     )
@@ -139,6 +138,13 @@ class Layer(LayerBase, table=True):
         },
     )
 
+    style: Style = Relationship(
+        back_populates="layers",
+        sa_relationship_kwargs={
+            "lazy": "selectin",
+        },
+    )
+
 
 class CountrySimple(SQLModel):
     """Without geometry"""
@@ -166,7 +172,7 @@ class LayerReadAuthenticated(LayerBase):
     id: UUID
     enabled: bool
     created_at: str | None = None
-    style_name: str | None = None
+    style: Any | None = None
 
 
 class LayerCreate(LayerBase):

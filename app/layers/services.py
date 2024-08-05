@@ -6,34 +6,14 @@ from app.layers.models import (
     LayerUpdate,
 )
 from app.db import get_session, AsyncSession
-from fastapi import (
-    Depends,
-    APIRouter,
-    Query,
-    Response,
-    HTTPException,
-    BackgroundTasks,
-)
-from uuid import UUID, uuid4
+from fastapi import Depends, APIRouter, Query, Response, HTTPException
+from uuid import UUID
 from app.crud import CRUD
-from itertools import product
-import httpx
 from app.config import config
-from app.geoserver.services import (
-    update_style_in_geoserver,
-    delete_coveragestore,
-    delete_coveragestore_files,
-)
 from app.s3.services import get_s3
 import aioboto3
-from sqlmodel import select
-from fastapi.responses import JSONResponse
-from rasterio.io import MemoryFile
-import rasterio
 
 router = APIRouter()
-
-
 crud = CRUD(Layer, LayerRead, LayerCreate, LayerUpdate)
 
 

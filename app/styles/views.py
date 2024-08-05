@@ -50,7 +50,7 @@ async def update_style(
     style: StyleRead = Depends(update_one),
     user: User = Depends(require_admin),
 ) -> StyleRead:
-    """Update a style on geoserver"""
+    """Update a style"""
 
     return style
 

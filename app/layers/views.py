@@ -200,7 +200,6 @@ async def delete_batch(
 
     deleted_ids = []
     for id in ids:
-        # Delete the layer from geoserver
         background_tasks.add_task(delete_one, id, session, s3)
         deleted_ids.append(id)
 

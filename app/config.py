@@ -6,11 +6,6 @@ from functools import lru_cache
 class Config(BaseSettings):
     API_PREFIX: str = "/api"
 
-    GEOSERVER_URL: str
-    GEOSERVER_USER: str
-    GEOSERVER_PASSWORD: str
-    GEOSERVER_WORKSPACE: str = "drop4crop"
-
     # Common Keycloaksettings
     KEYCLOAK_REALM: str
     KEYCLOAK_URL: str

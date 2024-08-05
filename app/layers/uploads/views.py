@@ -1,40 +1,16 @@
-from fastapi import (
-    Depends,
-    APIRouter,
-    Request,
-    Query,
-    BackgroundTasks,
-    Header,
-    Response,
-    HTTPException,
-)
-from uuid import uuid4
+from fastapi import Depends, APIRouter, Request, Header, HTTPException
 from typing import Any, Annotated
 from collections import defaultdict
 from app.auth import require_admin, User
 from app.db import get_session, AsyncSession
-from sqlmodel import select, update
+from sqlmodel import select
 from app.layers.models import Layer
-from app.geoserver.services import process_and_upload_geotiff
 from app.s3.services import get_s3
 from aioboto3 import Session as S3Session
 from app.config import config
-from uuid import UUID
-import datetime
-from typing import List
-import httpx
-from app.config import config
-from app.layers.models import Layer
-from app.db import AsyncSession
-from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential
-from uuid import UUID
-from sqlmodel import select
 from osgeo import gdal, gdalconst
 import os
-
-
-from fastapi import File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi import UploadFile, Form
 
 router = APIRouter()
 

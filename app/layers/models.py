@@ -77,7 +77,11 @@ class LayerBase(SQLModel):
         index=True,
         nullable=True,
     )
+
     filename: str | None = Field(default=None)
+
+    min_value: float | None = Field(default=None)
+    max_value: float | None = Field(default=None)
 
     uploaded_at: datetime.datetime = Field(
         default_factory=datetime.datetime.now,

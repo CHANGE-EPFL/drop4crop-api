@@ -7,35 +7,22 @@ from app.layers.views import router as layers_router
 from app.styles.views import router as styles_router
 from app.users.views import router as users_router
 from app.countries.views import router as countries_router
-from app.cogs.views import router as cogs_router
-
 from rio_tiler.io import Reader
 import attr
-from rio_tiler.models import Info
 from rasterio.io import MemoryFile
-from rasterio import transform
 import boto3
-from rio_tiler.utils import (
-    _validate_shape_input,
-    has_alpha_band,
-    has_mask_band,
-)
-from rasterio.vrt import WarpedVRT
 import warnings
-from rio_tiler.errors import (
-    ExpressionMixingWarning,
-    NoOverviewWarning,
-    PointOutsideBounds,
-    TileOutsideBounds,
-)
+from rio_tiler.errors import NoOverviewWarning
 import rasterio
-from osgeo import gdal
-
 from titiler.core.factory import TilerFactory
 from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
 from fastapi import Query, Depends
 import aioboto3
 from app.s3.services import get_s3
+from app.db import get_session, AsyncSession
+from sqlmodel import select
+from app.layers.models import Layer
+
 
 app = FastAPI()
 
@@ -143,7 +130,74 @@ class S3Reader(Reader):
         return response["Body"].read()
 
 
-cog = TilerFactory(reader=S3Reader)
+import json
+
+from typing import Dict, Optional, Literal
+from typing_extensions import Annotated
+
+
+from rio_tiler.colormap import parse_color
+from rio_tiler.colormap import cmap as default_cmap
+from fastapi import HTTPException, Query
+
+from fastapi import Depends, Query, HTTPException
+from typing import Optional, Dict
+from sqlmodel import select
+from app.db import get_session, AsyncSession
+from app.s3.services import get_s3
+import aioboto3
+
+
+async def ColorMapParams(
+    s3: aioboto3.Session = Depends(get_s3),
+    session: AsyncSession = Depends(get_session),
+    url: str = Query(),
+) -> Optional[Dict]:
+    """Colormap Dependency."""
+
+    query = select(Layer).where(Layer.layer_name == url)
+    layer = await session.exec(query)
+    layer = layer.one_or_none()
+
+    if not layer:
+        raise HTTPException(status_code=404, detail="Layer not found")
+
+    min_value = layer.min_value
+    max_value = layer.max_value
+
+    print("Min value:", min_value, "Max value:", max_value)
+
+    num_segments = 10
+    colors = [
+        [0, 0, 0, 0],
+        [215, 25, 28, 255],
+        [253, 174, 97, 255],
+        [255, 255, 191, 255],
+        [171, 221, 164, 255],
+        [43, 131, 186, 255],
+        [0, 104, 55, 255],
+        [166, 217, 106, 255],
+        [255, 255, 204, 255],
+        [253, 141, 60, 255],
+    ]
+
+    step = (max_value - min_value) / num_segments
+
+    colormap = []
+    for i in range(num_segments):
+        start = min_value + i * step
+        end = min_value + (i + 1) * step
+        color = colors[i % len(colors)]
+        colormap.append([[start, end], color])
+        print(f"Segment {i}: [{start}, {end}] with color {color}")
+
+    return colormap
+
+
+cog = TilerFactory(
+    reader=S3Reader,
+    colormap_dependency=ColorMapParams,
+)
 
 app.include_router(
     cog.router,

@@ -42,7 +42,25 @@ router = APIRouter()
 file_storage = defaultdict(dict)
 
 
-def convert_to_cog_in_memory(input_bytes: bytes) -> bytes:
+def get_min_max_of_raster(
+    input_bytes: bytes,
+) -> tuple[float, float]:
+    """Get the min and max values of a raster"""
+
+    # Create an in-memory file from the input bytes
+    input_filename = "/vsimem/input.tif"
+    gdal.FileFromMemBuffer(input_filename, input_bytes)
+
+    # Open the file with gdal, calculate statistics, then return min max
+    ds = gdal.Open(input_filename, gdalconst.GA_ReadOnly)
+    band = ds.GetRasterBand(1)
+    min_val, max_val = band.ComputeRasterMinMax()
+    return min_val, max_val
+
+
+def convert_to_cog_in_memory(
+    input_bytes: bytes,
+) -> bytes:
     """Convert in-memory GeoTIFF to Cloud Optimized GeoTIFF using GDAL"""
 
     print("Converting to COG")
@@ -146,6 +164,9 @@ async def upload_file(
         # First convert the file to a COG
         cog_bytes = convert_to_cog_in_memory(data)
 
+        # Get min/max of the raster
+        min_val, max_val = get_min_max_of_raster(cog_bytes)
+
         # Upload the file to S3
         response = await s3.put_object(
             Bucket=config.S3_BUCKET_ID,
@@ -169,6 +190,8 @@ async def upload_file(
             variable=variable,
             year=int(year),
             layer_name=filename.split(".")[0],
+            min_value=min_val,
+            max_value=max_val,
         )
 
         session.add(obj)

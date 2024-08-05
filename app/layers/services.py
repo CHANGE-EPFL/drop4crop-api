@@ -24,6 +24,8 @@ from app.geoserver.services import (
     delete_coveragestore,
     delete_coveragestore_files,
 )
+from app.s3.services import get_s3
+import aioboto3
 
 router = APIRouter()
 
@@ -142,6 +144,7 @@ async def update_one(
 async def delete_one(
     layer_id: UUID,
     session: AsyncSession = Depends(get_session),
+    s3: aioboto3.Session = Depends(get_s3),
 ) -> UUID:
     """Delete a single layer"""
     obj = await crud.get_model_by_id(model_id=layer_id, session=session)
@@ -150,17 +153,21 @@ async def delete_one(
         raise HTTPException(
             status_code=404, detail=f"ID: {layer_id} not found"
         )
-    # try:
-    #     await delete_coveragestore(obj.layer_name)
-    #     await delete_coveragestore_files(obj.layer_name)
-    # except Exception as e:
-    #     raise HTTPException(
-    #         status_code=400,
-    #         detail={
-    #             "message": "Error deleting layer from geoserver. ",
-    #             "error": str(e),
-    #         },
-    #     )
+
+    try:
+        # Delete from S3 using obj.filename plus S3 prefix
+        await s3.delete_object(
+            Bucket=config.S3_BUCKET_ID,
+            Key=f"{config.S3_PREFIX}/{obj.filename}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Error deleting file from S3. ",
+                "error": str(e),
+            },
+        )
 
     await session.delete(obj)
     await session.commit()

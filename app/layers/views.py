@@ -443,13 +443,14 @@ async def delete_batch(
     ids: list[UUID],
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
+    s3: aioboto3.Session = Depends(get_s3),
 ) -> list[UUID]:
     """Delete by a list of ids"""
 
     deleted_ids = []
     for id in ids:
         # Delete the layer from geoserver
-        background_tasks.add_task(delete_one, id, session)
+        background_tasks.add_task(delete_one, id, session, s3)
         deleted_ids.append(id)
 
     return deleted_ids

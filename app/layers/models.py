@@ -77,13 +77,6 @@ class LayerBase(SQLModel):
         index=True,
         nullable=True,
     )
-    processing_has_started: bool = Field(default=False)
-    processing_completed_successfully: bool = Field(default=False)
-    processing_message: str | None = Field(default=None)
-    last_part_received_utc: datetime.datetime | None = Field(default=None)
-    all_parts_received: bool = Field(default=False)
-    parts: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON))
-    upload_id: str | None = Field(default=None)
     filename: str | None = Field(default=None)
 
     uploaded_at: datetime.datetime = Field(

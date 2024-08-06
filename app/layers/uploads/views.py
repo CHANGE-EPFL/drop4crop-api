@@ -81,7 +81,7 @@ async def upload_file(
     *,
     # file: UploadFile = File(...),
     # filepond:  = Form(...),
-    filepond: Annotated[UploadFile, Form()],
+    file: Annotated[UploadFile, Form()],
     # background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
@@ -90,8 +90,8 @@ async def upload_file(
     """Handle file upload"""
 
     # Get the filename from the data body
-    filename = filepond.filename
-    data = filepond.file.read()
+    filename = file.filename
+    data = file.file.read()
 
     try:
         # Create a new object in the database
@@ -133,7 +133,7 @@ async def upload_file(
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": "Layer already exists",
+                    "message": f"Layer already exists for {filename}. Delete layer first to re-upload",
                 },
             )
 

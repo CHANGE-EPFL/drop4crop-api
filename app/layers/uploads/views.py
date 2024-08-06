@@ -8,63 +8,13 @@ from app.layers.models import Layer
 from app.s3.services import get_s3
 from aioboto3 import Session as S3Session
 from app.config import config
-from osgeo import gdal, gdalconst
-import os
 from fastapi import UploadFile, Form
+from app.layers.utils import convert_to_cog_in_memory, get_min_max_of_raster
 
 router = APIRouter()
 
 # In-memory storage for file parts
 file_storage = defaultdict(dict)
-
-
-def get_min_max_of_raster(
-    input_bytes: bytes,
-) -> tuple[float, float]:
-    """Get the min and max values of a raster"""
-
-    # Create an in-memory file from the input bytes
-    input_filename = "/vsimem/input.tif"
-    gdal.FileFromMemBuffer(input_filename, input_bytes)
-
-    # Open the file with gdal, calculate statistics, then return min max
-    ds = gdal.Open(input_filename, gdalconst.GA_ReadOnly)
-    band = ds.GetRasterBand(1)
-    min_val, max_val = band.ComputeRasterMinMax()
-    return min_val, max_val
-
-
-def convert_to_cog_in_memory(
-    input_bytes: bytes,
-) -> bytes:
-    """Convert in-memory GeoTIFF to Cloud Optimized GeoTIFF using GDAL"""
-
-    print("Converting to COG")
-    # Create an in-memory file from the input bytes
-    input_filename = "/vsimem/input.tif"
-    gdal.FileFromMemBuffer(input_filename, input_bytes)
-
-    # Output in-memory file for the COG
-    output_filename = "/vsimem/output-cog.tif"
-    options = gdal.TranslateOptions(
-        format="COG", creationOptions=["OVERVIEWS=NONE"]
-    )
-    gdal.Translate(output_filename, input_filename, options=options)
-
-    # Read the in-memory COG file back to a byte array
-    output_ds = gdal.VSIFOpenL(output_filename, "rb")
-    gdal.VSIFSeekL(output_ds, 0, os.SEEK_END)
-    size = gdal.VSIFTellL(output_ds)
-    gdal.VSIFSeekL(output_ds, 0, os.SEEK_SET)
-    cog_bytes = gdal.VSIFReadL(1, size, output_ds)
-    gdal.VSIFCloseL(output_ds)
-
-    # Clean up in-memory files
-    gdal.Unlink(input_filename)
-    gdal.Unlink(output_filename)
-    print("COG conversion successful")
-
-    return cog_bytes
 
 
 class FilePondUpload(UploadFile):

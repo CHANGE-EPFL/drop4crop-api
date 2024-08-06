@@ -7,13 +7,151 @@ from app.config import config
 from app.db import get_session, AsyncSession
 from app.layers.models import Layer
 from app.s3.services import get_s3
-from fastapi import HTTPException, Query, Depends
+from functools import lru_cache
+from typing import Annotated, Optional, Dict, Literal
+from pydantic import conint
+from fastapi import HTTPException, Depends, Path, Query
 from rio_tiler.io import Reader
 from rasterio.io import MemoryFile
 from rio_tiler.errors import NoOverviewWarning
 from sqlmodel import select
-from titiler.core.factory import TilerFactory
-from typing import Dict, Optional
+from titiler.core.factory import img_endpoint_params
+from dataclasses import dataclass
+from starlette.responses import Response
+from titiler.core.dependencies import ColorMapParams
+from titiler.core.resources.enums import ImageType
+from titiler.core.utils import render_image
+from titiler.core.factory import TilerFactory as ParentTilerFactory
+from cashews import cache
+
+# Cache setup for the tile cache
+cache.setup(
+    f"redis://{config.TILE_CACHE_URL}:{config.TILE_CACHE_PORT}/",
+    db=1,
+    wait_for_connection_timeout=2.5,
+    suppress=False,
+    enable=True,
+    timeout=10,
+    client_side=True,
+)
+
+
+@dataclass
+class TilerFactory(ParentTilerFactory):
+
+    def tile(self):  # noqa: C901
+        """Register /tiles endpoint."""
+
+        @self.router.get(
+            r"/tiles/{z}/{x}/{y}", **img_endpoint_params, deprecated=True
+        )
+        @self.router.get(
+            r"/tiles/{z}/{x}/{y}.{format}",
+            **img_endpoint_params,
+            deprecated=True,
+        )
+        @self.router.get(
+            r"/tiles/{z}/{x}/{y}@{scale}x",
+            **img_endpoint_params,
+            deprecated=True,
+        )
+        @self.router.get(
+            r"/tiles/{z}/{x}/{y}@{scale}x.{format}",
+            **img_endpoint_params,
+            deprecated=True,
+        )
+        @self.router.get(
+            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}", **img_endpoint_params
+        )
+        @self.router.get(
+            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}.{format}",
+            **img_endpoint_params,
+        )
+        @self.router.get(
+            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}@{scale}x",
+            **img_endpoint_params,
+        )
+        @self.router.get(
+            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}@{scale}x.{format}",
+            **img_endpoint_params,
+        )
+        @cache(ttl="3h", key="tile:{src_path}:{z}:{x}:{y}:{scale}:{format}")
+        async def tile(
+            z: Annotated[
+                int,
+                Path(
+                    description="Identifier (Z) selecting one of the scales defined in the TileMatrixSet and representing the scaleDenominator the tile.",
+                ),
+            ],
+            x: Annotated[
+                int,
+                Path(
+                    description="Column (X) index of the tile on the selected TileMatrix. It cannot exceed the MatrixHeight-1 for the selected TileMatrix.",
+                ),
+            ],
+            y: Annotated[
+                int,
+                Path(
+                    description="Row (Y) index of the tile on the selected TileMatrix. It cannot exceed the MatrixWidth-1 for the selected TileMatrix.",
+                ),
+            ],
+            tileMatrixSetId: Annotated[
+                Literal[tuple(self.supported_tms.list())],
+                f"Identifier selecting one of the TileMatrixSetId supported (default: '{self.default_tms}')",
+            ] = self.default_tms,
+            scale: Annotated[
+                conint(gt=0, le=4), "Tile size scale. 1=256x256, 2=512x512..."
+            ] = 1,
+            format: Annotated[
+                ImageType,
+                "Default will be automatically defined if the output image needs a mask (png) or not (jpeg).",
+            ] = None,
+            src_path=Depends(self.path_dependency),
+            layer_params=Depends(self.layer_dependency),
+            dataset_params=Depends(self.dataset_dependency),
+            tile_params=Depends(self.tile_dependency),
+            post_process=Depends(self.process_dependency),
+            rescale=Depends(self.rescale_dependency),
+            color_formula=Depends(self.color_formula_dependency),
+            colormap=Depends(self.colormap_dependency),
+            render_params=Depends(self.render_dependency),
+            reader_params=Depends(self.reader_dependency),
+            env=Depends(self.environment_dependency),
+        ):
+            """Create map tile from a dataset."""
+            tms = self.supported_tms.get(tileMatrixSetId)
+            with rasterio.Env(**env):
+                with self.reader(
+                    src_path, tms=tms, **reader_params
+                ) as src_dst:
+                    image = src_dst.tile(
+                        x,
+                        y,
+                        z,
+                        tilesize=scale * 256,
+                        **tile_params,
+                        **layer_params,
+                        **dataset_params,
+                    )
+                    dst_colormap = getattr(src_dst, "colormap", None)
+
+            if post_process:
+                image = post_process(image)
+
+            if rescale:
+                image.rescale(rescale)
+
+            if color_formula:
+                image.apply_color_formula(color_formula)
+
+            content, media_type = render_image(
+                image,
+                output_format=format,
+                colormap=colormap or dst_colormap,
+                **render_params,
+            )
+
+            return Response(content, media_type=media_type)
 
 
 @attr.s
@@ -54,12 +192,13 @@ class S3Reader(Reader):
         return response["Body"].read()
 
 
-async def ColorMapParams(
-    s3: aioboto3.Session = Depends(get_s3),
-    session: AsyncSession = Depends(get_session),
-    url: str = Query(),
+@lru_cache(maxsize=128)
+async def CachedColorMapParams(
+    url: str,
+    s3_session: aioboto3.Session,
+    session: AsyncSession,
 ) -> Optional[Dict]:
-    """Colormap Dependency."""
+    """Cached Colormap Dependency."""
 
     query = select(Layer).where(Layer.layer_name == url)
     layer = await session.exec(query)
@@ -109,6 +248,15 @@ async def ColorMapParams(
         colormap.append([[start, end], color])
 
     return colormap
+
+
+async def ColorMapParams(
+    s3: aioboto3.Session = Depends(get_s3),
+    session: AsyncSession = Depends(get_session),
+    url: str = Query(),
+) -> Optional[Dict]:
+    """Colormap Dependency with caching."""
+    return await CachedColorMapParams(url, s3, session)
 
 
 cog = TilerFactory(

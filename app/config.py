@@ -35,6 +35,11 @@ class Config(BaseSettings):
     S3_SECRET_KEY: str
     S3_PREFIX: str
 
+    # Redis cache
+    TILE_CACHE_URL: str
+    TILE_CACHE_PORT: int
+    TILE_CACHE_TTL: int = 3600
+
     @model_validator(mode="after")
     @classmethod
     def form_db_url(cls, values: dict) -> dict:

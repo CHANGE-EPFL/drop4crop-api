@@ -11,6 +11,8 @@ from app.users.views import router as users_router
 from app.countries.views import router as countries_router
 from app.cog.views import cog
 
+# from app.cog.cache import setup_cache
+
 app = FastAPI()
 
 origins = ["*"]
@@ -22,6 +24,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add the Redis cache for the COG views
+# app.add_event_handler("startup", setup_cache)
+add_exception_handlers(app, DEFAULT_STATUS_CODES)
 
 
 @app.get(f"{config.API_PREFIX}/config/keycloak")
@@ -73,5 +79,3 @@ app.include_router(
     cog.router,
     prefix=f"{config.API_PREFIX}/cog",
 )
-
-add_exception_handlers(app, DEFAULT_STATUS_CODES)

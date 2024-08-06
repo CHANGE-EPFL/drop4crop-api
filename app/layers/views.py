@@ -35,35 +35,13 @@ from fastapi.responses import JSONResponse
 from rasterio.io import MemoryFile
 import rasterio
 from app.s3.services import get_s3
+from app.layers.utils import (
+    sort_styles,
+    generate_grayscale_style,
+)
 
 router = APIRouter()
-
 router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
-
-
-def sort_styles(style_list):
-    return sorted(style_list, key=lambda x: x["value"])
-
-
-def generate_grayscale_style(min_value, max_value, num_segments=10):
-    step = (max_value - min_value) / num_segments
-    grayscale_style = []
-
-    for i in range(num_segments):
-        value = min_value + i * step
-        grey_value = int(255 * (i / (num_segments - 1)))
-        grayscale_style.append(
-            {
-                "value": value,
-                "red": grey_value,
-                "green": grey_value,
-                "blue": grey_value,
-                "opacity": 255,
-                "label": round(value, 4),
-            }
-        )
-
-    return grayscale_style
 
 
 @router.get("/groups", response_model=LayerGroupsRead)

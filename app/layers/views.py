@@ -41,6 +41,31 @@ router = APIRouter()
 router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
 
 
+def sort_styles(style_list):
+    return sorted(style_list, key=lambda x: x["value"])
+
+
+def generate_grayscale_style(min_value, max_value, num_segments=10):
+    step = (max_value - min_value) / num_segments
+    grayscale_style = []
+
+    for i in range(num_segments):
+        value = min_value + i * step
+        grey_value = int(255 * (i / (num_segments - 1)))
+        grayscale_style.append(
+            {
+                "value": value,
+                "red": grey_value,
+                "green": grey_value,
+                "blue": grey_value,
+                "opacity": 255,
+                "label": round(value, 4),
+            }
+        )
+
+    return grayscale_style
+
+
 @router.get("/groups", response_model=LayerGroupsRead)
 async def get_groups(
     session: AsyncSession = Depends(get_session),
@@ -94,7 +119,23 @@ async def get_all_map_layers(
 
     res = await session.exec(query)
 
-    return res.all()
+    objs = res.all()
+    response_objs = []
+    for obj in objs:
+        # Need to manually do this, to reduce the style JSON to a single field
+        layer = LayerRead.model_validate(obj)
+        if obj.style:
+            # Just add the JSON of the style and sort it
+            layer.style = sort_styles(obj.style.style)
+        else:
+            # Generate a grayscale style and sort it
+            layer.style = generate_grayscale_style(
+                obj.min_value, obj.max_value
+            )
+
+        response_objs.append(layer)
+
+    return response_objs
 
 
 @router.get("/{layer_id}/value")

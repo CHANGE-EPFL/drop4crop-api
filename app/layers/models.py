@@ -163,9 +163,9 @@ class CountryValue(SQLModel):
 
 class LayerRead(SQLModel):
     layer_name: str | None
-    id: UUID
     global_average: float | None
     country_values: list[CountryValue] = []
+    style: Any | None = None
 
 
 class LayerReadAuthenticated(LayerBase):

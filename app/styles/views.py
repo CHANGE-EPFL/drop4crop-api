@@ -14,12 +14,19 @@ from app.styles.models import StyleRead
 router = APIRouter()
 
 
+def sort_styles(style_list):
+    return sorted(style_list, key=lambda x: x["value"])
+
+
 @router.get("/{style_id}")
 async def get_style(
     obj: StyleRead = Depends(get_one),
     user: User = Depends(require_admin),
 ) -> StyleRead:
     """Get a style by id"""
+
+    if obj.style:
+        obj.style = sort_styles(obj.style)
 
     return obj
 
@@ -31,6 +38,10 @@ async def get_all_styles(
     user: User = Depends(require_admin),
 ) -> list[StyleRead]:
     """Get all styles"""
+
+    for obj in data:
+        if obj.style:
+            obj.style = sort_styles(obj.style)
 
     return data
 

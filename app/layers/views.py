@@ -54,7 +54,9 @@ async def get_groups(
         # Get distinct values for each group
 
         column = getattr(Layer, group.value)
-        res = await session.exec(select(column).distinct())
+        res = await session.exec(
+            select(column).where(Layer.enabled).distinct()
+        )
         groups[group.value] = [row for row in res.all()]
 
     return groups
@@ -75,7 +77,7 @@ async def get_all_map_layers(
     Does not include disabled layers (enabled=False)
     """
 
-    query = select(Layer).where(Layer.enabled == True)
+    query = select(Layer).where(Layer.enabled)
 
     if crop:
         query = query.where(Layer.crop == crop)

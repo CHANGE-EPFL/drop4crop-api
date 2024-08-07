@@ -9,6 +9,7 @@ from app.layers.models import (
     LayerUpdateBatch,
 )
 from app.db import get_session, AsyncSession
+from typing import AsyncGenerator
 from fastapi import (
     Depends,
     HTTPException,
@@ -31,7 +32,7 @@ from app.auth import require_admin, User
 from app.layers.uploads.views import router as uploads_router
 from uuid import UUID
 import aioboto3
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from rasterio.io import MemoryFile
 import rasterio
 from app.s3.services import get_s3
@@ -142,6 +143,55 @@ async def get_pixel_value(
                 value = dataset.read(1)[row, col]
 
                 return JSONResponse(content={"value": value})
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{layer_id}/download")
+async def download_entire_layer(
+    layer_id: str,
+    s3: aioboto3.Session = Depends(get_s3),
+):
+    """Return the tif file directly from S3"""
+
+    async def get_file_chunk(
+        bucket_name: str,
+        key: str,
+        chunk_length: int,
+        s3: aioboto3.Session,
+    ) -> AsyncGenerator[bytes, None]:
+        """Async generator to get file chunk."""
+
+        head = await s3.head_object(Bucket=bucket_name, Key=key)
+        content_length = head["ContentLength"]
+
+        for offset in range(0, content_length, chunk_length):
+            end = min(offset + chunk_length - 1, content_length - 1)
+            s3_file = await s3.get_object(
+                Bucket=bucket_name, Key=key, Range=f"bytes={offset}-{end}"
+            )
+
+            async with s3_file["Body"] as stream:
+                yield await stream.read()
+
+    try:
+        chunk_length = 10 * 1024 * 1024  # Convert to bytes
+        file_chunk_iterator = get_file_chunk(
+            bucket_name=config.S3_BUCKET_ID,
+            key=f"{config.S3_PREFIX}/{layer_id}.tif",
+            chunk_length=chunk_length,
+            s3=s3,
+        )
+
+        return StreamingResponse(
+            content=file_chunk_iterator,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename={layer_id}.tif"
+            },
+        )
 
     except Exception as e:
         print(e)

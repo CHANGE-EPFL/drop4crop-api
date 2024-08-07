@@ -1,5 +1,7 @@
 from osgeo import gdal, gdalconst
 import os
+from typing import AsyncGenerator
+import aioboto3
 
 
 def sort_styles(style_list):
@@ -74,3 +76,24 @@ def convert_to_cog_in_memory(
     print("COG conversion successful")
 
     return cog_bytes
+
+
+async def get_file_chunk(
+    bucket_name: str,
+    key: str,
+    chunk_length: int,
+    s3: aioboto3.Session,
+) -> AsyncGenerator[bytes, None]:
+    """Async generator to get file chunk."""
+
+    head = await s3.head_object(Bucket=bucket_name, Key=key)
+    content_length = head["ContentLength"]
+
+    for offset in range(0, content_length, chunk_length):
+        end = min(offset + chunk_length - 1, content_length - 1)
+        s3_file = await s3.get_object(
+            Bucket=bucket_name, Key=key, Range=f"bytes={offset}-{end}"
+        )
+
+        async with s3_file["Body"] as stream:
+            yield await stream.read()

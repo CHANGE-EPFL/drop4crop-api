@@ -1,6 +1,5 @@
 from app.layers.models import (
     Layer,
-    LayerCreate,
     LayerRead,
     LayerUpdate,
     LayerReadAuthenticated,
@@ -9,7 +8,6 @@ from app.layers.models import (
     LayerUpdateBatch,
 )
 from app.db import get_session, AsyncSession
-from typing import AsyncGenerator
 from fastapi import (
     Depends,
     HTTPException,
@@ -39,6 +37,7 @@ from app.s3.services import get_s3
 from app.layers.utils import (
     sort_styles,
     generate_grayscale_style,
+    get_file_chunk,
 )
 
 router = APIRouter()
@@ -124,6 +123,7 @@ async def get_pixel_value(
     lon: float,
     s3: aioboto3.Session = Depends(get_s3),
 ):
+    """Get the pixel value at a given lat/lon"""
 
     try:
         s3_response = await s3.get_object(
@@ -153,46 +153,69 @@ async def get_pixel_value(
 async def download_entire_layer(
     layer_id: str,
     s3: aioboto3.Session = Depends(get_s3),
+    minx: float = Query(None),
+    miny: float = Query(None),
+    maxx: float = Query(None),
+    maxy: float = Query(None),
 ):
-    """Return the tif file directly from S3"""
+    """Return the tif file directly from S3
 
-    async def get_file_chunk(
-        bucket_name: str,
-        key: str,
-        chunk_length: int,
-        s3: aioboto3.Session,
-    ) -> AsyncGenerator[bytes, None]:
-        """Async generator to get file chunk."""
-
-        head = await s3.head_object(Bucket=bucket_name, Key=key)
-        content_length = head["ContentLength"]
-
-        for offset in range(0, content_length, chunk_length):
-            end = min(offset + chunk_length - 1, content_length - 1)
-            s3_file = await s3.get_object(
-                Bucket=bucket_name, Key=key, Range=f"bytes={offset}-{end}"
-            )
-
-            async with s3_file["Body"] as stream:
-                yield await stream.read()
-
+    If minx, miny, maxx, maxy are provided, return a cropped version of the tif
+    """
     try:
-        chunk_length = 10 * 1024 * 1024  # Convert to bytes
-        file_chunk_iterator = get_file_chunk(
-            bucket_name=config.S3_BUCKET_ID,
-            key=f"{config.S3_PREFIX}/{layer_id}.tif",
-            chunk_length=chunk_length,
-            s3=s3,
+        s3_response = await s3.get_object(
+            Bucket=config.S3_BUCKET_ID,
+            Key=f"{config.S3_PREFIX}/{layer_id}.tif",
         )
+        content = await s3_response["Body"].read()
 
-        return StreamingResponse(
-            content=file_chunk_iterator,
-            media_type="application/octet-stream",
-            headers={
-                "Content-Disposition": f"attachment; filename={layer_id}.tif"
-            },
-        )
+        if (
+            minx is not None
+            and miny is not None
+            and maxx is not None
+            and maxy is not None
+        ):
+            with MemoryFile(content) as memfile:
+                with memfile.open() as dataset:
+                    # Calculate the window to read
+                    window = rasterio.windows.from_bounds(
+                        minx, miny, maxx, maxy, transform=dataset.transform
+                    )
+                    # Read the window
+                    data = dataset.read(window=window)
+                    # Create a new MemoryFile for the output
+                    with MemoryFile() as memfile_out:
+                        with memfile_out.open(
+                            driver="GTiff",
+                            height=data.shape[1],
+                            width=data.shape[2],
+                            count=dataset.count,
+                            dtype=data.dtype,
+                            crs=dataset.crs,
+                            transform=rasterio.windows.transform(
+                                window, dataset.transform
+                            ),
+                        ) as dataset_out:
+                            dataset_out.write(data)
 
+                        # Prepare the cropped file for streaming
+                        memfile_out.seek(0)
+                        return StreamingResponse(
+                            iter([memfile_out.read()]),
+                            media_type="application/octet-stream",
+                            headers={
+                                "Content-Disposition": f"attachment; filename={layer_id}_cropped.tif"
+                            },
+                        )
+        else:
+            # Return the entire file if no cropping parameters are provided
+            return StreamingResponse(
+                iter([content]),
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename={layer_id}.tif"
+                },
+            )
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))

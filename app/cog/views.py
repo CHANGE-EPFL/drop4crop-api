@@ -28,11 +28,11 @@ from cashews import cache
 cache.setup(
     f"redis://{config.TILE_CACHE_URL}:{config.TILE_CACHE_PORT}/",
     db=1,
-    wait_for_connection_timeout=2.5,
-    suppress=False,
-    enable=True,
-    timeout=10,
+    suppress=True,
+    enable=config.TILE_CACHE_ENABLED,
     client_side=True,
+    socket_connect_timeout=0.1,
+    retry_on_timeout=False,
 )
 
 
@@ -259,7 +259,16 @@ async def ColorMapParams(
     return await CachedColorMapParams(url, s3, session)
 
 
-cog = TilerFactory(
-    reader=S3Reader,
-    colormap_dependency=ColorMapParams,
-)
+if config.TILE_CACHE_ENABLED:
+    # Use the overwritten cached TileFactory above
+    cog = TilerFactory(
+        reader=S3Reader,
+        colormap_dependency=ColorMapParams,
+        # cache=True,
+    )
+else:
+    # Otherwise, let's just use the standard TilerFactory
+    cog = ParentTilerFactory(
+        reader=S3Reader,
+        colormap_dependency=ColorMapParams,
+    )

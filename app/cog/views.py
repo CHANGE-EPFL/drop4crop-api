@@ -23,18 +23,7 @@ from titiler.core.dependencies import ColorMapParams
 from titiler.core.resources.enums import ImageType
 from titiler.core.utils import render_image
 from titiler.core.factory import TilerFactory as ParentTilerFactory
-from cashews import cache
-
-# Cache setup for the tile cache
-cache.setup(
-    f"redis://{config.TILE_CACHE_URL}:{config.TILE_CACHE_PORT}/",
-    db=1,
-    enable=config.TILE_CACHE_ENABLED,
-    # suppress=True,
-    # client_side=True,
-    # socket_connect_timeout=0.1,
-    # retry_on_timeout=False,
-)
+from app.db import cache
 
 
 @attr.s

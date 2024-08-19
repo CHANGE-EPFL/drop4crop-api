@@ -29,130 +29,12 @@ from cashews import cache
 cache.setup(
     f"redis://{config.TILE_CACHE_URL}:{config.TILE_CACHE_PORT}/",
     db=1,
-    suppress=True,
     enable=config.TILE_CACHE_ENABLED,
-    client_side=True,
-    socket_connect_timeout=0.1,
-    retry_on_timeout=False,
+    # suppress=True,
+    # client_side=True,
+    # socket_connect_timeout=0.1,
+    # retry_on_timeout=False,
 )
-
-
-@dataclass
-class TilerFactory(ParentTilerFactory):
-
-    def tile(self):  # noqa: C901
-        """Register /tiles endpoint."""
-
-        @self.router.get(
-            r"/tiles/{z}/{x}/{y}", **img_endpoint_params, deprecated=True
-        )
-        @self.router.get(
-            r"/tiles/{z}/{x}/{y}.{format}",
-            **img_endpoint_params,
-            deprecated=True,
-        )
-        @self.router.get(
-            r"/tiles/{z}/{x}/{y}@{scale}x",
-            **img_endpoint_params,
-            deprecated=True,
-        )
-        @self.router.get(
-            r"/tiles/{z}/{x}/{y}@{scale}x.{format}",
-            **img_endpoint_params,
-            deprecated=True,
-        )
-        @self.router.get(
-            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}", **img_endpoint_params
-        )
-        @self.router.get(
-            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}.{format}",
-            **img_endpoint_params,
-        )
-        @self.router.get(
-            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}@{scale}x",
-            **img_endpoint_params,
-        )
-        @self.router.get(
-            r"/tiles/{tileMatrixSetId}/{z}/{x}/{y}@{scale}x.{format}",
-            **img_endpoint_params,
-        )
-        @cache(ttl="3h", key="tile:{src_path}:{z}:{x}:{y}:{scale}:{format}")
-        async def tile(
-            z: Annotated[
-                int,
-                Path(
-                    description="Identifier (Z) selecting one of the scales defined in the TileMatrixSet and representing the scaleDenominator the tile.",
-                ),
-            ],
-            x: Annotated[
-                int,
-                Path(
-                    description="Column (X) index of the tile on the selected TileMatrix. It cannot exceed the MatrixHeight-1 for the selected TileMatrix.",
-                ),
-            ],
-            y: Annotated[
-                int,
-                Path(
-                    description="Row (Y) index of the tile on the selected TileMatrix. It cannot exceed the MatrixWidth-1 for the selected TileMatrix.",
-                ),
-            ],
-            tileMatrixSetId: Annotated[
-                Literal[tuple(self.supported_tms.list())],
-                f"Identifier selecting one of the TileMatrixSetId supported (default: '{self.default_tms}')",
-            ] = self.default_tms,
-            scale: Annotated[
-                conint(gt=0, le=4), "Tile size scale. 1=256x256, 2=512x512..."
-            ] = 1,
-            format: Annotated[
-                ImageType,
-                "Default will be automatically defined if the output image needs a mask (png) or not (jpeg).",
-            ] = None,
-            src_path=Depends(self.path_dependency),
-            layer_params=Depends(self.layer_dependency),
-            dataset_params=Depends(self.dataset_dependency),
-            tile_params=Depends(self.tile_dependency),
-            post_process=Depends(self.process_dependency),
-            rescale=Depends(self.rescale_dependency),
-            color_formula=Depends(self.color_formula_dependency),
-            colormap=Depends(self.colormap_dependency),
-            render_params=Depends(self.render_dependency),
-            reader_params=Depends(self.reader_dependency),
-            env=Depends(self.environment_dependency),
-        ):
-            """Create map tile from a dataset."""
-            tms = self.supported_tms.get(tileMatrixSetId)
-            with rasterio.Env(**env):
-                with self.reader(
-                    src_path, tms=tms, **reader_params
-                ) as src_dst:
-                    image = src_dst.tile(
-                        x,
-                        y,
-                        z,
-                        tilesize=scale * 256,
-                        **tile_params,
-                        **layer_params,
-                        **dataset_params,
-                    )
-                    dst_colormap = getattr(src_dst, "colormap", None)
-
-            if post_process:
-                image = post_process(image)
-
-            if rescale:
-                image.rescale(rescale)
-
-            if color_formula:
-                image.apply_color_formula(color_formula)
-
-            content, media_type = render_image(
-                image,
-                output_format=format,
-                colormap=colormap or dst_colormap,
-                **render_params,
-            )
-
-            return Response(content, media_type=media_type)
 
 
 @attr.s
@@ -201,7 +83,7 @@ class S3Reader(Reader):
         return response["Body"].read()
 
 
-@lru_cache(maxsize=128)
+@cache(ttl="5m", key="colormap:{url}")
 async def CachedColorMapParams(
     url: str,
     s3_session: aioboto3.Session,
@@ -265,19 +147,11 @@ async def ColorMapParams(
     url: str = Query(),
 ) -> Optional[Dict]:
     """Colormap Dependency with caching."""
+
     return await CachedColorMapParams(url, s3, session)
 
 
-if config.TILE_CACHE_ENABLED:
-    # Use the overwritten cached TileFactory above
-    cog = TilerFactory(
-        reader=S3Reader,
-        colormap_dependency=ColorMapParams,
-        # cache=True,
-    )
-else:
-    # Otherwise, let's just use the standard TilerFactory
-    cog = ParentTilerFactory(
-        reader=S3Reader,
-        colormap_dependency=ColorMapParams,
-    )
+cog = ParentTilerFactory(
+    reader=S3Reader,
+    colormap_dependency=ColorMapParams,
+)

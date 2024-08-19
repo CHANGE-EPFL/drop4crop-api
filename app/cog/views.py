@@ -1,6 +1,7 @@
 import aioboto3
 import attr
 import boto3
+from rasterio.session import AWSSession
 import warnings
 import rasterio
 from app.config import config
@@ -160,12 +161,20 @@ class S3Reader(Reader):
 
     def __attrs_post_init__(self):
         """Define _kwargs, open dataset and get info."""
-        self.client = boto3.client(
-            "s3",
+
+        s3 = boto3.session.Session(
             aws_access_key_id=config.S3_ACCESS_KEY,
             aws_secret_access_key=config.S3_SECRET_KEY,
-            endpoint_url=f"https://{config.S3_URL}",
         )
+        try:
+            with rasterio.Env(
+                AWSSession(session=s3, endpoint_url=config.S3_URL)
+            ):
+                filename = f"s3://{config.S3_BUCKET_ID}/{config.S3_PREFIX}/{self.input}.tif"
+                self.dataset = rasterio.open(filename)
+        except Exception as e:
+            print(f"Error opening COG dataset: {e}")
+            raise HTTPException(status_code=404, detail="Dataset not found")
         if not self.dataset:
             with MemoryFile(self._read(self.input)) as memfile:
                 self.dataset = rasterio.open(memfile)

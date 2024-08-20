@@ -45,7 +45,6 @@ router.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
 
 
 @router.get("/groups", response_model=LayerGroupsRead)
-@cache(ttl="15m", key="groups")
 async def get_groups(
     session: AsyncSession = Depends(get_session),
 ) -> LayerGroupsRead:
@@ -67,13 +66,6 @@ async def get_groups(
 
 
 @router.get("/map", response_model=list[LayerRead])
-@cache(
-    ttl="15m",
-    key=(
-        "map:{crop}:{water_model}:"
-        "{climate_model}:{scenario}:{variable}:{year}"
-    ),
-)
 async def get_all_map_layers(
     session: AsyncSession = Depends(get_session),
     crop: str = Query(...),

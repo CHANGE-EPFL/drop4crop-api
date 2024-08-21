@@ -18,12 +18,50 @@ class LayerCountryLink(SQLModel, table=True):
         foreign_key="layer.id",
         primary_key=True,
     )
-    value: float | None = Field(
+
+    # Variables
+    var_wf: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_wfb: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_wfg: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_vwc: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_vwcb: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_vwcg: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_wdb: float | None = Field(
+        default=None,
+        nullable=True,
+        index=True,
+    )
+    var_wdg: float | None = Field(
         default=None,
         nullable=True,
         index=True,
     )
 
+    # Relationships
     layer: "Layer" = Relationship(
         back_populates="country_values",
         sa_relationship_kwargs={"lazy": "selectin"},

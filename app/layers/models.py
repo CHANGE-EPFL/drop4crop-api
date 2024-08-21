@@ -157,7 +157,15 @@ class CountrySimple(SQLModel):
 
 
 class CountryValue(SQLModel):
-    value: float | None = None
+    var_wf: float | None = None
+    var_wfb: float | None = None
+    var_wfg: float | None = None
+    var_vwc: float | None = None
+    var_vwcb: float | None = None
+    var_vwcg: float | None = None
+    var_wdb: float | None = None
+    var_wdg: float | None = None
+
     country: CountrySimple | None = None
 
 

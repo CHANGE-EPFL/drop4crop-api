@@ -48,33 +48,48 @@ async def upload_file(
         # Extract filename into variables. Structure is:
         # {crop}_{watermodel}_{climatemodel}_{scenario}_{variable}_{year}.tif
         try:
-            crop, water_model, climate_model, scenario, variable, year = (
-                # Remove file extension then split by _
-                filename.lower()
-                .split(".")[0]
-                .split("_")
-            )
+            # Remove file extension then split by _
+            split_filename = filename.lower().split(".")[0].split("_")
+            is_crop_variable = False
+            if len(split_filename) == 6:
+                # To manage normal layers
+                crop, water_model, climate_model, scenario, variable, year = (
+                    split_filename
+                )
+            elif len(split_filename) == 2:
+                # To manage crop variables
+                crop, variable = split_filename
+                is_crop_variable = True
+            else:
+                # Anything else is unsupported
+                raise Exception("Invalid filename")
+
         except Exception as e:
             print(e)
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "message": "Invalid filename, must be in the format "
-                    "{crop}_{watermodel}_{climatemodel}_{scenario}_"
-                    "{variable}_{year}.tif",
+                    "message": "Invalid filename, must be either in the "
+                    "format {crop}_{watermodel}_{climatemodel}_{scenario}_"
+                    "{variable}_{year}.tif, or {crop}_{crop_variable}.tif",
                 },
             )
-        print(crop, water_model, climate_model, scenario, variable, year)
 
         # Query DB to check if the layers exist, if they do, avoid upload
-        query = select(Layer).where(
-            Layer.crop == crop,
-            Layer.water_model == water_model,
-            Layer.climate_model == climate_model,
-            Layer.scenario == scenario,
-            Layer.variable == variable,
-            Layer.year == int(year),
-        )
+        if is_crop_variable:
+            query = select(Layer).where(
+                Layer.crop == crop,
+                Layer.variable == variable,
+            )
+        else:
+            query = select(Layer).where(
+                Layer.crop == crop,
+                Layer.water_model == water_model,
+                Layer.climate_model == climate_model,
+                Layer.scenario == scenario,
+                Layer.variable == variable,
+                Layer.year == int(year),
+            )
 
         duplicate_layer = await session.exec(query)
         duplicate_layer = duplicate_layer.one_or_none()
@@ -83,7 +98,10 @@ async def upload_file(
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": f"Layer already exists for {filename}. Delete layer first to re-upload",
+                    "message": (
+                        f"Layer already exists for {filename}. "
+                        "Delete layer first to re-upload"
+                    ),
                 },
             )
 
@@ -106,19 +124,31 @@ async def upload_file(
                 detail="Failed to upload object to S3",
             )
 
-        obj = Layer(
-            filename=filename,
-            all_parts_received=True,
-            crop=crop,
-            water_model=water_model,
-            climate_model=climate_model,
-            scenario=scenario,
-            variable=variable,
-            year=int(year),
-            layer_name=filename.split(".")[0],
-            min_value=min_val,
-            max_value=max_val,
-        )
+        if is_crop_variable:
+            # Create a new layer object
+            obj = Layer(
+                filename=filename,
+                all_parts_received=True,
+                crop=crop,
+                variable=variable,
+                min_value=min_val,
+                max_value=max_val,
+                layer_name=filename.split(".")[0],
+            )
+        else:
+            obj = Layer(
+                filename=filename,
+                all_parts_received=True,
+                crop=crop,
+                water_model=water_model,
+                climate_model=climate_model,
+                scenario=scenario,
+                variable=variable,
+                year=int(year),
+                layer_name=filename.split(".")[0],
+                min_value=min_val,
+                max_value=max_val,
+            )
 
         session.add(obj)
         await session.commit()

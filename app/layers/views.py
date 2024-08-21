@@ -60,7 +60,8 @@ async def get_groups(
         res = await session.exec(
             select(column).where(Layer.enabled).distinct()
         )
-        groups[group.value] = [row for row in res.all()]
+
+        groups[group.value] = [row for row in res.all() if row is not None]
 
     return groups
 
@@ -69,11 +70,11 @@ async def get_groups(
 async def get_all_map_layers(
     session: AsyncSession = Depends(get_session),
     crop: str = Query(...),
-    water_model: str | None = Query(...),
-    climate_model: str | None = Query(...),
-    scenario: str | None = Query(...),
+    water_model: str | None = Query(None),
+    climate_model: str | None = Query(None),
+    scenario: str | None = Query(None),
     variable: str | None = Query(...),
-    year: int | None = Query(...),
+    year: int | None = Query(None),
 ) -> list[LayerRead]:
     """Get all Layer data for the Drop4Crop map
 

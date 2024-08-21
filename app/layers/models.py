@@ -19,11 +19,11 @@ class LayerVariables(str, enum.Enum):
 
 class LayerGroupsRead(SQLModel):
     crop: list[str] = []
-    water_model: list[str] = []
-    climate_model: list[str] = []
-    scenario: list[str] = []
+    water_model: list[str | None] = []
+    climate_model: list[str | None] = []
+    scenario: list[str | None] = []
     variable: list[str] = []
-    year: list[int] = []
+    year: list[int | None] = []
 
 
 class LayerBase(SQLModel):

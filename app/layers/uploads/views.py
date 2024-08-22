@@ -40,7 +40,7 @@ async def upload_file(
     """Handle file upload"""
 
     # Get the filename from the data body
-    filename = file.filename
+    filename = file.filename.lower()  # Ensure everything is lowercase
     data = file.file.read()
 
     try:
@@ -80,6 +80,7 @@ async def upload_file(
             query = select(Layer).where(
                 Layer.crop == crop,
                 Layer.variable == variable,
+                Layer.is_crop_specific,
             )
         else:
             query = select(Layer).where(
@@ -133,7 +134,8 @@ async def upload_file(
                 variable=variable,
                 min_value=min_val,
                 max_value=max_val,
-                layer_name=filename.split(".")[0],
+                layer_name=filename.split(".")[0],  # A bit naive, I'm sorry
+                is_crop_specific=True,
             )
         else:
             obj = Layer(
@@ -145,9 +147,10 @@ async def upload_file(
                 scenario=scenario,
                 variable=variable,
                 year=int(year),
-                layer_name=filename.split(".")[0],
+                layer_name=filename.split(".")[0],  # Again, sorry...
                 min_value=min_val,
                 max_value=max_val,
+                is_crop_specific=False,
             )
 
         session.add(obj)

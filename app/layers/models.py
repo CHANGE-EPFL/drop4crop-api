@@ -81,6 +81,7 @@ class LayerBase(SQLModel):
 
     min_value: float | None = Field(default=None)
     max_value: float | None = Field(default=None)
+    is_crop_specific: bool = Field(default=False)
 
     uploaded_at: datetime.datetime = Field(
         default_factory=datetime.datetime.now,

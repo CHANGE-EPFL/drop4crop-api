@@ -10,6 +10,8 @@ from aioboto3 import Session as S3Session
 from app.config import config
 from fastapi import UploadFile, Form
 from app.layers.utils import convert_to_cog_in_memory, get_min_max_of_raster
+from app.layers.services import delete_one
+
 
 router = APIRouter()
 
@@ -96,15 +98,20 @@ async def upload_file(
         duplicate_layer = duplicate_layer.one_or_none()
 
         if duplicate_layer:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": (
-                        f"Layer already exists for {filename}. "
-                        "Delete layer first to re-upload"
-                    ),
-                },
-            )
+            if config.OVERRIDE_DUPLICATE_LAYERS:
+                # Delete the layer and reupload
+                print(f"Deleting layer {duplicate_layer.layer_name}")
+                await delete_one(duplicate_layer.id, session, s3)
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            f"Layer already exists for {filename}. "
+                            "Delete layer first to re-upload"
+                        ),
+                    },
+                )
 
         # First convert the file to a COG
         cog_bytes = convert_to_cog_in_memory(data)

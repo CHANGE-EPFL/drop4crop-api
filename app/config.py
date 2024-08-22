@@ -34,6 +34,7 @@ class Config(BaseSettings):
     S3_ACCESS_KEY: str
     S3_SECRET_KEY: str
     S3_PREFIX: str
+    OVERRIDE_DUPLICATE_LAYERS: bool = True  # Override dup layers on upload
 
     # Redis cache
     TILE_CACHE_ENABLED: bool = True

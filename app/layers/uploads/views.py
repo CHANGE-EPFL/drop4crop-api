@@ -1,4 +1,4 @@
-from fastapi import Depends, APIRouter, Request, Header, HTTPException
+from fastapi import Depends, APIRouter, Request, Header, HTTPException, Query
 from typing import Any, Annotated
 from collections import defaultdict
 from app.auth import require_admin, User
@@ -38,6 +38,10 @@ async def upload_file(
     user: User = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
     s3: S3Session = Depends(get_s3),
+    overwrite_duplicates: bool = Query(
+        config.OVERWRITE_DUPLICATE_LAYERS,
+        description="Whether to overwrite duplicate layers or skip",
+    ),
 ) -> Any:
     """Handle file upload"""
 
@@ -98,7 +102,7 @@ async def upload_file(
         duplicate_layer = duplicate_layer.one_or_none()
 
         if duplicate_layer:
-            if config.OVERRIDE_DUPLICATE_LAYERS:
+            if overwrite_duplicates:
                 # Delete the layer and reupload
                 print(f"Deleting layer {duplicate_layer.layer_name}")
                 await delete_one(duplicate_layer.id, session, s3)
@@ -108,7 +112,8 @@ async def upload_file(
                     detail={
                         "message": (
                             f"Layer already exists for {filename}. "
-                            "Delete layer first to re-upload"
+                            "Delete layer first to re-upload, or set "
+                            "overwrite_duplicates=True"
                         ),
                     },
                 )

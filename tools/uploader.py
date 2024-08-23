@@ -113,6 +113,8 @@ def upload_file(server, file_path, token, overwrite_duplicates):
             token=token,
             overwrite_duplicates=overwrite_duplicates,
         )
+    elif response.status_code == 409 and not overwrite_duplicates:
+        print(f"File already exists on the server, skipping: {file_path}")
     else:
         print(
             f"Failed to upload {file_path}: {response.status_code}, "

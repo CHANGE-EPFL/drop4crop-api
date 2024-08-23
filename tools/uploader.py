@@ -107,7 +107,12 @@ def upload_file(server, file_path, token, overwrite_duplicates):
             f"Failed to upload {file_path}: {response.status_code}, "
             f"retrying..."
         )
-        upload_file(server=server, file_path=file_path, token=token)
+        upload_file(
+            server=server,
+            file_path=file_path,
+            token=token,
+            overwrite_duplicates=overwrite_duplicates,
+        )
     else:
         print(
             f"Failed to upload {file_path}: {response.status_code}, "

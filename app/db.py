@@ -8,7 +8,7 @@ from cashews import cache
 
 engine = create_async_engine(
     config.DB_URL,
-    echo=True,
+    echo=False,
     future=True,
     pool_pre_ping=True,
     pool_size=20,  # Increase pool size

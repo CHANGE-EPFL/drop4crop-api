@@ -15,6 +15,7 @@ APPLICATION_NAME: str = "Drop4Crop"
 DROP4CROP_SERVER: str = "https://drop4crop-dev.epfl.ch"
 TOKEN_CACHE_FILE: str = "token_cache.json"
 UPLOAD_ENDPOINT: str = "/api/layers/uploads"
+EXISTING_LAYERS_ENDPOINT: str = "/api/layers"
 DEFAULT_THREADS: int = 10
 OVERWRITE_DUPLICATES: bool = True
 
@@ -72,17 +73,72 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 
+import sys
+
+
+def query_existing_layers(server, token):
+    """Query the API to get existing layers and filenames."""
+    headers = {"Authorization": f"Bearer {token}"}
+    existing_files = set()
+
+    try:
+        response = requests.get(
+            f"{server}{EXISTING_LAYERS_ENDPOINT}?filter=%7B%7D&range=%5B0%2C10000%5D&sort=%5B%22uploaded_at%22%2C%22DESC%22%5D",
+            headers=headers,
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # Iterate over the response and collect filenames
+            for layer in data:
+                filename = layer.get("filename")
+                if filename:
+                    existing_files.add(filename)
+
+            logger.info(
+                f"Found {len(existing_files)} existing layers on the server."
+            )
+        else:
+            logger.error(
+                f"Failed to query existing layers: {response.status_code} - {response.text}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error querying existing layers: {e}")
+
+    return existing_files
+
+
+def filter_existing_files(files_to_upload, existing_files, overwrite):
+    """Filter out files that already exist on the server."""
+    if overwrite:
+        logger.info("Overwrite mode is enabled, all files will be uploaded.")
+        return files_to_upload
+
+    filtered_files = [
+        (file_path, filename)
+        for file_path, filename in files_to_upload
+        if filename not in existing_files
+    ]
+
+    logger.info(
+        f"Total files skipped (already exist): {len(files_to_upload) - len(filtered_files)}"
+    )
+    logger.info(f"Files planned for upload: {len(filtered_files)}")
+
+    return filtered_files
+
 
 def traverse_directory_and_build_filenames(base_directory: str):
     """Traverse directories and build the filenames according to the folder structure."""
     files_to_upload = []
+    file_count = 0  # Initialize file count
 
     for root, dirs, files in os.walk(base_directory):
         for file in files:
             if file.endswith(".tif"):
-                file_lower = file.lower().replace(
-                    ".tif", ""
-                )  # Variable is the filename without extension
+                file_lower = file.lower().replace(".tif", "")
                 relative_path = [
                     part.lower()
                     for part in os.path.relpath(root, base_directory).split(
@@ -90,14 +146,12 @@ def traverse_directory_and_build_filenames(base_directory: str):
                     )
                 ]
 
-                # Check if it's a crop-specific directory
+                # Crop-specific handling
                 if (
                     len(relative_path) >= 2
                     and relative_path[0] == "crop specific parameters"
                 ):
-                    crop_specific_dir = relative_path[
-                        1
-                    ]  # e.g., GeoTiff_Production, GeoTiff_MIRCA_Areas
+                    crop_specific_dir = relative_path[1]
                     crop_variable_mapping = {
                         "geotiff_production": "production",
                         "geotiff_mirca_areas": "area",
@@ -105,12 +159,10 @@ def traverse_directory_and_build_filenames(base_directory: str):
                     }
 
                     if crop_specific_dir.lower() in crop_variable_mapping:
-                        crop = file_lower.split("_")[
-                            0
-                        ].lower()  # Extract crop from the file name
+                        crop = file_lower.split("_")[0].lower()
                         variable = crop_variable_mapping[
                             crop_specific_dir.lower()
-                        ]  # Map folder name to variable
+                        ]
 
                         if (
                             crop in CROP_ITEMS
@@ -119,55 +171,46 @@ def traverse_directory_and_build_filenames(base_directory: str):
                             filename = f"{crop}_{variable}.tif"
                             file_path = os.path.join(root, file)
                             files_to_upload.append((file_path, filename))
-                            logger.debug(
-                                f"Valid crop-specific file: {filename} from {file_path}"
-                            )
-                        else:
-                            logger.debug(
-                                f"Skipping invalid crop-specific file: {file_lower} in {crop_specific_dir}"
-                            )
-                else:
-                    # For general structure, check if "2005soc" or "historical" is part of the path and ignore them
-                    path_filtered = [
-                        part
-                        for part in relative_path
-                        if part not in ["2005soc", "historical"]
-                    ]
-                    if len(path_filtered) < 5:
-                        logger.debug(
-                            f"Skipping incomplete structure: {path_filtered}"
-                        )
                         continue
 
-                    water_model = path_filtered[0]
-                    climate_model = path_filtered[1]
-                    scenario = path_filtered[2]
-                    year = path_filtered[3]
-                    crop = path_filtered[4]
-                    variable = file_lower
+                # General handling
+                path_filtered = [
+                    part
+                    for part in relative_path
+                    if part not in ["2005soc", "historical"]
+                ]
 
-                    if all(
-                        [
-                            crop in CROP_ITEMS,
-                            water_model in GLOBAL_WATER_MODELS,
-                            climate_model in CLIMATE_MODELS,
-                            scenario in SCENARIOS,
-                            variable in VARIABLES,
-                        ]
-                    ):
-                        filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
-                        file_path = os.path.join(root, file)
-                        files_to_upload.append((file_path, filename))
-                        logger.debug(
-                            f"Valid general file: {filename} from {file_path}"
-                        )
-                    else:
-                        logger.debug(
-                            f"Skipping invalid file: {file_lower} in {root}"
-                        )
+                if len(path_filtered) < 5:
+                    continue
 
-    logger.info(
-        f"Total valid files to upload (traverse mode): {len(files_to_upload)}"
+                water_model = path_filtered[0]
+                climate_model = path_filtered[1]
+                scenario = path_filtered[2]
+                year = path_filtered[3]
+                crop = path_filtered[4]
+                variable = file_lower
+
+                if all(
+                    [
+                        crop in CROP_ITEMS,
+                        water_model in GLOBAL_WATER_MODELS,
+                        climate_model in CLIMATE_MODELS,
+                        scenario in SCENARIOS,
+                        variable in VARIABLES,
+                    ]
+                ):
+                    filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
+                    file_path = os.path.join(root, file)
+                    files_to_upload.append((file_path, filename))
+
+                # Update the file count and display progress on the same line
+                file_count += 1
+                sys.stdout.write(f"\rFiles found: {file_count}")
+                sys.stdout.flush()
+
+    # Ensure the cursor moves to the next line after the final count
+    print(
+        f"\nTotal valid files to upload (traverse mode): {len(files_to_upload)}"
     )
     return files_to_upload, len(files_to_upload)
 
@@ -214,52 +257,67 @@ def flattened_directory_build_filenames(flat_directory: str):
     logger.info(
         f"Total valid files to upload (flattened mode): {len(files_to_upload)}"
     )
-    return files_to_upload, len(files_to_upload)
+    return files_to_upload
 
 
-def load_token_cache():
-    """Load the token cache from a file."""
+def load_token_cache(server: str):
+    """Load the token cache for a specific server from a file."""
     if os.path.exists(TOKEN_CACHE_FILE):
         with open(TOKEN_CACHE_FILE, "r") as file:
-            return json.load(file)
+            cache = json.load(file)
+            return cache.get(
+                server, None
+            )  # Return the token cache for the specific server
     return None
 
 
-def save_token_cache(token_data):
-    """Save the token cache to a file."""
+def save_token_cache(server: str, token_data):
+    """Save the token cache for a specific server to a file."""
+    if os.path.exists(TOKEN_CACHE_FILE):
+        with open(TOKEN_CACHE_FILE, "r") as file:
+            cache = json.load(file)
+    else:
+        cache = {}
+
+    cache[server] = token_data  # Store the token cache for the specific server
+
     with open(TOKEN_CACHE_FILE, "w") as file:
-        json.dump(token_data, file)
+        json.dump(cache, file)
 
 
-def get_token_from_cache(keycloak_openid):
-    """Retrieve and refresh the token from the cache if necessary."""
-    token_data = load_token_cache()
+def get_token_from_cache(server: str, keycloak_openid):
+    """Retrieve and refresh the token for a specific server from the cache if necessary."""
+    token_data = load_token_cache(server)
 
     if token_data:
         try:
             new_token_data = keycloak_openid.refresh_token(
                 token_data["refresh_token"]
             )
-            save_token_cache(new_token_data)
+            save_token_cache(server, new_token_data)
             return new_token_data["access_token"]
         except Exception:
-            logger.warning("Failed to refresh token, retrieving a new one.")
+            logger.warning(
+                f"Failed to refresh token for {server}, retrieving a new one."
+            )
     return None
 
 
-def get_new_token(keycloak_openid):
-    """Get a new token using provided credentials."""
-    username = input(f"Enter your {APPLICATION_NAME} username: ")
-    password = getpass.getpass(f"Enter your {APPLICATION_NAME} password: ")
+def get_new_token(server: str, keycloak_openid):
+    """Get a new token using provided credentials for a specific server."""
+    username = input(f"Enter your {APPLICATION_NAME} username for {server}: ")
+    password = getpass.getpass(
+        f"Enter your {APPLICATION_NAME} password for {server}: "
+    )
 
     token_data = keycloak_openid.token(username, password)
-    save_token_cache(token_data)
+    save_token_cache(server, token_data)
 
     return token_data["access_token"]
 
 
 def get_token(server: str):
-    """Authenticate with Keycloak and obtain or refresh a token."""
+    """Authenticate with Keycloak for a specific server and obtain or refresh a token."""
     response = requests.get(f"{server}/api/config/keycloak")
     response.raise_for_status()
     keycloak_config = response.json()
@@ -271,12 +329,9 @@ def get_token(server: str):
         verify=True,
     )
 
-    token = get_token_from_cache(keycloak_openid)
-    logger.info("Token loaded from cache.")
+    token = get_token_from_cache(server, keycloak_openid)
     if not token:
-        logger.info("No valid token found in cache.")
-        token = get_new_token(keycloak_openid)
-        logger.info("New token obtained.")
+        token = get_new_token(server, keycloak_openid)
 
     return token
 
@@ -330,7 +385,7 @@ def traverse(
     server: str = DROP4CROP_SERVER,
     threads: int = DEFAULT_THREADS,
     overwrite: bool = False,
-    noconfirm: bool = False,
+    noconfirm: bool = False,  # Added noconfirm flag for skipping confirmation
     debug: bool = False,
 ):
     """Traverse nested directories to find and upload files."""
@@ -344,27 +399,35 @@ def traverse(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
         )
-    logging.info("Starting the uploader.")
+
     token = get_token(server)
-    logging.info(f"Traversing folder: {directory}")
+
+    # Query existing layers
+    existing_files = query_existing_layers(server, token)
+
     files_to_upload, num_files = traverse_directory_and_build_filenames(
         directory
     )
 
-    # Summary
+    # Filter out files that already exist on the server if overwrite is disabled
+    files_to_upload = filter_existing_files(
+        files_to_upload, existing_files, overwrite
+    )
+
     logger.info(f"Server: {server}")
-    logger.info(f"Files to upload: {num_files}")
+    logger.info(f"Files to upload: {len(files_to_upload)}")
     logger.info(f"Threads: {threads}")
     logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
 
-    # Ask for confirmation unless --noconfirm is specified
+    # Proceed confirmation unless noconfirm is set
     if not noconfirm:
-        confirm = input("Do you want to proceed with these settings? [y/N]: ")
-        if confirm.lower() != "y":
-            print("Operation cancelled.")
-            return
+        proceed = input(
+            "Do you want to proceed with these settings? [y/N]: "
+        ).lower()
+        if proceed != "y":
+            logger.info("Operation cancelled.")
+            raise typer.Exit()
 
-    # Perform the parallel upload
     parallel_upload(files_to_upload, server, token, threads, overwrite)
 
 
@@ -374,7 +437,7 @@ def flattened(
     server: str = DROP4CROP_SERVER,
     threads: int = DEFAULT_THREADS,
     overwrite: bool = False,
-    noconfirm: bool = False,
+    noconfirm: bool = False,  # Added noconfirm flag for skipping confirmation
     debug: bool = False,
 ):
     """Upload files from a flat directory."""
@@ -389,23 +452,34 @@ def flattened(
             format="%(asctime)s - %(levelname)s - %(message)s",
         )
 
+    logging.info("Getting authentication token")
     token = get_token(server)
-    files_to_upload, num_files = flattened_directory_build_filenames(directory)
+    logging.info("Authenticated successfully")
 
-    # Summary
+    # Query existing layers
+    logging.info("Querying existing layers")
+    existing_files = query_existing_layers(server, token)
+    files_to_upload = flattened_directory_build_filenames(directory)
+
+    # Filter out files that already exist on the server if overwrite disabled
+    files_to_upload = filter_existing_files(
+        files_to_upload, existing_files, overwrite
+    )
+
     logger.info(f"Server: {server}")
-    logger.info(f"Files to upload: {num_files}")
+    logger.info(f"Files to upload: {len(files_to_upload)}")
     logger.info(f"Threads: {threads}")
     logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
 
-    # Ask for confirmation unless --noconfirm is specified
+    # Proceed confirmation unless noconfirm is set
     if not noconfirm:
-        confirm = input("Do you want to proceed with these settings? [y/N]: ")
-        if confirm.lower() != "y":
-            print("Operation cancelled.")
-            return
+        proceed = input(
+            "Do you want to proceed with these settings? [y/N]: "
+        ).lower()
+        if proceed != "y":
+            logger.info("Operation cancelled.")
+            raise typer.Exit()
 
-    # Perform the parallel upload
     parallel_upload(files_to_upload, server, token, threads, overwrite)
 
 

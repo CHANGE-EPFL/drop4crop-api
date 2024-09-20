@@ -5,8 +5,8 @@ import getpass
 import json
 import os
 import concurrent.futures
-import argparse
-import logging  # Added logging
+import logging
+import typer
 from keycloak import KeycloakOpenID
 
 # Constants
@@ -16,9 +16,6 @@ TOKEN_CACHE_FILE: str = "token_cache.json"
 UPLOAD_ENDPOINT: str = "/api/layers/uploads"
 DEFAULT_THREADS: int = 10
 OVERWRITE_DUPLICATES: bool = True
-
-# Set up logging
-logger = logging.getLogger(__name__)
 
 # The various items used to match in the directory structure
 CROP_ITEMS = [
@@ -65,79 +62,60 @@ VARIABLES = [
     "wdg",
 ]
 
+# Set up logger with timestamp
+logger = logging.getLogger(__name__)
 
-def traverse_directory_and_build_filenames(base_directory):
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_show_locals=False,
+)
+
+
+def traverse_directory_and_build_filenames(base_directory: str):
     """Traverse directories and build the filenames according to the folder structure."""
     files_to_upload = []
 
     for root, dirs, files in os.walk(base_directory):
         for file in files:
             if file.endswith(".tif"):
-                # Lowercase the filename for consistency
                 file_lower = file.lower().replace(
                     ".tif", ""
                 )  # Variable is the filename without extension
-
-                logger.debug(f"Found file: {file} in {root}")
-
-                # Split the path and start identifying the elements, ensuring everything is lowercase
                 relative_path = [
                     part.lower()
                     for part in os.path.relpath(root, base_directory).split(
                         os.sep
                     )
                 ]
-                logger.debug(f"Relative path parts: {relative_path}")
 
-                # If the structure contains "crop specific parameters"
                 if (
                     len(relative_path) >= 2
                     and relative_path[0] == "crop specific parameters"
                 ):
                     crop = relative_path[-1]
                     crop_specific_variable = relative_path[1]
-                    logger.debug(
-                        f"Processing as crop-specific: crop={crop}, crop_specific_variable={crop_specific_variable}"
-                    )
-
                     if (
                         crop in CROP_ITEMS
                         and crop_specific_variable in CROP_SPECIFIC_VARIABLES
                     ):
                         filename = f"{crop}_{crop_specific_variable}.tif"
-                        logger.debug(
-                            f"Valid crop-specific filename: {filename}"
-                        )
-                    else:
-                        logger.debug(
-                            f"Skipping invalid crop-specific structure: crop={crop}, variable={crop_specific_variable}"
-                        )
-                        continue  # Skip if the structure is incorrect
+                        file_path = os.path.join(root, file)
+                        files_to_upload.append((file_path, filename))
                 else:
-                    # For general structure, check if "2005soc" or "historical" is part of the path and ignore them
                     path_filtered = [
                         part
                         for part in relative_path
                         if part not in ["2005soc", "historical"]
                     ]
-
                     if len(path_filtered) < 5:
-                        logger.debug(
-                            f"Skipping incomplete structure: {path_filtered}"
-                        )
-                        continue  # Skip if the directory structure is not complete
-
+                        continue
                     water_model = path_filtered[0]
                     climate_model = path_filtered[1]
                     scenario = path_filtered[2]
                     year = path_filtered[3]
                     crop = path_filtered[4]
-
-                    # Use the filename as the variable
                     variable = file_lower
-                    logger.debug(
-                        f"Processing general structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}, year={year}"
-                    )
 
                     if all(
                         [
@@ -149,17 +127,57 @@ def traverse_directory_and_build_filenames(base_directory):
                         ]
                     ):
                         filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
-                        logger.debug(f"Valid general filename: {filename}")
-                    else:
-                        logger.debug(
-                            f"Skipping invalid structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}"
-                        )
-                        continue  # Skip if the structure doesn't match the expected values
+                        file_path = os.path.join(root, file)
+                        files_to_upload.append((file_path, filename))
 
-                file_path = os.path.join(root, file)
-                files_to_upload.append((file_path, filename))
+    logger.info(
+        f"Total valid files to upload (traverse mode): {len(files_to_upload)}"
+    )
+    return files_to_upload, len(files_to_upload)
 
-    logger.info(f"Total valid files to upload: {len(files_to_upload)}")
+
+def flattened_directory_build_filenames(flat_directory: str):
+    """Process all .tif files in a flat directory."""
+    files_to_upload = []
+
+    for file in os.listdir(flat_directory):
+        if file.endswith(".tif"):
+            file_lower = file.lower().replace(
+                ".tif", ""
+            )  # Variable is the filename without extension
+            file_parts = file_lower.split("_")
+
+            if len(file_parts) == 6:  # General structure file
+                crop, water_model, climate_model, scenario, variable, year = (
+                    file_parts
+                )
+                if all(
+                    [
+                        crop in CROP_ITEMS,
+                        water_model in GLOBAL_WATER_MODELS,
+                        climate_model in CLIMATE_MODELS,
+                        scenario in SCENARIOS,
+                        variable in VARIABLES,
+                    ]
+                ):
+                    files_to_upload.append(
+                        (os.path.join(flat_directory, file), file)
+                    )
+            elif len(file_parts) == 2:  # Crop-specific structure
+                crop, crop_specific_variable = file_parts
+                if (
+                    crop in CROP_ITEMS
+                    and crop_specific_variable in CROP_SPECIFIC_VARIABLES
+                ):
+                    files_to_upload.append(
+                        (os.path.join(flat_directory, file), file)
+                    )
+            else:
+                logger.debug(f"Skipping invalid filename structure: {file}")
+
+    logger.info(
+        f"Total valid files to upload (flattened mode): {len(files_to_upload)}"
+    )
     return files_to_upload, len(files_to_upload)
 
 
@@ -190,7 +208,6 @@ def get_token_from_cache(keycloak_openid):
             return new_token_data["access_token"]
         except Exception:
             logger.warning("Failed to refresh token, retrieving a new one.")
-
     return None
 
 
@@ -206,7 +223,7 @@ def get_new_token(keycloak_openid):
 
 
 def get_token(server: str):
-    """Get the keycloak config and obtain or refresh a token."""
+    """Authenticate with Keycloak and obtain or refresh a token."""
     response = requests.get(f"{server}/api/config/keycloak")
     response.raise_for_status()
     keycloak_config = response.json()
@@ -219,7 +236,6 @@ def get_token(server: str):
     )
 
     token = get_token_from_cache(keycloak_openid)
-
     if not token:
         token = get_new_token(keycloak_openid)
 
@@ -227,7 +243,7 @@ def get_token(server: str):
 
 
 def upload_file(server, file_path, token, filename, overwrite_duplicates):
-    """Upload a single file to the server with the appropriate filename."""
+    """Upload a single file to the server."""
     with open(file_path, "rb") as f:
         files = {"file": (filename, f)}
         headers = {"Authorization": f"Bearer {token}"}
@@ -248,15 +264,9 @@ def upload_file(server, file_path, token, filename, overwrite_duplicates):
 
 
 def parallel_upload(
-    files_to_upload,
-    server,
-    directory,
-    token,
-    num_threads,
-    overwrite_duplicates,
+    files_to_upload, server, token, num_threads, overwrite_duplicates
 ):
-    """Upload all files from the directory in parallel."""
-
+    """Upload all files in parallel."""
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=num_threads
     ) as executor:
@@ -271,82 +281,69 @@ def parallel_upload(
             )
             for file_path, filename in files_to_upload
         ]
-
         for future in concurrent.futures.as_completed(futures):
             future.result()
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--server",
-        help="The server URL to upload to",
-        default=DROP4CROP_SERVER,
-    )
-    parser.add_argument(
-        "--directory",
-        help="The directory containing the files to upload",
-        default=os.getcwd(),
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        help=f"The number of threads to use for uploading [default: {DEFAULT_THREADS}]",
-        default=DEFAULT_THREADS,
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite duplicate files if they exist on the server",
-    )
-    parser.add_argument(
-        "--noconfirm",
-        action="store_true",
-        help="Skip the confirmation prompt before uploading files",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode to show detailed logs",
-    )
-    args = parser.parse_args()
+@app.command()
+def traverse(
+    directory: str = typer.Argument(
+        help="Directory to traverse and upload files from"
+    ),
+    server: str = DROP4CROP_SERVER,
+    threads: int = DEFAULT_THREADS,
+    overwrite: bool = False,
+    debug: bool = False,
+):
+    """Upload files by traversing nested directories.
 
-    # Set logging level based on --debug flag
+    An example of a nested folder is:
+    ./WaterGAP2/IPSL-CM5A-LR/rcp26/2005soc/2090/Sorghum/WFb.tif
+    for the equivalent of sorghum_watergap2_ipsl-cm5a-lr_rcp26_wfb_2090.tif
+    in the flattened mode.
+    """
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=logging.DEBUG if debug else logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
-
-    server = args.server
-    directory = os.path.normpath(args.directory)
-    num_threads = args.threads
-    overwrite_duplicates = args.overwrite
-
     token = get_token(server)
-
     files_to_upload, num_files = traverse_directory_and_build_filenames(
         directory
     )
 
     logger.info(f"Server: {server}")
-    logger.info(f"Directory: {directory}")
     logger.info(f"Files to upload: {num_files}")
-    logger.info(f"Threads: {num_threads}")
-    logger.info(
-        f"Overwrite duplicates: {'Yes' if overwrite_duplicates else 'No'}"
-    )
+    logger.info(f"Threads: {threads}")
+    logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
 
-    if not args.noconfirm:
-        confirm = input("Do you want to proceed with these settings? [y/N]: ")
-        if confirm.lower() != "y":
-            logger.info("Operation cancelled.")
-            exit(0)
+    parallel_upload(files_to_upload, server, token, threads, overwrite)
 
-    parallel_upload(
-        files_to_upload,
-        server,
-        directory,
-        token,
-        num_threads,
-        overwrite_duplicates,
+
+@app.command()
+def flattened(
+    directory: str = typer.Argument(
+        help="Flat directory containing files to upload"
+    ),
+    server: str = DROP4CROP_SERVER,
+    threads: int = DEFAULT_THREADS,
+    overwrite: bool = False,
+    debug: bool = False,
+):
+    """Upload files from a flattened directory (no nested folders)."""
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    token = get_token(server)
+    files_to_upload, num_files = flattened_directory_build_filenames(directory)
+
+    logger.info(f"Server: {server}")
+    logger.info(f"Files to upload: {num_files}")
+    logger.info(f"Threads: {threads}")
+    logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
+
+    parallel_upload(files_to_upload, server, token, threads, overwrite)
+
+
+if __name__ == "__main__":
+    app()

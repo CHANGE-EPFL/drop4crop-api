@@ -4,6 +4,7 @@ import requests
 import getpass
 import json
 import os
+import sys
 import concurrent.futures
 import logging
 import typer
@@ -89,27 +90,55 @@ def traverse_directory_and_build_filenames(base_directory: str):
                     )
                 ]
 
+                # Check if it's a crop-specific directory
                 if (
                     len(relative_path) >= 2
                     and relative_path[0] == "crop specific parameters"
                 ):
-                    crop = relative_path[-1]
-                    crop_specific_variable = relative_path[1]
-                    if (
-                        crop in CROP_ITEMS
-                        and crop_specific_variable in CROP_SPECIFIC_VARIABLES
-                    ):
-                        filename = f"{crop}_{crop_specific_variable}.tif"
-                        file_path = os.path.join(root, file)
-                        files_to_upload.append((file_path, filename))
+                    crop_specific_dir = relative_path[
+                        1
+                    ]  # e.g., GeoTiff_Production, GeoTiff_MIRCA_Areas
+                    crop_variable_mapping = {
+                        "geotiff_production": "production",
+                        "geotiff_mirca_areas": "area",
+                        "geotiff_yield_gapfilled": "yield",
+                    }
+
+                    if crop_specific_dir.lower() in crop_variable_mapping:
+                        crop = file_lower.split("_")[
+                            0
+                        ].lower()  # Extract crop from the file name
+                        variable = crop_variable_mapping[
+                            crop_specific_dir.lower()
+                        ]  # Map folder name to variable
+
+                        if (
+                            crop in CROP_ITEMS
+                            and variable in CROP_SPECIFIC_VARIABLES
+                        ):
+                            filename = f"{crop}_{variable}.tif"
+                            file_path = os.path.join(root, file)
+                            files_to_upload.append((file_path, filename))
+                            logger.debug(
+                                f"Valid crop-specific file: {filename} from {file_path}"
+                            )
+                        else:
+                            logger.debug(
+                                f"Skipping invalid crop-specific file: {file_lower} in {crop_specific_dir}"
+                            )
                 else:
+                    # For general structure, check if "2005soc" or "historical" is part of the path and ignore them
                     path_filtered = [
                         part
                         for part in relative_path
                         if part not in ["2005soc", "historical"]
                     ]
                     if len(path_filtered) < 5:
+                        logger.debug(
+                            f"Skipping incomplete structure: {path_filtered}"
+                        )
                         continue
+
                     water_model = path_filtered[0]
                     climate_model = path_filtered[1]
                     scenario = path_filtered[2]
@@ -129,6 +158,13 @@ def traverse_directory_and_build_filenames(base_directory: str):
                         filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
                         file_path = os.path.join(root, file)
                         files_to_upload.append((file_path, filename))
+                        logger.debug(
+                            f"Valid general file: {filename} from {file_path}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Skipping invalid file: {file_lower} in {root}"
+                        )
 
     logger.info(
         f"Total valid files to upload (traverse mode): {len(files_to_upload)}"
@@ -236,8 +272,11 @@ def get_token(server: str):
     )
 
     token = get_token_from_cache(keycloak_openid)
+    logger.info("Token loaded from cache.")
     if not token:
+        logger.info("No valid token found in cache.")
         token = get_new_token(keycloak_openid)
+        logger.info("New token obtained.")
 
     return token
 
@@ -264,11 +303,11 @@ def upload_file(server, file_path, token, filename, overwrite_duplicates):
 
 
 def parallel_upload(
-    files_to_upload, server, token, num_threads, overwrite_duplicates
+    files_to_upload, server, token, threads, overwrite_duplicates
 ):
-    """Upload all files in parallel."""
+    """Upload files in parallel."""
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=num_threads
+        max_workers=threads
     ) as executor:
         futures = [
             executor.submit(
@@ -287,61 +326,86 @@ def parallel_upload(
 
 @app.command()
 def traverse(
-    directory: str = typer.Argument(
-        help="Directory to traverse and upload files from"
-    ),
+    directory: str,
     server: str = DROP4CROP_SERVER,
     threads: int = DEFAULT_THREADS,
     overwrite: bool = False,
+    noconfirm: bool = False,
     debug: bool = False,
 ):
-    """Upload files by traversing nested directories.
-
-    An example of a nested folder is:
-    ./WaterGAP2/IPSL-CM5A-LR/rcp26/2005soc/2090/Sorghum/WFb.tif
-    for the equivalent of sorghum_watergap2_ipsl-cm5a-lr_rcp26_wfb_2090.tif
-    in the flattened mode.
-    """
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    """Traverse nested directories to find and upload files."""
+    if debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+    logging.info("Starting the uploader.")
     token = get_token(server)
+    logging.info(f"Traversing folder: {directory}")
     files_to_upload, num_files = traverse_directory_and_build_filenames(
         directory
     )
 
+    # Summary
     logger.info(f"Server: {server}")
     logger.info(f"Files to upload: {num_files}")
     logger.info(f"Threads: {threads}")
     logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
 
+    # Ask for confirmation unless --noconfirm is specified
+    if not noconfirm:
+        confirm = input("Do you want to proceed with these settings? [y/N]: ")
+        if confirm.lower() != "y":
+            print("Operation cancelled.")
+            return
+
+    # Perform the parallel upload
     parallel_upload(files_to_upload, server, token, threads, overwrite)
 
 
 @app.command()
 def flattened(
-    directory: str = typer.Argument(
-        help="Flat directory containing files to upload"
-    ),
+    directory: str,
     server: str = DROP4CROP_SERVER,
     threads: int = DEFAULT_THREADS,
     overwrite: bool = False,
+    noconfirm: bool = False,
     debug: bool = False,
 ):
-    """Upload files from a flattened directory (no nested folders)."""
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    """Upload files from a flat directory."""
+    if debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+
     token = get_token(server)
     files_to_upload, num_files = flattened_directory_build_filenames(directory)
 
+    # Summary
     logger.info(f"Server: {server}")
     logger.info(f"Files to upload: {num_files}")
     logger.info(f"Threads: {threads}")
     logger.info(f"Overwrite duplicates: {'Yes' if overwrite else 'No'}")
 
+    # Ask for confirmation unless --noconfirm is specified
+    if not noconfirm:
+        confirm = input("Do you want to proceed with these settings? [y/N]: ")
+        if confirm.lower() != "y":
+            print("Operation cancelled.")
+            return
+
+    # Perform the parallel upload
     parallel_upload(files_to_upload, server, token, threads, overwrite)
 
 

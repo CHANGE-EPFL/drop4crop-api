@@ -6,6 +6,7 @@ import json
 import os
 import concurrent.futures
 import argparse
+import logging  # Added logging
 from keycloak import KeycloakOpenID
 
 # Constants
@@ -16,6 +17,8 @@ UPLOAD_ENDPOINT: str = "/api/layers/uploads"
 DEFAULT_THREADS: int = 10
 OVERWRITE_DUPLICATES: bool = True
 
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # The various items used to match in the directory structure
 CROP_ITEMS = [
@@ -75,8 +78,7 @@ def traverse_directory_and_build_filenames(base_directory):
                     ".tif", ""
                 )  # Variable is the filename without extension
 
-                # Print each found .tif file
-                print(f"Found file: {file} in {root}")
+                logger.debug(f"Found file: {file} in {root}")
 
                 # Split the path and start identifying the elements, ensuring everything is lowercase
                 relative_path = [
@@ -85,7 +87,7 @@ def traverse_directory_and_build_filenames(base_directory):
                         os.sep
                     )
                 ]
-                print(f"Relative path parts: {relative_path}")
+                logger.debug(f"Relative path parts: {relative_path}")
 
                 # If the structure contains "crop specific parameters"
                 if (
@@ -94,7 +96,7 @@ def traverse_directory_and_build_filenames(base_directory):
                 ):
                     crop = relative_path[-1]
                     crop_specific_variable = relative_path[1]
-                    print(
+                    logger.debug(
                         f"Processing as crop-specific: crop={crop}, crop_specific_variable={crop_specific_variable}"
                     )
 
@@ -103,13 +105,12 @@ def traverse_directory_and_build_filenames(base_directory):
                         and crop_specific_variable in CROP_SPECIFIC_VARIABLES
                     ):
                         filename = f"{crop}_{crop_specific_variable}.tif"
-                        print(f"Valid crop-specific filename: {filename}")
-                    else:
-                        print(
-                            f"Skipping invalid crop-specific structure: crop={crop}, variable={crop_specific_variable}"
+                        logger.debug(
+                            f"Valid crop-specific filename: {filename}"
                         )
-                        print(
-                            f"Expected crops: {CROP_ITEMS}, Expected variables: {CROP_SPECIFIC_VARIABLES}"
+                    else:
+                        logger.debug(
+                            f"Skipping invalid crop-specific structure: crop={crop}, variable={crop_specific_variable}"
                         )
                         continue  # Skip if the structure is incorrect
                 else:
@@ -121,7 +122,7 @@ def traverse_directory_and_build_filenames(base_directory):
                     ]
 
                     if len(path_filtered) < 5:
-                        print(
+                        logger.debug(
                             f"Skipping incomplete structure: {path_filtered}"
                         )
                         continue  # Skip if the directory structure is not complete
@@ -129,16 +130,12 @@ def traverse_directory_and_build_filenames(base_directory):
                     water_model = path_filtered[0]
                     climate_model = path_filtered[1]
                     scenario = path_filtered[2]
-                    year = path_filtered[
-                        3
-                    ]  # The year is now in the fourth position
-                    crop = path_filtered[
-                        4
-                    ]  # The crop is now in the fifth position
+                    year = path_filtered[3]
+                    crop = path_filtered[4]
 
                     # Use the filename as the variable
-                    variable = file_lower  # Extract variable from the file name (already lowercased)
-                    print(
+                    variable = file_lower
+                    logger.debug(
                         f"Processing general structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}, year={year}"
                     )
 
@@ -152,23 +149,17 @@ def traverse_directory_and_build_filenames(base_directory):
                         ]
                     ):
                         filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
-                        print(f"Valid general filename: {filename}")
+                        logger.debug(f"Valid general filename: {filename}")
                     else:
-                        print(
+                        logger.debug(
                             f"Skipping invalid structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}"
                         )
-                        print(f"Expected crops: {CROP_ITEMS}")
-                        print(f"Expected water models: {GLOBAL_WATER_MODELS}")
-                        print(f"Expected climate models: {CLIMATE_MODELS}")
-                        print(f"Expected scenarios: {SCENARIOS}")
-                        print(f"Expected variables: {VARIABLES}")
                         continue  # Skip if the structure doesn't match the expected values
 
                 file_path = os.path.join(root, file)
                 files_to_upload.append((file_path, filename))
 
-    print(f"Total valid files to upload: {len(files_to_upload)}")
-    # Return the files to upload and their count
+    logger.info(f"Total valid files to upload: {len(files_to_upload)}")
     return files_to_upload, len(files_to_upload)
 
 
@@ -192,14 +183,13 @@ def get_token_from_cache(keycloak_openid):
 
     if token_data:
         try:
-            # Refresh the token
             new_token_data = keycloak_openid.refresh_token(
                 token_data["refresh_token"]
             )
             save_token_cache(new_token_data)
             return new_token_data["access_token"]
         except Exception:
-            print("Failed to refresh token, retrieving a new one.")
+            logger.warning("Failed to refresh token, retrieving a new one.")
 
     return None
 
@@ -209,7 +199,6 @@ def get_new_token(keycloak_openid):
     username = input(f"Enter your {APPLICATION_NAME} username: ")
     password = getpass.getpass(f"Enter your {APPLICATION_NAME} password: ")
 
-    # Retrieve the token
     token_data = keycloak_openid.token(username, password)
     save_token_cache(token_data)
 
@@ -217,9 +206,7 @@ def get_new_token(keycloak_openid):
 
 
 def get_token(server: str):
-    """Get the keycloak config from /api/config/keycloak and use it to
-    authenticate with Keycloak and obtain or refresh a token.
-    """
+    """Get the keycloak config and obtain or refresh a token."""
     response = requests.get(f"{server}/api/config/keycloak")
     response.raise_for_status()
     keycloak_config = response.json()
@@ -228,14 +215,12 @@ def get_token(server: str):
         server_url=keycloak_config["url"],
         client_id=keycloak_config["clientId"],
         realm_name=keycloak_config["realm"],
-        verify=True,  # Optional, depending on your Keycloak setup
+        verify=True,
     )
 
-    # Try to get token from cache
     token = get_token_from_cache(keycloak_openid)
 
     if not token:
-        # If no valid token is found in the cache, get a new one
         token = get_new_token(keycloak_openid)
 
     return token
@@ -255,9 +240,9 @@ def upload_file(server, file_path, token, filename, overwrite_duplicates):
         )
 
     if response.status_code == 200:
-        print(f"Successfully uploaded {filename}")
+        logger.info(f"Successfully uploaded {filename}")
     else:
-        print(
+        logger.error(
             f"Failed to upload {filename}: {response.status_code} - {response.text}"
         )
 
@@ -287,13 +272,11 @@ def parallel_upload(
             for file_path, filename in files_to_upload
         ]
 
-        # Wait for all uploads to complete
         for future in concurrent.futures.as_completed(futures):
             future.result()
 
 
 if __name__ == "__main__":
-    # Use argparse to get input parameters
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--server",
@@ -321,35 +304,44 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip the confirmation prompt before uploading files",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode to show detailed logs",
+    )
     args = parser.parse_args()
+
+    # Set logging level based on --debug flag
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
     server = args.server
     directory = os.path.normpath(args.directory)
     num_threads = args.threads
     overwrite_duplicates = args.overwrite
 
-    # Get token
     token = get_token(server)
 
-    # Do this again, beforehand to be able ot see how many files
     files_to_upload, num_files = traverse_directory_and_build_filenames(
         directory
     )
 
-    # Summary
-    print(f"Server: {server}")
-    print(f"Directory: {directory}")
-    print(f"Files to upload: {num_files}")
-    print(f"Threads: {num_threads}")
-    print(f"Overwrite duplicates: {'Yes' if overwrite_duplicates else 'No'}")
+    logger.info(f"Server: {server}")
+    logger.info(f"Directory: {directory}")
+    logger.info(f"Files to upload: {num_files}")
+    logger.info(f"Threads: {num_threads}")
+    logger.info(
+        f"Overwrite duplicates: {'Yes' if overwrite_duplicates else 'No'}"
+    )
 
     if not args.noconfirm:
         confirm = input("Do you want to proceed with these settings? [y/N]: ")
         if confirm.lower() != "y":
-            print("Operation cancelled.")
+            logger.info("Operation cancelled.")
             exit(0)
 
-    # Perform the parallel upload
     parallel_upload(
         files_to_upload,
         server,

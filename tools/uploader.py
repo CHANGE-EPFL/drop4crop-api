@@ -17,6 +17,161 @@ DEFAULT_THREADS: int = 10
 OVERWRITE_DUPLICATES: bool = True
 
 
+# The various items used to match in the directory structure
+CROP_ITEMS = [
+    "barley",
+    "maize",
+    "potato",
+    "rice",
+    "sorghum",
+    "soy",
+    "sugarcane",
+    "wheat",
+]
+CROP_SPECIFIC_VARIABLES = [
+    "mirca_area_irrigated",
+    "mirca_area_total",
+    "mirca_rainfed",
+    "yield",
+    "production",
+]
+GLOBAL_WATER_MODELS = [
+    "cwatm",
+    "h08",
+    "lpjml",
+    "matsiro",
+    "pcr-globwb",
+    "watergap2",
+]
+CLIMATE_MODELS = ["gfdl-esm2m", "hadgem2-es", "ipsl-cm5a-lr", "miroc5"]
+SCENARIOS = ["rcp26", "rcp60", "rcp85"]
+VARIABLES = [
+    "vwc",
+    "vwcb",
+    "vwcg",
+    "vwcg_perc",
+    "vwcb_perc",
+    "wf",
+    "wfb",
+    "wfg",
+    "etb",
+    "etg",
+    "rb",
+    "rg",
+    "wdb",
+    "wdg",
+]
+
+
+def traverse_directory_and_build_filenames(base_directory):
+    """Traverse directories and build the filenames according to the folder structure."""
+    files_to_upload = []
+
+    for root, dirs, files in os.walk(base_directory):
+        for file in files:
+            if file.endswith(".tif"):
+                # Lowercase the filename for consistency
+                file_lower = file.lower().replace(
+                    ".tif", ""
+                )  # Variable is the filename without extension
+
+                # Print each found .tif file
+                print(f"Found file: {file} in {root}")
+
+                # Split the path and start identifying the elements, ensuring everything is lowercase
+                relative_path = [
+                    part.lower()
+                    for part in os.path.relpath(root, base_directory).split(
+                        os.sep
+                    )
+                ]
+                print(f"Relative path parts: {relative_path}")
+
+                # If the structure contains "crop specific parameters"
+                if (
+                    len(relative_path) >= 2
+                    and relative_path[0] == "crop specific parameters"
+                ):
+                    crop = relative_path[-1]
+                    crop_specific_variable = relative_path[1]
+                    print(
+                        f"Processing as crop-specific: crop={crop}, crop_specific_variable={crop_specific_variable}"
+                    )
+
+                    if (
+                        crop in CROP_ITEMS
+                        and crop_specific_variable in CROP_SPECIFIC_VARIABLES
+                    ):
+                        filename = f"{crop}_{crop_specific_variable}.tif"
+                        print(f"Valid crop-specific filename: {filename}")
+                    else:
+                        print(
+                            f"Skipping invalid crop-specific structure: crop={crop}, variable={crop_specific_variable}"
+                        )
+                        print(
+                            f"Expected crops: {CROP_ITEMS}, Expected variables: {CROP_SPECIFIC_VARIABLES}"
+                        )
+                        continue  # Skip if the structure is incorrect
+                else:
+                    # For general structure, check if "2005soc" or "historical" is part of the path and ignore them
+                    path_filtered = [
+                        part
+                        for part in relative_path
+                        if part not in ["2005soc", "historical"]
+                    ]
+
+                    if len(path_filtered) < 5:
+                        print(
+                            f"Skipping incomplete structure: {path_filtered}"
+                        )
+                        continue  # Skip if the directory structure is not complete
+
+                    water_model = path_filtered[0]
+                    climate_model = path_filtered[1]
+                    scenario = path_filtered[2]
+                    year = path_filtered[
+                        3
+                    ]  # The year is now in the fourth position
+                    crop = path_filtered[
+                        4
+                    ]  # The crop is now in the fifth position
+
+                    # Use the filename as the variable
+                    variable = file_lower  # Extract variable from the file name (already lowercased)
+                    print(
+                        f"Processing general structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}, year={year}"
+                    )
+
+                    if all(
+                        [
+                            crop in CROP_ITEMS,
+                            water_model in GLOBAL_WATER_MODELS,
+                            climate_model in CLIMATE_MODELS,
+                            scenario in SCENARIOS,
+                            variable in VARIABLES,
+                        ]
+                    ):
+                        filename = f"{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif"
+                        print(f"Valid general filename: {filename}")
+                    else:
+                        print(
+                            f"Skipping invalid structure: crop={crop}, water_model={water_model}, climate_model={climate_model}, scenario={scenario}, variable={variable}"
+                        )
+                        print(f"Expected crops: {CROP_ITEMS}")
+                        print(f"Expected water models: {GLOBAL_WATER_MODELS}")
+                        print(f"Expected climate models: {CLIMATE_MODELS}")
+                        print(f"Expected scenarios: {SCENARIOS}")
+                        print(f"Expected variables: {VARIABLES}")
+                        continue  # Skip if the structure doesn't match the expected values
+
+                file_path = os.path.join(root, file)
+                files_to_upload.append((file_path, filename))
+
+    print(f"Total valid files to upload: {len(files_to_upload)}")
+    # Return the files to upload and their count
+    return files_to_upload, len(files_to_upload)
+
+
 def load_token_cache():
     """Load the token cache from a file."""
     if os.path.exists(TOKEN_CACHE_FILE):
@@ -86,13 +241,10 @@ def get_token(server: str):
     return token
 
 
-def upload_file(server, file_path, token, overwrite_duplicates):
-    """Upload a single file to the server.
-
-    If the server responds with any server error, retry the file upload.
-    """
+def upload_file(server, file_path, token, filename, overwrite_duplicates):
+    """Upload a single file to the server with the appropriate filename."""
     with open(file_path, "rb") as f:
-        files = {"file": (os.path.basename(file_path), f)}
+        files = {"file": (filename, f)}
         headers = {"Authorization": f"Bearer {token}"}
 
         response = requests.post(
@@ -103,59 +255,45 @@ def upload_file(server, file_path, token, overwrite_duplicates):
         )
 
     if response.status_code == 200:
-        print(f"Successfully uploaded {file_path}")
-    elif response.status_code >= 500:
-        print(
-            f"Failed to upload {file_path}: {response.status_code}, "
-            f"retrying..."
-        )
-        upload_file(
-            server=server,
-            file_path=file_path,
-            token=token,
-            overwrite_duplicates=overwrite_duplicates,
-        )
-    elif response.status_code == 409 and not overwrite_duplicates:
-        print(f"File already exists on the server, skipping: {file_path}")
+        print(f"Successfully uploaded {filename}")
     else:
         print(
-            f"Failed to upload {file_path}: {response.status_code}, "
-            f"{response.text}"
+            f"Failed to upload {filename}: {response.status_code} - {response.text}"
         )
 
 
 def parallel_upload(
-    server, directory, token, num_threads, overwrite_duplicates
+    files_to_upload,
+    server,
+    directory,
+    token,
+    num_threads,
+    overwrite_duplicates,
 ):
-    """Upload all files in a directory in parallel using a specified number
-    of threads.
-
-    The files are only uploaded if they are .tif files.
-    """
-    files_to_upload = [
-        os.path.join(directory, file)
-        for file in os.listdir(directory)
-        if file.endswith(".tif")
-    ]
+    """Upload all files from the directory in parallel."""
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=num_threads
     ) as executor:
         futures = [
             executor.submit(
-                upload_file, server, file_path, token, overwrite_duplicates
+                upload_file,
+                server,
+                file_path,
+                token,
+                filename,
+                overwrite_duplicates,
             )
-            for file_path in files_to_upload
+            for file_path, filename in files_to_upload
         ]
 
-        # Wait for all futures to complete
+        # Wait for all uploads to complete
         for future in concurrent.futures.as_completed(futures):
             future.result()
 
 
 if __name__ == "__main__":
-
-    # Use argparse to get all the input parameters
+    # Use argparse to get input parameters
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--server",
@@ -190,44 +328,33 @@ if __name__ == "__main__":
     num_threads = args.threads
     overwrite_duplicates = args.overwrite
 
-    # Count .tif files in the directory
-    files_to_upload = [
-        file for file in os.listdir(directory) if file.endswith(".tif")
-    ]
-    num_files = len(files_to_upload)
-
-    # Get the token, using cache or prompting for username and password if needed
+    # Get token
     token = get_token(server)
-    print(f"Contacting server at {server}...")
 
-    # Print if token is valid
-    if not token:
-        print("Failed to obtain a valid authentication token. Exiting...")
-        exit(1)
-    else:
-        print("Authentication token is valid. Continuing...")
-    print()
+    # Do this again, beforehand to be able ot see how many files
+    files_to_upload, num_files = traverse_directory_and_build_filenames(
+        directory
+    )
 
-    # Summary before execution
+    # Summary
     print(f"Server: {server}")
     print(f"Directory: {directory}")
-    print(f"Number of .tif files to upload: {num_files}")
+    print(f"Files to upload: {num_files}")
     print(f"Threads: {num_threads}")
     print(f"Overwrite duplicates: {'Yes' if overwrite_duplicates else 'No'}")
-    print()
 
-    # Ask for confirmation unless --noconfirm is specified
     if not args.noconfirm:
-        if (
-            input(
-                "Do you want to proceed with these settings? [y/N]: "
-            ).lower()
-            != "y"
-        ):
+        confirm = input("Do you want to proceed with these settings? [y/N]: ")
+        if confirm.lower() != "y":
             print("Operation cancelled.")
             exit(0)
 
-    # Perform the upload in parallel
+    # Perform the parallel upload
     parallel_upload(
-        server, directory, token, num_threads, overwrite_duplicates
+        files_to_upload,
+        server,
+        directory,
+        token,
+        num_threads,
+        overwrite_duplicates,
     )

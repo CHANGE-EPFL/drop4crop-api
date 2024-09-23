@@ -42,6 +42,14 @@ class Config(BaseSettings):
     TILE_CACHE_PORT: int
     TILE_CACHE_TTL: int = 3600
 
+    CROP_VARIABLES: list[str] = [
+        "mirca_area_irrigated",
+        "mirca_area_total",
+        "mirca_rainfed",
+        "yield",
+        "production",
+    ]
+
     @model_validator(mode="after")
     @classmethod
     def form_db_url(cls, values: dict) -> dict:

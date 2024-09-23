@@ -58,13 +58,42 @@ async def upload_file(
                 crop, water_model, climate_model, scenario, variable, year = (
                     split_filename
                 )
-            elif len(split_filename) == 2:
-                # To manage crop variables
-                crop, variable = split_filename
+            elif len(split_filename) == 7:
+                # In this case, the filename is likely the _perc variant of
+                # the variable
+                (
+                    crop,
+                    water_model,
+                    climate_model,
+                    scenario,
+                    variable,
+                    unit,
+                    year,
+                ) = split_filename
+                if unit == "perc":
+                    variable = f"{variable}_{unit}"
+                else:
+                    raise ValueError("Invalid filename")
+
+            elif len(split_filename) < 6:
+                # To manage crop variables, they can be complicated...
+                # #either three underscores soy_mirca_area_irrigated, two
+                # underscores soy_area_total, or one underscore soy_yield.tif
+
+                # Check if the filename is in the format {crop}_{crop_variable}.tif
+                crop, variable = split_filename[0], "_".join(
+                    split_filename[1:]
+                )
+
+                # Validate that the variable is in the list of crop variables
+                if variable not in config.CROP_VARIABLES:
+                    raise ValueError("Invalid filename")
+
                 is_crop_variable = True
+
             else:
                 # Anything else is unsupported
-                raise Exception("Invalid filename")
+                raise ValueError("Invalid filename")
 
         except Exception as e:
             print(e)

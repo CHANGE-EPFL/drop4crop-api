@@ -9,6 +9,7 @@ import concurrent.futures
 import logging
 import typer
 from keycloak import KeycloakOpenID
+import sys
 
 # Constants
 APPLICATION_NAME: str = "Drop4Crop"
@@ -72,8 +73,6 @@ app = typer.Typer(
     add_completion=False,
     pretty_exceptions_show_locals=False,
 )
-
-import sys
 
 
 def query_existing_layers(server, token):
@@ -148,30 +147,34 @@ def traverse_directory_and_build_filenames(base_directory: str):
 
                 # Crop-specific handling
                 if (
-                    len(relative_path) >= 2
-                    and relative_path[0] == "crop specific parameters"
+                    len(relative_path) == 2
+                    and relative_path[0].lower() == "crop specific parameters"
                 ):
-                    crop_specific_dir = relative_path[1]
-                    crop_variable_mapping = {
-                        "geotiff_production": "production",
-                        "geotiff_mirca_areas": "area",
-                        "geotiff_yield_gapfilled": "yield",
-                    }
-
-                    if crop_specific_dir.lower() in crop_variable_mapping:
-                        crop = file_lower.split("_")[0].lower()
-                        variable = crop_variable_mapping[
-                            crop_specific_dir.lower()
-                        ]
-
-                        if (
-                            crop in CROP_ITEMS
-                            and variable in CROP_SPECIFIC_VARIABLES
-                        ):
-                            filename = f"{crop}_{variable}.tif"
-                            file_path = os.path.join(root, file)
-                            files_to_upload.append((file_path, filename))
+                    crop = file_lower.split("_")[0].lower()
+                    if "areair" in file_lower:
+                        variable = "mirca_area_irrigated"
+                    elif "arearf" in file_lower:
+                        variable = "mirca_area_rainfed"
+                    elif "areatotal" in file_lower:
+                        variable = "mirca_area_total"
+                    elif "yield" in file_lower:
+                        variable = "yield"
+                    elif "production" in file_lower:
+                        variable = "production"
+                    else:
+                        logger.warning(
+                            f"Unknown crop-specific variable in file: {file}"
+                        )
                         continue
+
+                    if (
+                        crop in CROP_ITEMS
+                        and variable in CROP_SPECIFIC_VARIABLES
+                    ):
+                        filename = f"{crop}_{variable}.tif"
+                        file_path = os.path.join(root, file)
+                        files_to_upload.append((file_path, filename))
+                    continue
 
                 # General handling
                 path_filtered = [

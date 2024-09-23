@@ -149,6 +149,13 @@ async def upload_file(
         # Get min/max of the raster
         min_val, max_val = get_min_max_of_raster(cog_bytes)
 
+        # Abort if min/max are -inf or inf
+        if min_val == float("-inf") or max_val == float("inf"):
+            raise HTTPException(
+                status_code=400,
+                detail="Min or max value is inf, cannot upload",
+            )
+
         # Upload the file to S3
         response = await s3.put_object(
             Bucket=config.S3_BUCKET_ID,

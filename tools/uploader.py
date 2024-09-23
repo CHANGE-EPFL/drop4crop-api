@@ -155,15 +155,16 @@ def traverse_directory_and_build_filenames(base_directory: str):
                         variable = "mirca_area_irrigated"
                     elif "arearf" in file_lower:
                         variable = "mirca_area_rainfed"
-                    elif "areatotal" in file_lower:
+                    elif "areatot" in file_lower:
                         variable = "mirca_area_total"
                     elif "yield" in file_lower:
                         variable = "yield"
-                    elif "production" in file_lower:
+                    elif "prod" in file_lower:
                         variable = "production"
                     else:
                         logger.warning(
                             f"Unknown crop-specific variable in file: {file}"
+                            f"Understood as {crop}_{file_lower.split('_')[1]}.tif"
                         )
                         continue
 

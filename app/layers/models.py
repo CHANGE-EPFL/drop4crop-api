@@ -3,9 +3,10 @@ from uuid import uuid4, UUID
 from sqlalchemy.sql import func
 import datetime
 import enum
-from typing import Any
+from typing import Any, Self
 from app.layers.links import LayerCountryLink
 from app.styles.models import Style
+from pydantic import model_validator
 
 
 class LayerVariables(str, enum.Enum):
@@ -104,6 +105,21 @@ class LayerBase(SQLModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+    @model_validator(mode="after")
+    def accept_infinite_values(self) -> Self:
+        # print("VALUES", values)
+        if self.min_value == float("inf"):
+            print("YES, MIN IS INFINITE")
+            self.min_value = None
+            print("NOW MIN IS", self.min_value)
+        if self.max_value == float("inf"):
+            print("YES, MAX IS INFINITE")
+            self.max_value = None
+            print("NOW MAX IS", self.max_value)
+
+        print("VALUES", self)
+        return self
 
 
 class Layer(LayerBase, table=True):

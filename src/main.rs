@@ -1,6 +1,6 @@
+mod config;
 pub mod s3;
 pub mod tiles;
-
 use georaster;
 use georaster::{
     geotiff::{GeoTiffReader, RasterValue},
@@ -34,17 +34,17 @@ async fn main() {
 
     // Set XYZ coordinates
     // let (z, x, y): (u32, u32, u32) = (8, 136, 91);
-    let xyz_tile = XYZTile {
-        x: 136,
-        y: 91,
-        z: 8,
-    };
+    let xyz_tile = XYZTile { x: 0, y: 0, z: 0 };
+    // let xyz_tile = XYZTile {
+    //     x: 136,
+    //     y: 91,
+    //     z: 8,
+    // };
     println!("XYZ: {:?}", xyz_tile);
     let bounds: BoundingBox = xyz_tile.into();
     // let bounds = tile_to_bbox(z, x, y);
     println!("Bbox: {:?}", bounds);
 
-    // let mut datset = geotiff::GeoTiff::read("in-memory").expect("Failed to read dataset");
     let cursor = std::io::Cursor::new(data);
     let mut dataset = GeoTiffReader::open(cursor).expect("Failed to open GeoTiff");
 
@@ -125,23 +125,37 @@ async fn main() {
         // (w, h) = (tile_px1 - tile_px0, tile_py1 - tile_py0);
         let mut img = ImageBuffer::new(w, h);
         for (x, y, pixel) in dataset.pixels(x0, y0, w, h) {
-            println!("x: {}, y: {}, pixel: {:?}", x, y, pixel);
-            if let RasterValue::U16(v) = pixel {
-                img.put_pixel(x - x0, y - y0, image::Luma([v]));
-            }
+            // Normalize the pixel value based on its type.
+            let norm = match pixel {
+                RasterValue::U8(v) => v as f32 / 255.0,
+                RasterValue::U16(v) => v as f32 / 65535.0,
+                RasterValue::I16(v) => (v as f32 + 32768.0) / 65535.0,
+                RasterValue::F32(v) => v,
+                RasterValue::F64(v) => v as f32 / 65535.0,
+                _ => 0.0, // Fallback for any other variants.
+            };
+
+            // Scale to the 0-255 range.
+            let value_u8 = (norm * 255.0).clamp(0.0, 255.0).round() as u8;
+
+            // Store the converted pixel in the image buffer.
+            img.put_pixel(x - x0, y - y0, image::Luma([value_u8]));
         }
 
         // Find the minimum and maximum of the pixels in the image.
-        let (min, max) = img.pixels().fold((u16::MAX, u16::MIN), |(min, max), p| {
-            let v = p[0];
-            (min.min(v), max.max(v))
-        });
-        println!("Image pixel range: {} - {}", min, max);
+        // let (min, max) = img.pixels().fold((u16::MAX, u16::MIN), |(min, max), p| {
+        //     let v = p[0];
+        //     (min.min(v), max.max(v))
+        // });
+        // println!("Image pixel range: {} - {}", min, max);
         println!(
-            "Image stats: {:?} {:?}",
+            "Image stats: {:?} {:?} {:?}",
             dataset.geo_params,
-            img.dimensions()
+            img.dimensions(),
+            dataset.image_info(),
         );
+
+        // Get the minimum and maximum pixel count for image
 
         img.save("output.png").expect("Failed to save image");
     } else {

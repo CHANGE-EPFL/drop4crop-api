@@ -13,8 +13,8 @@ pub struct Config {
     pub s3_secret_key: String,
     pub s3_region: String,
     pub s3_endpoint: String,
-    // pub app_name: String,
-    // pub deployment: String,
+    pub app_name: String,
+    pub deployment: String,
 }
 
 impl Config {
@@ -34,7 +34,7 @@ impl Config {
         // });
 
         let config = Config {
-            // app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
+            app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
             s3_bucket_id: env::var("S3_BUCKET_ID").expect("S3_BUCKET_ID must be set"),
             s3_access_key: env::var("S3_ACCESS_KEY").expect("S3_ACCESS_KEY must be set"),
             s3_secret_key: env::var("S3_SECRET_KEY").expect("S3_SECRET_KEY must be set"),
@@ -44,8 +44,8 @@ impl Config {
             // keycloak_ui_id: env::var("KEYCLOAK_UI_ID").expect("KEYCLOAK_UI_ID must be set"),
             // keycloak_url: env::var("KEYCLOAK_URL").expect("KEYCLOAK_URL must be set"),
             // keycloak_realm: env::var("KEYCLOAK_REALM").expect("KEYCLOAK_REALM must be set"),
-            // deployment: env::var("DEPLOYMENT")
-            //     .expect("DEPLOYMENT must be set, this can be local, dev, stage, or prod"),
+            deployment: env::var("DEPLOYMENT")
+                .expect("DEPLOYMENT must be set, this can be local, dev, stage, or prod"),
             // db_url,
         };
 

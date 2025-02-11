@@ -4,11 +4,11 @@ use s3::creds::Credentials;
 use s3::region::Region;
 use s3::Bucket;
 
-pub(crate) async fn get_object(path: &str, object_id: &str) -> Result<Vec<u8>> {
+pub(crate) async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Given a filename, seek the file from S3 and return it as a byte stream.
 
     let config = Config::from_env();
-
+    let path = format!("{}-{}", config.app_name, config.deployment);
     let credentials = Credentials::new(
         Some(&config.s3_access_key),
         Some(&config.s3_secret_key),

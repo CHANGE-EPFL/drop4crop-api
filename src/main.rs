@@ -1,44 +1,13 @@
+pub mod s3;
+pub mod tiles;
+
 use georaster;
 use georaster::{
     geotiff::{GeoTiffReader, RasterValue},
     Coordinate,
 };
 use image::ImageBuffer;
-use std::f64::consts::PI;
-use tile_grid::{tms, BoundingBox, Xyz};
-pub mod s3;
-/// Converts a tile coordinate (z, x, y) to a bounding box in WGS84.
-///
-/// Returns a tuple: (min_lon, min_lat, max_lon, max_lat)
-fn tile_to_bbox(z: u32, x: u32, y: u32) -> BoundingBox {
-    // Number of tiles per side at zoom level z.
-    let n = 2u32.pow(z) as f64;
-
-    // Convert x to longitude boundaries.
-    let left = x as f64 / n * 360.0 - 180.0;
-    let right = (x as f64 + 1.0) / n * 360.0 - 180.0;
-
-    // Helper function to convert a y coordinate to latitude.
-    fn tile2lat(y: f64, n: f64) -> f64 {
-        // Compute the latitude in radians using the inverse Mercator projection,
-        // then convert to degrees.
-        let lat_rad = ((PI * (1.0 - 2.0 * y / n)).sinh()).atan();
-        lat_rad.to_degrees()
-    }
-
-    // For the y coordinate:
-    // - The top of the tile (north edge) is given by y.
-    // - The bottom of the tile (south edge) is given by y + 1.
-    let top = tile2lat(y as f64, n); // north
-    let bottom = tile2lat(y as f64 + 1.0, n); // south
-
-    BoundingBox {
-        left,
-        bottom,
-        right,
-        top,
-    }
-}
+use tiles::{BoundingBox, XYZTile};
 
 #[tokio::main]
 async fn main() {
@@ -63,23 +32,17 @@ async fn main() {
         }
     };
 
-    // Read dataset with geotiff
-    let list = tms().list().into_iter().collect::<Vec<_>>();
-    println!("List: {:?}", list);
-    let tms = tms().lookup("WorldCRS84Quad").unwrap();
-    let (z, x, y): (u32, u32, u32) = (8, 136, 91);
-    // let (z, x, y): (u32, u32, u32) = (2, 3, 2);
-    // Get the bounds for tile Z=4, X=10, Y=10 in the input projection
-    let bounds = tms.xy_bounds(&Xyz {
-        z: z as u8,
-        x: x as u64,
-        y: y as u64,
-    });
-    println!("Bounds: {:?}\n\n", bounds);
-
-    // let martin_conv = martin_tile_utils::xyz_to_bbox(zoom, min_x, min_y, max_x, max_y)
-    let bounds = tile_to_bbox(z, x, y);
-    println!("Local function Bbox: {:?}", bounds);
+    // Set XYZ coordinates
+    // let (z, x, y): (u32, u32, u32) = (8, 136, 91);
+    let xyz_tile = XYZTile {
+        x: 136,
+        y: 91,
+        z: 8,
+    };
+    println!("XYZ: {:?}", xyz_tile);
+    let bounds: BoundingBox = xyz_tile.into();
+    // let bounds = tile_to_bbox(z, x, y);
+    println!("Bbox: {:?}", bounds);
 
     // let mut datset = geotiff::GeoTiff::read("in-memory").expect("Failed to read dataset");
     let cursor = std::io::Cursor::new(data);

@@ -8,8 +8,6 @@ use axum::{routing::get, routing::Router};
 
 #[tokio::main]
 async fn main() {
-    let config = config::Config::from_env();
-
     let app = Router::new().route("/tiles/{z}/{x}/{y}", get(views::tile_handler));
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();

@@ -7,6 +7,7 @@ use axum::{
 };
 use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
+use image::{ImageBuffer, Rgba};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -25,16 +26,27 @@ pub async fn tile_handler(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Convert the grayscale ImageBuffer to RGBA.
+    let (width, height) = img.dimensions();
+    let img_rgba: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, y| {
+        let p = img.get_pixel(x, y)[0];
+        if p == 0 {
+            Rgba([0, 0, 0, 0])
+        } else {
+            Rgba([p, p, p, 255])
+        }
+    });
+
     // Encode the ImageBuffer to PNG.
     let mut png_data = Vec::new();
     {
         let encoder = PngEncoder::new(&mut png_data);
         encoder
             .write_image(
-                img.as_raw(),
-                img.width(),
-                img.height(),
-                image::ColorType::L8.into(), // Use L8 for grayscale. Adjust if needed.
+                img_rgba.as_raw(),
+                img_rgba.width(),
+                img_rgba.height(),
+                image::ColorType::Rgba8.into(),
             )
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }

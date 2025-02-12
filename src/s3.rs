@@ -1,6 +1,6 @@
 use crate::config::Config;
 use anyhow::Result;
-use redis::{self, AsyncCommands};
+use redis;
 use s3::creds::Credentials;
 use s3::region::Region;
 use s3::Bucket;
@@ -9,7 +9,6 @@ pub(crate) async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Given a filename, seek the file from S3 and return it as a byte stream.
 
     let config = Config::from_env();
-    println!("Config: {:?}", config);
     let path = format!("{}-{}", config.app_name, config.deployment);
     let credentials = Credentials::new(
         Some(&config.s3_access_key),
@@ -49,8 +48,8 @@ pub async fn check_cache(filename: &str) -> Result<(Vec<u8>, bool)> {
     let filename = format!("{}/{}", path, filename);
 
     let client = redis::Client::open(format!(
-        "redis://{}:{}/",
-        config.redis_url, config.redis_port
+        "redis://{}:{}/{}",
+        config.redis_url, config.redis_port, config.redis_db
     ))
     .unwrap();
 

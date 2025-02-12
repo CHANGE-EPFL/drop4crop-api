@@ -18,3 +18,4 @@ dotenvy = "0.15.7"
 serde = "1.0.217"
 axum = "0.8.1"
 redis = { version = "0.28.2", features = ["tokio-comp"] }
+proj4rs = "0.1.5"

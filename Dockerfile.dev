@@ -1,0 +1,9 @@
+FROM rust:1.84.0
+
+RUN cargo install bacon
+WORKDIR /app
+
+COPY Cargo.lock Cargo.toml bacon.toml /app/
+COPY ./src/ /app/src/
+
+ENTRYPOINT ["bacon", "--headless", "run"]

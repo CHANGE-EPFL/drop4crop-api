@@ -9,10 +9,11 @@ warp = "0.3"
 tokio = { version = "1", features = ["full"] }
 image = "0.25.5"
 geo-types = "0.7.15"
-gdal = { version = "0.17.1", features = ["bindgen"] }
+# gdal = { version = "0.17.1", features = ["bindgen"] }
 rust-s3 = "0.35.1"
 anyhow = "1.0.95"
 georaster = "0.2.0"
 tile-grid = "0.6.2"
 dotenvy = "0.15.7"
 serde = "1.0.217"
+axum = "0.8.1"

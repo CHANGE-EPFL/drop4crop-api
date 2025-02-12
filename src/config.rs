@@ -13,6 +13,9 @@ pub struct Config {
     pub s3_secret_key: String,
     pub s3_region: String,
     pub s3_endpoint: String,
+    pub redis_url: String,
+    pub redis_port: u32,
+    pub redis_db: String,
     pub app_name: String,
     pub deployment: String,
 }
@@ -46,7 +49,12 @@ impl Config {
             // keycloak_realm: env::var("KEYCLOAK_REALM").expect("KEYCLOAK_REALM must be set"),
             deployment: env::var("DEPLOYMENT")
                 .expect("DEPLOYMENT must be set, this can be local, dev, stage, or prod"),
-            // db_url,
+            redis_url: env::var("REDIS_URL").expect("REDIS_URL must be set"),
+            redis_port: env::var("REDIS_PORT")
+                .unwrap()
+                .parse()
+                .expect("REDIS_PORT must be set"),
+            redis_db: env::var("REDIS_DB").unwrap_or_else(|_| "1".to_string()),
         };
 
         config

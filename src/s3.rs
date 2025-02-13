@@ -69,7 +69,7 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
 
     // Check if the object is already in the cache.
     if let Some(data) = redis_get(&mut con, &cache_key).await? {
-        println!("Cache hit for {}", cache_key);
+        // println!("Cache hit for {}", cache_key);
         return Ok(data);
     }
 

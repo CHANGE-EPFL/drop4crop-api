@@ -19,3 +19,5 @@ serde = "1.0.217"
 axum = "0.8.1"
 redis = { version = "0.28.2", features = ["tokio-comp"] }
 proj4rs = "0.1.5"
+serde_json = "1.0.138"
+log = "0.4.25"

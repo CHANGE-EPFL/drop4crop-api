@@ -1,12 +1,9 @@
 use crate::s3;
 use anyhow::Result;
-use georaster::{
-    geotiff::{GeoTiffReader, RasterValue},
-    Coordinate,
-};
+use georaster::geotiff::{GeoTiffReader, RasterValue};
 use image::ImageBuffer;
-use proj4rs::Proj;
 use std::f64::consts::PI;
+
 #[derive(Debug)]
 pub struct XYZTile {
     pub x: u32,
@@ -24,58 +21,31 @@ pub struct BoundingBox {
 
 impl From<&XYZTile> for BoundingBox {
     fn from(tile: &XYZTile) -> Self {
-        // Use Web Mercator tile calculations and then transform to WGS84 via proj4rs.
+        // Compute geographic bounds (in Web Mercator meters) for the tile.
+        // The entire world in Web Mercator is approximately [-origin_shift, origin_shift] in x
+        // and [origin_shift, -origin_shift] in y.
         const R: f64 = 6378137.0;
         let tile_count = 2u32.pow(tile.z) as f64;
-        // Compute tile width in meters.
         let tile_width_m = (2.0 * PI * R) / tile_count;
         let origin_shift = PI * R;
 
-        // Web Mercator tile bounds in meters:
         let min_x_m = -origin_shift + tile.x as f64 * tile_width_m;
         let max_x_m = -origin_shift + (tile.x as f64 + 1.0) * tile_width_m;
         let max_y_m = origin_shift - tile.y as f64 * tile_width_m;
         let min_y_m = origin_shift - (tile.y as f64 + 1.0) * tile_width_m;
 
-        // Create projections: from Web Mercator to WGS84.
-        let proj_merc = Proj::from_proj_string(
-            "+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 \
-                 +lon_0=0.0 +x_0=0.0 +y_0=0.0 +k=1.0 +units=m +nadgrids=@null +no_defs",
-        )
-        .expect("Failed to create Web Mercator projection");
-
-        let proj_wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")
-            .expect("Failed to create WGS84 projection");
-
-        // Transform the top-left corner (min_x_m, max_y_m).
-        let mut top_left = (min_x_m, max_y_m, 0.0);
-        proj4rs::transform::transform(&proj_merc, &proj_wgs84, &mut top_left)
-            .expect("Transformation failed");
-        // proj4rs returns angular coordinates in radians for geographic CRS.
-        top_left.0 = top_left.0.to_degrees();
-        top_left.1 = top_left.1.to_degrees();
-
-        // Transform the bottom-right corner (max_x_m, min_y_m).
-        let mut bottom_right = (max_x_m, min_y_m, 0.0);
-        proj4rs::transform::transform(&proj_merc, &proj_wgs84, &mut bottom_right)
-            .expect("Transformation failed");
-        bottom_right.0 = bottom_right.0.to_degrees();
-        bottom_right.1 = bottom_right.1.to_degrees();
-
         BoundingBox {
-            left: top_left.0,
-            top: top_left.1,
-            right: bottom_right.0,
-            bottom: bottom_right.1,
+            left: min_x_m,
+            top: max_y_m,
+            right: max_x_m,
+            bottom: min_y_m,
         }
     }
 }
 
 impl XYZTile {
     pub async fn get_one(&self, filename: &str) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
-        // Gets a file from the S3 bucket and returns image data.
         let object = s3::get_object(filename).await;
-
         match &object {
             Ok(data) => println!(
                 "Object size: {:.2} MB",
@@ -85,112 +55,93 @@ impl XYZTile {
         }
         let data = match object {
             Ok(data) => data,
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
+        // Compute the geographic bounds for this tile.
         let bounds: BoundingBox = self.into();
 
+        // Open the GeoTIFF from the in-memory data.
         let cursor = std::io::Cursor::new(data);
         let mut dataset = GeoTiffReader::open(cursor).expect("Failed to open GeoTiff");
 
-        // Print image pixel dimensions and corners
-        if let Some((img_width, img_height)) = dataset.image_info().dimensions {
-            println!(
-                "Image pixel dimensions: {} x {} | corners: top-left: (0, 0), bottom-right: ({}, {})",
-                img_width, img_height, img_width, img_height
-            );
+        // Get the TIFF's dimensions.
+        let (tiff_width, tiff_height) = if let Some(dim) = dataset.image_info().dimensions {
+            dim
         } else {
-            println!("Image dimensions not available.");
-        }
-
-        // Convert the tile's geographic bounds (from TMS) to pixel coordinates.
-        // (Assuming that the tile_grid BoundingBox fields match: left, bottom, right, top)
-        let tile_top_left_geo = Coordinate {
-            x: bounds.left,
-            y: bounds.top,
-        };
-        let tile_bottom_right_geo = Coordinate {
-            x: bounds.right,
-            y: bounds.bottom,
+            return Err(anyhow::anyhow!("Image dimensions not available."));
         };
 
-        if let (Some((tile_px0, tile_py0)), Some((tile_px1, tile_py1))) = (
-            dataset.coord_to_pixel(tile_top_left_geo),
-            dataset.coord_to_pixel(tile_bottom_right_geo),
-        ) {
-            println!("Tile geographic bounds: {:?}", bounds);
+        // Here we assume the TIFF covers the entire world in Web Mercator.
+        // Web Mercator extent (in meters):
+        // x: [-origin_shift, origin_shift]
+        // y: [origin_shift, -origin_shift]
+        const R: f64 = 6378137.0;
+        let origin_shift = PI * R;
+        let world_width = 2.0 * origin_shift;
+        let world_height = 2.0 * origin_shift;
+
+        // Convert geographic coordinates (in meters) to pixel coordinates in the TIFF.
+        // For x: ((x_geo - (-origin_shift)) / world_width) * tiff_width
+        // For y: ((origin_shift - y_geo) / world_height) * tiff_height
+        let tile_px0 =
+            (((bounds.left + origin_shift) / world_width) * (tiff_width as f64)).round() as u32;
+        let tile_py0 =
+            (((origin_shift - bounds.top) / world_height) * (tiff_height as f64)).round() as u32;
+        let tile_px1 =
+            (((bounds.right + origin_shift) / world_width) * (tiff_width as f64)).round() as u32;
+        let tile_py1 =
+            (((origin_shift - bounds.bottom) / world_height) * (tiff_height as f64)).round() as u32;
+
+        let w = tile_px1.saturating_sub(tile_px0);
+        let h = tile_py1.saturating_sub(tile_py0);
+
+        println!(
+            "Computed tile pixel window: top-left ({}, {}), width: {}, height: {}",
+            tile_px0, tile_py0, w, h
+        );
+
+        // If the computed window is not exactly 512x512, warn and later resize using nearest-neighbor.
+        if w != 512 || h != 512 {
             println!(
-                "Tile top-left pixel coordinate: ({}, {}) | ({}, {})",
-                tile_px0, tile_py0, tile_px1, tile_py1
+                "Warning: expected window size 512x512 but got {}x{}. Will resize using nearest-neighbor.",
+                w, h
             );
-
-            let (x0, y0, w, h) = (
-                tile_px0,
-                tile_py0,
-                (tile_px1 - tile_px0),
-                (tile_py1 - tile_py0),
-            );
-
-            let mut img = ImageBuffer::new(w, h);
-            for (x, y, pixel) in dataset.pixels(x0, y0, w, h) {
-                // Normalize the pixel value based on its type.
-                let norm = match pixel {
-                    RasterValue::U8(v) => v as f32 / 255.0,
-                    RasterValue::U16(v) => v as f32 / 65535.0,
-                    RasterValue::I16(v) => (v as f32 + 32768.0) / 65535.0,
-                    RasterValue::F32(v) => v,
-                    RasterValue::F64(v) => v as f32 / 65535.0,
-                    _ => 0.0, // Fallback for any other variants.
-                };
-
-                // Scale to the 0-255 range.
-                let value_u8 = (norm * 255.0).clamp(0.0, 255.0).round() as u8;
-
-                // Set transparency for zero values.
-                let pixel_value = if value_u8 == 0 {
-                    image::Luma([0])
-                } else {
-                    image::Luma([value_u8])
-                };
-
-                // Store the converted pixel in the image buffer.
-                img.put_pixel(x - x0, y - y0, pixel_value);
-            }
-
-            // Optionally, resize the extracted tile to a fixed resolution (e.g., 256x256)
-            // using a high-quality Lanczos3 filter.
-            // use image::imageops::FilterType;
-            // let img = image::imageops::resize(&img, 256, 256, FilterType::Lanczos3);
-
-            println!(
-                "Image stats: {:?} {:?} {:?}",
-                dataset.geo_params,
-                img.dimensions(),
-                dataset.image_info(),
-            );
-            Ok(img)
-        } else {
-            Err(anyhow::anyhow!(
-                "Could not convert tile geographic coordinates to pixel coordinates."
-            ))
         }
+
+        // Extract the tile region from the TIFF.
+        let mut temp_img = ImageBuffer::new(w, h);
+        for (x, y, pixel) in dataset.pixels(tile_px0, tile_py0, w, h) {
+            let norm = match pixel {
+                RasterValue::U8(v) => v as f32 / 255.0,
+                RasterValue::U16(v) => v as f32 / 65535.0,
+                RasterValue::I16(v) => (v as f32 + 32768.0) / 65535.0,
+                RasterValue::F32(v) => v,
+                RasterValue::F64(v) => v as f32 / 65535.0,
+                _ => 0.0,
+            };
+            let value_u8 = (norm * 255.0).clamp(0.0, 255.0).round() as u8;
+            temp_img.put_pixel(x - tile_px0, y - tile_py0, image::Luma([value_u8]));
+        }
+
+        // If needed, scale the extracted region to exactly 512x512 using nearest-neighbor to avoid smoothing.
+        let final_img = if w == 512 && h == 512 {
+            temp_img
+        } else {
+            image::imageops::resize(&temp_img, 512, 512, image::imageops::FilterType::Nearest)
+        };
+
+        println!("Final tile dimensions: {:?}", final_img.dimensions());
+        Ok(final_img)
     }
 }
 
 pub async fn test_get_one() {
-    // let x = 136;
-    // let y = 91;
-    // let z = 8;
-    // let (x, y, z) = (0, 0, 0);
     let xyz_tile = XYZTile { x: 0, y: 0, z: 0 };
-
     let image = xyz_tile
         .get_one("maize_pcr-globwb_gfdl-esm2m_rcp26_wf_2050.tif")
         .await
         .unwrap();
-
     let filename = "output.png";
     image.save(filename).expect("Failed to save image");
     println!("Image saved as: {}", filename);

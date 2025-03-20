@@ -1,5 +1,6 @@
 mod config;
 // pub mod redis;
+pub mod entity;
 pub mod s3;
 pub mod tiles;
 pub mod views;
@@ -8,6 +9,8 @@ use axum::{routing::get, routing::Router};
 
 #[tokio::main]
 async fn main() {
+    // Load config to validate runtime environment used later in app
+    config::Config::from_env();
     let app = Router::new().route("/tiles/{z}/{x}/{y}", get(views::tile_handler));
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();

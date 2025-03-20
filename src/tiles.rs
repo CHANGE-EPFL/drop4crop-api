@@ -49,10 +49,10 @@ impl XYZTile {
     /// Heavy GDAL operations run in a blocking thread.
     pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
-        println!(
-            "[get_one] Fetching layer: {}. x: {}, y: {}, z: {}",
-            layer_id, self.x, self.y, self.z
-        );
+        // println!(
+        //     "[get_one] Fetching layer: {}. x: {}, y: {}, z: {}",
+        //     layer_id, self.x, self.y, self.z
+        // );
         let filename = format!("{}.tif", layer_id);
         let object = s3::get_object(&filename).await?;
         let x = self.x;

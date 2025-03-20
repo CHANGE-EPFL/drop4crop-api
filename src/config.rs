@@ -4,7 +4,7 @@ use std::env;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    // pub db_url: Option<String>,
+    pub db_url: Option<String>,
     // pub keycloak_ui_id: String,
     // pub keycloak_url: String,
     // pub keycloak_realm: String,
@@ -24,19 +24,20 @@ impl Config {
     pub fn from_env() -> Self {
         dotenv().ok(); // Load from .env file if available
 
-        // let db_url = env::var("DB_URL").ok().or_else(|| {
-        //     Some(format!(
-        //         "{}://{}:{}@{}:{}/{}",
-        //         env::var("DB_PREFIX").unwrap_or_else(|_| "postgresql".to_string()),
-        //         env::var("DB_USER").expect("DB_USER must be set"),
-        //         env::var("DB_PASSWORD").expect("DB_PASSWORD must be set"),
-        //         env::var("DB_HOST").expect("DB_HOST must be set"),
-        //         env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string()),
-        //         env::var("DB_NAME").expect("DB_NAME must be set"),
-        //     ))
-        // });
+        let db_url = env::var("DB_URL").ok().or_else(|| {
+            Some(format!(
+                "{}://{}:{}@{}:{}/{}",
+                env::var("DB_PREFIX").unwrap_or_else(|_| "postgresql".to_string()),
+                env::var("DB_USER").expect("DB_USER must be set"),
+                env::var("DB_PASSWORD").expect("DB_PASSWORD must be set"),
+                env::var("DB_HOST").expect("DB_HOST must be set"),
+                env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string()),
+                env::var("DB_NAME").expect("DB_NAME must be set"),
+            ))
+        });
 
         Config {
+            db_url,
             app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
             s3_bucket_id: env::var("S3_BUCKET_ID").expect("S3_BUCKET_ID must be set"),
             s3_access_key: env::var("S3_ACCESS_KEY").expect("S3_ACCESS_KEY must be set"),

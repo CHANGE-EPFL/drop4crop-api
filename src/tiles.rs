@@ -1,15 +1,18 @@
 use crate::s3;
-use anyhow::Result;
-use georaster::geotiff::{GeoTiffReader, RasterValue};
+use anyhow::{Context, Result};
 use image::ImageBuffer;
-use gdal::spatial_ref::{SpatialRef, CoordTransform};
+use image::Luma;
+use std::ffi::CString;
+use std::ptr;
+use tokio::task;
 
-// Define source and destination spatial references
-let src_srs = SpatialRef::from_epsg(4326)?;    // WGS84 lat/long
-let dst_srs = SpatialRef::from_epsg(3857)?;    // Web Mercator
+use gdal::spatial_ref::{CoordTransform, SpatialRef};
+use gdal::Dataset;
+use gdal::Driver;
+use gdal_sys;
+use gdal_sys::CPLErr::CE_None;
+use gdal_sys::GDALResampleAlg::GRA_NearestNeighbour;
 
-// Create a coordinate transformer
-let coord_transform = CoordTransform::new(&src_srs, &dst_srs)?;
 #[derive(Debug)]
 pub struct XYZTile {
     pub x: u32,
@@ -17,142 +20,156 @@ pub struct XYZTile {
     pub z: u32,
 }
 
-/// A bounding box in geographic coordinates (EPSG:4326)
-#[derive(Debug)]
-pub struct LatLonBoundingBox {
-    /// Western (minimum) longitude in degrees
-    pub min_lon: f64,
-    /// Eastern (maximum) longitude in degrees
-    pub max_lon: f64,
-    /// Southern (minimum) latitude in degrees
-    pub min_lat: f64,
-    /// Northern (maximum) latitude in degrees
-    pub max_lat: f64,
+/// Represents the tile’s bounds in Web Mercator (EPSG:3857)
+pub struct WebMercatorTileBounds {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_y: f64,
+    pub max_y: f64,
 }
 
-/// Compute the tile’s geographic bounds using standard slippy‐map formulas in EPSG:4326.
-///
-/// For a tile with indices (x, y, z):
-///   n = 2^z
-///   lon_left  = (x / n)*360 - 180
-///   lon_right = ((x+1) / n)*360 - 180
-///   lat_top   = arctan(sinh(π*(1 - 2*y/n))) * 180/π
-///   lat_bottom= arctan(sinh(π*(1 - 2*(y+1)/n))) * 180/π
-impl From<&XYZTile> for LatLonBoundingBox {
-    fn from(tile: &XYZTile) -> Self {
-        let n = 2u32.pow(tile.z) as f64;
-        let min_lon = (tile.x as f64) / n * 360.0 - 180.0;
-        let max_lon = ((tile.x as f64) + 1.0) / n * 360.0 - 180.0;
-        let lat_top = ((std::f64::consts::PI * (1.0 - 2.0 * (tile.y as f64) / n)).sinh())
-            .atan()
-            .to_degrees();
-        let lat_bottom = ((std::f64::consts::PI * (1.0 - 2.0 * ((tile.y as f64) + 1.0) / n))
-            .sinh())
-        .atan()
-        .to_degrees();
-        LatLonBoundingBox {
-            min_lon,
-            max_lon,
-            min_lat: lat_bottom,
-            max_lat: lat_top,
-        }
+/// Computes the Web Mercator bounds for a given XYZ tile.
+/// These formulas use the standard XYZ tile scheme where the Web Mercator world extent is from
+/// -20037508.342789244 to 20037508.342789244.
+fn compute_web_mercator_bounds(tile: &XYZTile) -> WebMercatorTileBounds {
+    let tile_size = 256.0;
+    let initial_resolution = 2.0 * 20037508.342789244 / tile_size; // resolution at zoom 0
+    let resolution = initial_resolution / (2f64.powi(tile.z as i32));
+    let min_x = (tile.x as f64 * tile_size * resolution) - 20037508.342789244;
+    let max_y = 20037508.342789244 - (tile.y as f64 * tile_size * resolution);
+    let max_x = ((tile.x as f64 + 1.0) * tile_size * resolution) - 20037508.342789244;
+    let min_y = 20037508.342789244 - ((tile.y as f64 + 1.0) * tile_size * resolution);
+    WebMercatorTileBounds {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
     }
 }
 
 impl XYZTile {
-    pub async fn get_one(&self, filename: &str) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
-        // Compute the tile's geographic bounds (EPSG:4326) using standard slippy map formulas.
-        let ll_bbox: LatLonBoundingBox = self.into();
-        println!("Tile XYZ: x: {}, y: {}, z: {}", self.x, self.y, self.z);
-        println!(
-            "Tile bounds in EPSG:4326: min_lon: {:+11.6}, max_lon: {:+11.6}, min_lat: {:+11.6}, max_lat: {:+11.6}",
-            ll_bbox.min_lon, ll_bbox.max_lon, ll_bbox.min_lat, ll_bbox.max_lat
-        );
-
-        // Fetch the TIFF data.
+    /// Retrieves a tile image as a 256x256 grayscale ImageBuffer.
+    ///
+    /// The function first fetches the GeoTIFF data from S3 (in EPSG:4326), then uses GDAL to
+    /// reproject it to Web Mercator (EPSG:3857) for correct alignment with basemaps like OSM.
+    /// Heavy GDAL operations run in a blocking thread.
+    pub async fn get_one(&self, filename: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
+        // Fetch the TIFF bytes from S3 asynchronously.
         let object = s3::get_object(filename).await?;
-        let cursor = std::io::Cursor::new(object);
-        let mut dataset = GeoTiffReader::open(cursor).expect("Failed to open GeoTiff");
+        let x = self.x;
+        let y = self.y;
+        let z = self.z;
+        let tile = XYZTile { x, y, z };
 
-        // Get TIFF dimensions.
-        let (tiff_width, tiff_height) = dataset
-            .image_info()
-            .dimensions
-            .ok_or_else(|| anyhow::anyhow!("Image dimensions not available."))?;
-        println!("Width: {}, Height: {}", tiff_width, tiff_height);
-        // println!("TIFF dimensions: {} x {}", tiff_width, tiff_height);
+        // Offload the heavy reprojection to a blocking task.
+        let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
+            println!("Generating tile for x: {}, y: {}, z: {}", x, y, z);
 
-        // Map the geographic bounds to pixel coordinates.
-        // We assume the TIFF covers exactly:
-        //   Longitude: -180 to 180
-        //   Latitude: 90 to -90
-        let px0 = (((ll_bbox.min_lon + 180.0) / 360.0) * (tiff_width as f64))
-            .floor()
-            .max(0.0);
-        let px1 = (((ll_bbox.max_lon + 180.0) / 360.0) * (tiff_width as f64))
-            .ceil()
-            .min(tiff_width as f64);
-        let py0 = (((90.0 - ll_bbox.max_lat) / 180.0) * (tiff_height as f64))
-            .floor()
-            .max(0.0);
-        let py1 = (((90.0 - ll_bbox.min_lat) / 180.0) * (tiff_height as f64))
-            .ceil()
-            .min(tiff_height as f64);
+            // Compute the expected Web Mercator bounds for this tile.
+            let bounds = compute_web_mercator_bounds(&tile);
+            println!(
+                "Expected Web Mercator bounds: min_x: {:.2}, max_x: {:.2}, min_y: {:.2}, max_y: {:.2}",
+                bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
+            );
 
-        let px0_u = px0 as u32;
-        let px1_u = px1 as u32;
-        let py0_u = py0 as u32;
-        let py1_u = py1 as u32;
-        println!(
-            "Pixel window: top-left ({}, {}), width: {}, height: {}",
-            px0_u,
-            py0_u,
-            px1_u - px0_u,
-            py1_u - py0_u
-        );
-        let w = px1_u.saturating_sub(px0_u);
-        let h = py1_u.saturating_sub(py0_u);
+            // Write the in-memory TIFF to GDAL’s /vsimem virtual filesystem.
+            let vsi_path = "/vsimem/temp.tif";
+            {
+                let c_vsi_path = CString::new(vsi_path).unwrap();
+                let mode = CString::new("w").unwrap();
+                unsafe {
+                    let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+                    if fp.is_null() {
+                        return Err(anyhow::anyhow!("Failed to open /vsimem file"));
+                    }
+                    let written = gdal_sys::VSIFWriteL(
+                        object.as_ptr() as *const _,
+                        1,
+                        object.len(),
+                        fp,
+                    );
+                    if written != object.len() {
+                        gdal_sys::VSIFCloseL(fp);
+                        return Err(anyhow::anyhow!("Failed to write all data to /vsimem file"));
+                    }
+                    gdal_sys::VSIFCloseL(fp);
+                }
+            }
 
-        // println!(
-        //     "Pixel window: top-left ({}, {}), width: {}, height: {}",
-        //     px0_u, py0_u, w, h
-        // );
+            // Open the dataset from /vsimem.
+            let src_ds = Dataset::open(vsi_path).context("Opening dataset from /vsimem")?;
+            // Clean up the virtual file.
+            {
+                let c_vsi_path = CString::new(vsi_path).unwrap();
+                unsafe {
+                    gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+                }
+            }
 
-        // Extract the corresponding pixel window from the GeoTIFF.
-        let mut temp_img = ImageBuffer::new(w, h);
-        for (x, y, pixel) in dataset.pixels(px0_u, py0_u, w, h) {
-            let norm = match pixel {
-                RasterValue::U8(v) => v as f32 / 255.0,
-                RasterValue::U16(v) => v as f32 / 65535.0,
-                RasterValue::I16(v) => (v as f32 + 32768.0) / 65535.0,
-                RasterValue::F32(v) => v,
-                RasterValue::F64(v) => v as f32 / 65535.0,
-                _ => 0.0,
+            // Define the source spatial reference (EPSG:4326) and the destination (EPSG:3857).
+            let src_srs = SpatialRef::from_epsg(4326).context("Creating source spatial reference")?;
+            let dst_srs = SpatialRef::from_epsg(3857).context("Creating destination spatial reference")?;
+            println!("Source projection (expected EPSG:4326): {}", src_srs.to_wkt()?);
+
+            // Create an in-memory destination dataset using the MEM driver.
+            let mem_driver = gdal::DriverManager::get_driver_by_name("MEM").context("Getting MEM driver")?;
+            let band_count = src_ds.raster_count();
+            let mut dest_ds = mem_driver
+                .create_with_band_type::<u8, _>("", 256, 256, band_count as usize)
+                .context("Creating destination dataset")?;
+
+            // Set the destination projection to EPSG:3857.
+            dest_ds.set_projection(&dst_srs.to_wkt()?)?;
+
+            // Compute pixel resolutions based on the tile bounds.
+            let pixel_width = (bounds.max_x - bounds.min_x) / 256.0;
+            let pixel_height = (bounds.min_y - bounds.max_y) / 256.0;
+            // Set the geo-transform:
+            // Origin is the top-left corner (min_x, max_y).
+            dest_ds
+                .set_geo_transform(&[bounds.min_x, pixel_width, 0.0, bounds.max_y, 0.0, pixel_height])
+                .context("Setting geo-transform for destination")?;
+
+            // Debug output for destination dataset.
+            let out_gt = dest_ds.geo_transform()?;
+            println!("Output tile GeoTransform: {:?}", out_gt);
+            println!("Output tile projection (WKT): {}", dest_ds.projection());
+
+            // Perform the reprojection (warp) from the source dataset to the destination.
+            let err = unsafe {
+                gdal_sys::GDALReprojectImage(
+                    src_ds.c_dataset(),
+                    std::ptr::null(),
+                    dest_ds.c_dataset(),
+                    std::ptr::null(),
+                    GRA_NearestNeighbour,
+                    0.0,
+                    0.0,
+                    None,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
             };
-            let value_u8 = (norm * 255.0).clamp(0.0, 255.0).round() as u8;
-            temp_img.put_pixel(x - px0_u, y - py0_u, image::Luma([value_u8]));
-        }
+            assert!(err == CE_None, "GDAL warp failed with error code {}", err);
 
-        // Resize to 256x256 pixels (the standard size for slippy map tiles)
-        let final_img = if w == 512 && h == 512 {
-            temp_img
-        } else {
-            // println!("Resizing from {}x{} to 256x256", w, h);
-            image::imageops::resize(&temp_img, 512, 512, image::imageops::FilterType::Nearest)
-        };
-
-        // println!("Final tile dimensions: {:?}", final_img.dimensions());
-        // println!(
-        // "Computed pixel coordinates: px0: {:.2}, px1: {:.2}, py0: {:.2}, py1: {:.2}",
-        // px0, px1, py0, py1
-        // );
-
-        Ok(final_img)
+            // Read the warped data from the first band (assuming a single-band TIFF).
+            let band = dest_ds.rasterband(1).context("Getting raster band 1")?;
+            let buf = band
+                .read_as::<u8>((0, 0), (256, 256), (256, 256), None)
+                .context("Reading raster data")?;
+            let buffer: Vec<u8> = buf.data().to_vec();
+            let img = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(256, 256, buffer)
+                .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+            Ok(img)
+        })
+        .await??;
+        Ok(img)
     }
 }
 
+#[cfg(test)]
 pub async fn test_get_one() {
-    // Example: tile (x=0, y=0, z=2) in a standard 4326 slippy map.
+    // Example: tile (x=0, y=0, z=2) in the XYZ scheme.
     let xyz_tile = XYZTile { x: 0, y: 0, z: 2 };
     let image = xyz_tile
         .get_one("your_4326_tif.tif")

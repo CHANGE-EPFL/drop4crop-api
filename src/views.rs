@@ -21,8 +21,10 @@ pub async fn tile_handler(
 ) -> Result<impl IntoResponse, StatusCode> {
     // Get the tile as an ImageBuffer.
     let xyz_tile = XYZTile { x, y, z };
+    let temp_filename = "wheat_production.tif";
     let img = xyz_tile
-        .get_one(&params.filename)
+        // .get_one(&params.filename)
+        .get_one(temp_filename)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

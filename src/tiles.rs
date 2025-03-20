@@ -2,7 +2,14 @@ use crate::s3;
 use anyhow::Result;
 use georaster::geotiff::{GeoTiffReader, RasterValue};
 use image::ImageBuffer;
+use gdal::spatial_ref::{SpatialRef, CoordTransform};
 
+// Define source and destination spatial references
+let src_srs = SpatialRef::from_epsg(4326)?;    // WGS84 lat/long
+let dst_srs = SpatialRef::from_epsg(3857)?;    // Web Mercator
+
+// Create a coordinate transformer
+let coord_transform = CoordTransform::new(&src_srs, &dst_srs)?;
 #[derive(Debug)]
 pub struct XYZTile {
     pub x: u32,

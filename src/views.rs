@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct Params {
-    filename: String,
+    layer: String,
 }
 
 pub async fn tile_handler(
@@ -20,13 +20,25 @@ pub async fn tile_handler(
     Path((z, x, y)): Path<(u32, u32, u32)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Get the tile as an ImageBuffer.
+    println!("[tile_handler] z: {}, x: {}, y: {}", z, x, y);
     let xyz_tile = XYZTile { x, y, z };
-    let temp_filename = "wheat_production.tif";
-    let img = xyz_tile
-        // .get_one(&params.filename)
-        .get_one(temp_filename)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // let temp_filename = "wheat_production.tif";
+    let img = match xyz_tile.get_one(&params.layer).await {
+        Ok(img) => img,
+        Err(e) => {
+            println!("[tile_handler] Error on first attempt, trying again");
+            match xyz_tile.get_one(&params.layer).await {
+                Ok(img) => {
+                    println!("[tile_handler] Successfully retrieved image on second attempt");
+                    img
+                }
+                Err(e) => {
+                    println!("[tile_handler] Error on second attempt: {:?}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+        }
+    };
 
     // Convert the grayscale ImageBuffer to RGBA.
     let (width, height) = img.dimensions();
@@ -54,7 +66,8 @@ pub async fn tile_handler(
     }
 
     // Build the response with a Content-Type header.
+    // println!("[tile_handler] Response size: {} bytes", png_data.len());
     let response = ([(header::CONTENT_TYPE, "image/png")], png_data);
-
+    // println!("[tile_handler] Response size: {} bytes", png_data.len());
     Ok(response)
 }

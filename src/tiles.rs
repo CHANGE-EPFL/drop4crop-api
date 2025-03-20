@@ -53,9 +53,10 @@ impl XYZTile {
     /// The function first fetches the GeoTIFF data from S3 (in EPSG:4326), then uses GDAL to
     /// reproject it to Web Mercator (EPSG:3857) for correct alignment with basemaps like OSM.
     /// Heavy GDAL operations run in a blocking thread.
-    pub async fn get_one(&self, filename: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
+    pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
-        let object = s3::get_object(filename).await?;
+        let filename = format!("{}.tif", layer_id);
+        let object = s3::get_object(&filename).await?;
         let x = self.x;
         let y = self.y;
         let z = self.z;
@@ -63,17 +64,18 @@ impl XYZTile {
 
         // Offload the heavy reprojection to a blocking task.
         let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
-            println!("Generating tile for x: {}, y: {}, z: {}", x, y, z);
+            // println!("Generating tile for x: {}, y: {}, z: {}", x, y, z);
 
             // Compute the expected Web Mercator bounds for this tile.
             let bounds = compute_web_mercator_bounds(&tile);
-            println!(
-                "Expected Web Mercator bounds: min_x: {:.2}, max_x: {:.2}, min_y: {:.2}, max_y: {:.2}",
-                bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
-            );
+            // println!(
+            // "Expected Web Mercator bounds: min_x: {:.2}, max_x: {:.2}, min_y: {:.2}, max_y: {:.2}",
+            // bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
+            // );
 
             // Write the in-memory TIFF to GDAL’s /vsimem virtual filesystem.
-            let vsi_path = "/vsimem/temp.tif";
+            let vsi_path = format!("/vsimem/{}", filename);
+            let vsi_path = vsi_path.as_str();
             {
                 let c_vsi_path = CString::new(vsi_path).unwrap();
                 let mode = CString::new("w").unwrap();
@@ -82,12 +84,8 @@ impl XYZTile {
                     if fp.is_null() {
                         return Err(anyhow::anyhow!("Failed to open /vsimem file"));
                     }
-                    let written = gdal_sys::VSIFWriteL(
-                        object.as_ptr() as *const _,
-                        1,
-                        object.len(),
-                        fp,
-                    );
+                    let written =
+                        gdal_sys::VSIFWriteL(object.as_ptr() as *const _, 1, object.len(), fp);
                     if written != object.len() {
                         gdal_sys::VSIFCloseL(fp);
                         return Err(anyhow::anyhow!("Failed to write all data to /vsimem file"));
@@ -107,12 +105,15 @@ impl XYZTile {
             }
 
             // Define the source spatial reference (EPSG:4326) and the destination (EPSG:3857).
-            let src_srs = SpatialRef::from_epsg(4326).context("Creating source spatial reference")?;
-            let dst_srs = SpatialRef::from_epsg(3857).context("Creating destination spatial reference")?;
-            println!("Source projection (expected EPSG:4326): {}", src_srs.to_wkt()?);
+            // let src_srs =
+            //     SpatialRef::from_epsg(4326).context("Creating source spatial reference")?;
+            let dst_srs =
+                SpatialRef::from_epsg(3857).context("Creating destination spatial reference")?;
+            // println!("Source projection (expected EPSG:4326): {}", src_srs.to_wkt()?);
 
             // Create an in-memory destination dataset using the MEM driver.
-            let mem_driver = gdal::DriverManager::get_driver_by_name("MEM").context("Getting MEM driver")?;
+            let mem_driver =
+                gdal::DriverManager::get_driver_by_name("MEM").context("Getting MEM driver")?;
             let band_count = src_ds.raster_count();
             let mut dest_ds = mem_driver
                 .create_with_band_type::<u8, _>("", 256, 256, band_count as usize)
@@ -127,13 +128,18 @@ impl XYZTile {
             // Set the geo-transform:
             // Origin is the top-left corner (min_x, max_y).
             dest_ds
-                .set_geo_transform(&[bounds.min_x, pixel_width, 0.0, bounds.max_y, 0.0, pixel_height])
+                .set_geo_transform(&[
+                    bounds.min_x,
+                    pixel_width,
+                    0.0,
+                    bounds.max_y,
+                    0.0,
+                    pixel_height,
+                ])
                 .context("Setting geo-transform for destination")?;
 
             // Debug output for destination dataset.
-            let out_gt = dest_ds.geo_transform()?;
-            println!("Output tile GeoTransform: {:?}", out_gt);
-            println!("Output tile projection (WKT): {}", dest_ds.projection());
+            // let out_gt = dest_ds.geo_transform()?;
 
             // Perform the reprojection (warp) from the source dataset to the destination.
             let err = unsafe {
@@ -153,7 +159,13 @@ impl XYZTile {
             assert!(err == CE_None, "GDAL warp failed with error code {}", err);
 
             // Read the warped data from the first band (assuming a single-band TIFF).
-            let band = dest_ds.rasterband(1).context("Getting raster band 1")?;
+            let band = match dest_ds.rasterband(1) {
+                Ok(band) => band,
+                Err(e) => {
+                    println!("Error getting raster band 1: {:?}", e);
+                    return Err(anyhow::Error::new(e).context("Error getting raster band 1"));
+                }
+            };
             let buf = band
                 .read_as::<u8>((0, 0), (256, 256), (256, 256), None)
                 .context("Reading raster data")?;

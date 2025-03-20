@@ -62,8 +62,11 @@ fn get_redis_client() -> redis::Client {
 /// it attempts to set a downloading flag (with a TTL) and spawns a background task to fetch it from S3.
 /// Meanwhile, callers loop waiting for the cache to be filled.
 pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
+    // Create the keys for the cache and downloading state.
     let cache_key = build_cache_key(object_id);
+    // Create a key to indicate that a download is in progress.
     let downloading_key = build_downloading_key(object_id);
+
     let client = get_redis_client();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
@@ -150,11 +153,11 @@ async fn redis_get(
 /// Downloads the object from S3 and pushes it to the cache. On completion (or error), it removes
 /// the downloading flag so that waiting threads can act accordingly.
 async fn download_and_cache(object_id: &str, cache_key: &str, downloading_key: &str) -> Result<()> {
-    println!("Downloading object {} from S3", object_id);
+    println!("Downloading object {} from S3", cache_key);
     let bucket = get_bucket();
     // Here the S3 object key is the same as the cache_key (which includes the app/deployment prefix).
     let data = bucket.get_object(cache_key).await?.bytes().to_vec();
-    println!("Downloaded object {} from S3, pushing to cache", object_id);
+    println!("Downloaded object {} from S3, pushing to cache", cache_key);
     push_cache_raw(cache_key, &data).await?;
     println!("Removing downloading state for {}", cache_key);
     remove_downloading_state_raw(downloading_key).await?;

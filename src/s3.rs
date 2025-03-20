@@ -87,14 +87,11 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
             cache_key
         );
         // We are the downloader. Spawn a background task.
-        let object_id_clone = object_id.to_string();
         let cache_key_clone = cache_key.clone();
         let downloading_key_clone = downloading_key.clone();
         task::spawn(async move {
-            if let Err(e) =
-                download_and_cache(&object_id_clone, &cache_key_clone, &downloading_key_clone).await
-            {
-                eprintln!("Error downloading {}: {:?}", object_id_clone, e);
+            if let Err(e) = download_and_cache(&cache_key_clone, &downloading_key_clone).await {
+                eprintln!("Error downloading {}: {:?}", cache_key_clone, e);
             }
         });
     } else {
@@ -122,18 +119,13 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
                 .await?;
             if set_result.is_some() {
                 println!("Re-setting downloading state for {}", cache_key);
-                let object_id_clone = object_id.to_string();
                 let cache_key_clone = cache_key.clone();
                 let downloading_key_clone = downloading_key.clone();
                 task::spawn(async move {
-                    if let Err(e) = download_and_cache(
-                        &object_id_clone,
-                        &cache_key_clone,
-                        &downloading_key_clone,
-                    )
-                    .await
+                    if let Err(e) =
+                        download_and_cache(&cache_key_clone, &downloading_key_clone).await
                     {
-                        eprintln!("Error re-downloading {}: {:?}", object_id_clone, e);
+                        eprintln!("Error re-downloading {}: {:?}", cache_key_clone, e);
                     }
                 });
             }
@@ -152,7 +144,7 @@ async fn redis_get(
 
 /// Downloads the object from S3 and pushes it to the cache. On completion (or error), it removes
 /// the downloading flag so that waiting threads can act accordingly.
-async fn download_and_cache(object_id: &str, cache_key: &str, downloading_key: &str) -> Result<()> {
+async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()> {
     println!("Downloading object {} from S3", cache_key);
     let bucket = get_bucket();
     // Here the S3 object key is the same as the cache_key (which includes the app/deployment prefix).

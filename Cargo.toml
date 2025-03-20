@@ -24,3 +24,4 @@ log = "0.4.25"
 gdal = { version = "0.17.1", features = ["bindgen"] }
 gdal-sys = { version = "0.10.0", features = ["bindgen"] }
 retry = "2.0.0"
+tokio-retry = "0.3.0"

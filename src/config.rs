@@ -36,7 +36,7 @@ impl Config {
         //     ))
         // });
 
-        let config = Config {
+        Config {
             app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
             s3_bucket_id: env::var("S3_BUCKET_ID").expect("S3_BUCKET_ID must be set"),
             s3_access_key: env::var("S3_ACCESS_KEY").expect("S3_ACCESS_KEY must be set"),
@@ -55,8 +55,6 @@ impl Config {
                 .parse()
                 .expect("REDIS_PORT must be set"),
             redis_db: env::var("REDIS_DB").unwrap_or_else(|_| "1".to_string()),
-        };
-
-        config
+        }
     }
 }

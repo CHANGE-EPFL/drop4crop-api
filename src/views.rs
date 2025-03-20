@@ -9,6 +9,8 @@ use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
 use image::{ImageBuffer, Rgba};
 use serde::Deserialize;
+use tokio_retry::strategy::FixedInterval;
+use tokio_retry::RetryIf;
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -20,25 +22,24 @@ pub async fn tile_handler(
     Path((z, x, y)): Path<(u32, u32, u32)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Get the tile as an ImageBuffer.
-    println!("[tile_handler] z: {}, x: {}, y: {}", z, x, y);
+    // println!("[tile_handler] z: {}, x: {}, y: {}", z, x, y);
     let xyz_tile = XYZTile { x, y, z };
     // let temp_filename = "wheat_production.tif";
-    let img = match xyz_tile.get_one(&params.layer).await {
-        Ok(img) => img,
-        Err(e) => {
-            println!("[tile_handler] Error on first attempt, trying again");
-            match xyz_tile.get_one(&params.layer).await {
-                Ok(img) => {
-                    println!("[tile_handler] Successfully retrieved image on second attempt");
-                    img
-                }
-                Err(e) => {
-                    println!("[tile_handler] Error on second attempt: {:?}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-        }
-    };
+    let retry_strategy = FixedInterval::from_millis(200).take(5);
+
+    let img = RetryIf::spawn(
+        retry_strategy,
+        || xyz_tile.get_one(&params.layer),
+        |_: &anyhow::Error| {
+            println!("[tile_handler] Error: x: {}, y: {}, z: {}", x, y, z);
+            true
+        },
+    )
+    .await
+    .map_err(|e| {
+        println!("[tile_handler] Failed after 5 attempts: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Convert the grayscale ImageBuffer to RGBA.
     let (width, height) = img.dimensions();

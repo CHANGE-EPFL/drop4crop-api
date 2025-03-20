@@ -1,17 +1,11 @@
 use crate::s3;
 use anyhow::{Context, Result};
+use gdal::{spatial_ref::SpatialRef, Dataset};
+use gdal_sys::{CPLErr::CE_None, GDALResampleAlg::GRA_NearestNeighbour};
 use image::ImageBuffer;
 use image::Luma;
 use std::ffi::CString;
-use std::ptr;
 use tokio::task;
-
-use gdal::spatial_ref::{CoordTransform, SpatialRef};
-use gdal::Dataset;
-use gdal::Driver;
-use gdal_sys;
-use gdal_sys::CPLErr::CE_None;
-use gdal_sys::GDALResampleAlg::GRA_NearestNeighbour;
 
 #[derive(Debug)]
 pub struct XYZTile {
@@ -55,6 +49,10 @@ impl XYZTile {
     /// Heavy GDAL operations run in a blocking thread.
     pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
+        println!(
+            "[get_one] Fetching layer: {}. x: {}, y: {}, z: {}",
+            layer_id, self.x, self.y, self.z
+        );
         let filename = format!("{}.tif", layer_id);
         let object = s3::get_object(&filename).await?;
         let x = self.x;

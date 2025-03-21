@@ -1,4 +1,5 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+RUN apt-get update && apt-get install -y libgdal-dev clang libclang1
 WORKDIR /app
 
 FROM chef AS planner

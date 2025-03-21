@@ -163,3 +163,7 @@ test.db
 rasters/
 /*.py
 tools/*.json
+/target
+.env
+*.png
+*.xml

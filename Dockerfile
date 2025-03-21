@@ -1,20 +1,25 @@
-FROM python:3.12.3-alpine
-
-ENV POETRY_VERSION=1.6.1
-RUN pip install "poetry==$POETRY_VERSION"
-ENV PYTHONPATH="$PYTHONPATH:/app"
-
+FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /app
 
-RUN apk add --no-cache gcc python3-dev geos-dev proj-util proj-dev musl-dev \
-    linux-headers gdal-dev build-base gdal libpng-dev libpng \
-    libjpeg-turbo-dev libjpeg-turbo libwebp-dev libwebp gdal-driver-png
-COPY poetry.lock pyproject.toml /app/
-RUN poetry config virtualenvs.create false
-RUN poetry install --no-interaction --without dev
+FROM chef AS planner
+COPY ./src /app/src
+COPY Cargo.lock Cargo.toml /app/
+RUN cargo chef prepare --recipe-path recipe.json
 
-COPY alembic.ini prestart.sh /app/
-COPY migrations /app/migrations
-COPY app /app/app
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
 
-ENTRYPOINT sh prestart.sh
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build application
+COPY ./src /app/src
+COPY Cargo.lock Cargo.toml /app/
+
+RUN cargo build --release --bin drop4crop-api-rust
+
+# We do not need the Rust toolchain to run the binary!
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+COPY --from=builder /app/target/release/drop4crop-api-rust /usr/local/bin
+ENTRYPOINT ["/usr/local/bin/drop4crop-api-rust"]

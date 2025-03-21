@@ -51,7 +51,7 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
 
     // Build the router with routes from the plots module
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        // .merge(crate::common::views::router(db)) // Root routes
+        .merge(crate::common::views::router(db)) // Root routes
         .nest("/api/tiles", tiles::views::router(db))
         .nest(
             "/api/countries",

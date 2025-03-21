@@ -35,6 +35,8 @@ pub struct Layer {
     max_value: Option<f64>,
     style_id: Option<Uuid>,
     is_crop_specific: bool,
+    // #[crudcrate(non_db_attr=true, default = None)]
+    // style: Option<crate::routes::styles::models::Style>,
 }
 
 impl From<Model> for Layer {
@@ -58,6 +60,7 @@ impl From<Model> for Layer {
             max_value: model.max_value,
             style_id: model.style_id,
             is_crop_specific: model.is_crop_specific,
+            // style: model.style,
         }
     }
 }

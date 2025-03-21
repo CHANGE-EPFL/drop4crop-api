@@ -5,9 +5,11 @@ use axum_keycloak_auth::{
 };
 use crudcrate::{CRUDResource, crud_handlers};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
+use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::models::{Layer, LayerCreate, LayerUpdate};
@@ -29,6 +31,7 @@ where
         .routes(routes!(delete_one_handler))
         .routes(routes!(delete_many_handler))
         .routes(routes!(get_groups))
+        .routes(routes!(get_all_map_layers))
         .with_state(db.clone());
 
     if let Some(instance) = keycloak_auth_instance {
@@ -95,4 +98,113 @@ pub async fn get_groups(
     }
 
     Ok(Json(groups))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct LayerQueryParams {
+    crop: String,
+    water_model: Option<String>,
+    climate_model: Option<String>,
+    scenario: Option<String>,
+    variable: String,
+    year: Option<i32>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/map",
+    params(LayerQueryParams),
+    responses(
+        (status = 200, description = "Layer list", body = [Layer]),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Get all enabled layers for map",
+    description = "Fetches enabled layers with filtering for use in Drop4Crop map"
+)]
+pub async fn get_all_map_layers(
+    State(db): State<DatabaseConnection>,
+    Query(params): Query<LayerQueryParams>,
+) -> Result<Json<Vec<Layer>>, (StatusCode, Json<String>)> {
+    use crate::routes::layers::db::{Column, Entity as LayerEntity};
+    println!("[get_all_map_layers] params: {:?}", params);
+    let mut query = LayerEntity::find().filter(Column::Enabled.eq(true));
+
+    query = query.filter(Column::Crop.eq(params.crop));
+    query = query.filter(Column::Variable.eq(params.variable));
+
+    if let Some(water_model) = params.water_model {
+        query = query.filter(Column::WaterModel.eq(water_model));
+    }
+    if let Some(climate_model) = params.climate_model {
+        query = query.filter(Column::ClimateModel.eq(climate_model));
+    }
+    if let Some(scenario) = params.scenario {
+        query = query.filter(Column::Scenario.eq(scenario));
+    }
+    if let Some(year) = params.year {
+        query = query.filter(Column::Year.eq(year));
+    }
+
+    let layers = query.all(&db).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("DB error: {}", e)),
+        )
+    })?;
+
+    let mut response = Vec::new();
+
+    for layer in layers {
+        // let style = if let Some(style_model) = layer.style {
+        //     sort_styles(style_model.style)
+        // } else {
+        //     generate_grayscale_style(layer.min_value, layer.max_value, 10)
+        // };
+
+        let mut read = Layer::from(layer);
+        // read.style = style;
+        response.push(read);
+    }
+
+    Ok(Json(response))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StyleItem {
+    pub value: f32,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub opacity: u8,
+    pub label: f32,
+}
+
+pub fn sort_styles(mut style_list: Vec<StyleItem>) -> Vec<StyleItem> {
+    style_list.sort_by(|a, b| {
+        a.value
+            .partial_cmp(&b.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    style_list
+}
+
+pub fn generate_grayscale_style(min: f32, max: f32, num_segments: usize) -> Vec<StyleItem> {
+    let step = (max - min) / num_segments as f32;
+    let mut style = Vec::with_capacity(num_segments);
+
+    for i in 0..num_segments {
+        let value = min + i as f32 * step;
+        let grey_value =
+            ((255.0 * i as f32) / (num_segments.saturating_sub(1) as f32)).round() as u8;
+        style.push(StyleItem {
+            value,
+            red: grey_value,
+            green: grey_value,
+            blue: grey_value,
+            opacity: 255,
+            label: (value * 10000.0).round() / 10000.0, // round to 4 decimal places
+        });
+    }
+
+    style
 }

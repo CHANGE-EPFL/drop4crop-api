@@ -34,7 +34,7 @@ impl Config {
             ))
         });
 
-        let tile_cache_uri = env::var("TILE_CACHE_URL").unwrap_or_else(|_| {
+        let tile_cache_uri = env::var("TILE_CACHE_URI").unwrap_or_else(|_| {
             format!(
                 "{}://{}:{}/{}",
                 env::var("TILE_CACHE_PREFIX").unwrap_or_else(|_| "redis".to_string()),

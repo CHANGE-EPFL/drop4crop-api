@@ -49,10 +49,6 @@ impl XYZTile {
     /// Heavy GDAL operations run in a blocking thread.
     pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
-        // println!(
-        //     "[get_one] Fetching layer: {}. x: {}, y: {}, z: {}",
-        //     layer_id, self.x, self.y, self.z
-        // );
         let filename = format!("{}.tif", layer_id);
         let object = s3::get_object(&filename).await?;
         let x = self.x;
@@ -66,10 +62,6 @@ impl XYZTile {
 
             // Compute the expected Web Mercator bounds for this tile.
             let bounds = compute_web_mercator_bounds(&tile);
-            // println!(
-            // "Expected Web Mercator bounds: min_x: {:.2}, max_x: {:.2}, min_y: {:.2}, max_y: {:.2}",
-            // bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
-            // );
 
             // Write the in-memory TIFF to GDAL’s /vsimem virtual filesystem.
             let vsi_path = format!("/vsimem/{}", filename);
@@ -92,9 +84,8 @@ impl XYZTile {
                 }
             }
 
-            // Open the dataset from /vsimem.
+            // Open the dataset from /vsimem and clean up the virtual file.
             let src_ds = Dataset::open(vsi_path).context("Opening dataset from /vsimem")?;
-            // Clean up the virtual file.
             {
                 let c_vsi_path = CString::new(vsi_path).unwrap();
                 unsafe {
@@ -102,12 +93,9 @@ impl XYZTile {
                 }
             }
 
-            // Define the source spatial reference (EPSG:4326) and the destination (EPSG:3857).
-            // let src_srs =
-            //     SpatialRef::from_epsg(4326).context("Creating source spatial reference")?;
+            // Define the destination projection (EPSG:3857) - Web mercator
             let dst_srs =
                 SpatialRef::from_epsg(3857).context("Creating destination spatial reference")?;
-            // println!("Source projection (expected EPSG:4326): {}", src_srs.to_wkt()?);
 
             // Create an in-memory destination dataset using the MEM driver.
             let mem_driver =
@@ -135,9 +123,6 @@ impl XYZTile {
                     pixel_height,
                 ])
                 .context("Setting geo-transform for destination")?;
-
-            // Debug output for destination dataset.
-            // let out_gt = dest_ds.geo_transform()?;
 
             // Perform the reprojection (warp) from the source dataset to the destination.
             let err = unsafe {
@@ -175,16 +160,4 @@ impl XYZTile {
         .await??;
         Ok(img)
     }
-}
-
-#[cfg(test)]
-pub async fn test_get_one() {
-    // Example: tile (x=0, y=0, z=2) in the XYZ scheme.
-    let xyz_tile = XYZTile { x: 0, y: 0, z: 2 };
-    let image = xyz_tile
-        .get_one("your_4326_tif.tif")
-        .await
-        .expect("Failed to get tile");
-    image.save("output.png").expect("Failed to save image");
-    println!("Saved tile as output.png");
 }

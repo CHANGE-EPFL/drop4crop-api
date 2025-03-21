@@ -14,23 +14,10 @@ pub fn build_downloading_key(object_id: &str) -> String {
     format!("{}:downloading", cache_key)
 }
 
-/// Returns a Redis connection URL. When `with_db` is true, it includes the database number.
-pub fn get_redis_connection_url(with_db: bool) -> String {
-    let config = crate::config::Config::from_env();
-    if with_db {
-        format!(
-            "redis://{}:{}/{}",
-            config.redis_url, config.redis_port, config.redis_db
-        )
-    } else {
-        format!("redis://{}:{}/", config.redis_url, config.redis_port)
-    }
-}
-
 /// Returns a Redis client using the cache DB.
 pub fn get_redis_client() -> redis::Client {
-    let url = get_redis_connection_url(true);
-    redis::Client::open(url).unwrap()
+    let config = crate::config::Config::from_env();
+    redis::Client::open(config.tile_cache_uri).unwrap()
 }
 
 /// Pushes the data to Redis using the provided key.

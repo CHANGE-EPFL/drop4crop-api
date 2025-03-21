@@ -4,18 +4,16 @@ use std::env;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    pub db_url: Option<String>,
-    // pub keycloak_ui_id: String,
-    // pub keycloak_url: String,
-    // pub keycloak_realm: String,
+    pub db_uri: Option<String>,
+    pub tile_cache_uri: String,
+    pub keycloak_client_id: String,
+    pub keycloak_url: String,
+    pub keycloak_realm: String,
     pub s3_bucket_id: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_region: String,
     pub s3_endpoint: String,
-    pub redis_url: String,
-    pub redis_port: u32,
-    pub redis_db: String,
     pub app_name: String,
     pub deployment: String,
 }
@@ -24,7 +22,7 @@ impl Config {
     pub fn from_env() -> Self {
         dotenv().ok(); // Load from .env file if available
 
-        let db_url = env::var("DB_URL").ok().or_else(|| {
+        let db_uri = env::var("DB_URL").ok().or_else(|| {
             Some(format!(
                 "{}://{}:{}@{}:{}/{}",
                 env::var("DB_PREFIX").unwrap_or_else(|_| "postgresql".to_string()),
@@ -36,8 +34,18 @@ impl Config {
             ))
         });
 
+        let tile_cache_uri = env::var("TILE_CACHE_URL").unwrap_or_else(|_| {
+            format!(
+                "{}://{}:{}/{}",
+                env::var("TILE_CACHE_PREFIX").unwrap_or_else(|_| "redis".to_string()),
+                env::var("TILE_CACHE_URL").expect("TILE_CACHE_URL must be set"),
+                env::var("TILE_CACHE_PORT").expect("TILE_CACHE_PORT must be set"),
+                env::var("TILE_CACHE_DB").unwrap_or_else(|_| "0".to_string()),
+            )
+        });
         Config {
-            db_url,
+            db_uri,
+            tile_cache_uri,
             app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
             s3_bucket_id: env::var("S3_BUCKET_ID").expect("S3_BUCKET_ID must be set"),
             s3_access_key: env::var("S3_ACCESS_KEY").expect("S3_ACCESS_KEY must be set"),
@@ -45,17 +53,11 @@ impl Config {
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT")
                 .unwrap_or_else(|_| "https://s3.epfl.ch".to_string()),
-            // keycloak_ui_id: env::var("KEYCLOAK_UI_ID").expect("KEYCLOAK_UI_ID must be set"),
-            // keycloak_url: env::var("KEYCLOAK_URL").expect("KEYCLOAK_URL must be set"),
-            // keycloak_realm: env::var("KEYCLOAK_REALM").expect("KEYCLOAK_REALM must be set"),
+            keycloak_client_id: env::var("KEYCLOAK_CLIENT_ID").expect("KEYCLOAK_UI_ID must be set"),
+            keycloak_url: env::var("KEYCLOAK_URL").expect("KEYCLOAK_URL must be set"),
+            keycloak_realm: env::var("KEYCLOAK_REALM").expect("KEYCLOAK_REALM must be set"),
             deployment: env::var("DEPLOYMENT")
                 .expect("DEPLOYMENT must be set, this can be local, dev, stage, or prod"),
-            redis_url: env::var("REDIS_URL").expect("REDIS_URL must be set"),
-            redis_port: env::var("REDIS_PORT")
-                .unwrap()
-                .parse()
-                .expect("REDIS_PORT must be set"),
-            redis_db: env::var("REDIS_DB").unwrap_or_else(|_| "1".to_string()),
         }
     }
 }

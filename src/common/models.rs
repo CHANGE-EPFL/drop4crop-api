@@ -23,7 +23,7 @@ impl UIConfiguration {
     pub fn new() -> Self {
         let config: Config = Config::from_env();
         Self {
-            client_id: config.keycloak_ui_id,
+            client_id: config.keycloak_client_id,
             realm: config.keycloak_realm,
             url: config.keycloak_url,
             deployment: config.deployment,

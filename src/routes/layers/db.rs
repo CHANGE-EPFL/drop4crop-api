@@ -1,5 +1,5 @@
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
-
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "layer")]
 pub struct Model {
@@ -11,13 +11,13 @@ pub struct Model {
     pub scenario: Option<String>,
     pub variable: Option<String>,
     pub year: Option<i32>,
-    pub last_updated: DateTime,
+    pub last_updated: DateTime<Utc>,
     #[sea_orm(primary_key)]
-    pub iterator: i32,
-    #[sea_orm(unique)]
+    // pub iterator: i32,
+    // #[sea_orm(unique)]
     pub id: Uuid,
     pub enabled: bool,
-    pub uploaded_at: DateTime,
+    pub uploaded_at: DateTime<Utc>,
     #[sea_orm(column_type = "Double", nullable)]
     pub global_average: Option<f64>,
     pub filename: Option<String>,
@@ -31,36 +31,36 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::layercountrylink::Entity")]
+    #[sea_orm(has_many = "super::countries::db::Entity")]
     Layercountrylink,
     #[sea_orm(
-        belongs_to = "super::style::Entity",
+        belongs_to = "crate::routes::styles::db::Entity",
         from = "Column::StyleId",
-        to = "super::style::Column::Id",
+        to = "crate::routes::styles::db::Column::Id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
     Style,
 }
 
-impl Related<super::layercountrylink::Entity> for Entity {
+impl Related<super::countries::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Layercountrylink.def()
     }
 }
 
-impl Related<super::style::Entity> for Entity {
+impl Related<crate::routes::styles::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Style.def()
     }
 }
 
-impl Related<super::country::Entity> for Entity {
+impl Related<crate::routes::countries::db::Entity> for Entity {
     fn to() -> RelationDef {
-        super::layercountrylink::Relation::Country.def()
+        super::countries::db::Relation::Country.def()
     }
     fn via() -> Option<RelationDef> {
-        Some(super::layercountrylink::Relation::Layer.def().rev())
+        Some(super::countries::db::Relation::Layer.def().rev())
     }
 }
 

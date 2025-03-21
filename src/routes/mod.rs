@@ -53,14 +53,16 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         // .merge(crate::common::views::router(db)) // Root routes
         .nest("/api/tiles", tiles::views::router(db))
-        // .nest(
-        //     "/api/areas",
-        //     areas::views::router(db, Some(keycloak_instance.clone())),
-        // )
-        // .nest(
-        //     "/api/projects",
-        //     layers::views::router(db, Some(keycloak_instance.clone())),
-        // )
+        .nest(
+            "/api/countries",
+            // countries::views::router(db, Some(keycloak_instance.clone())),
+            countries::views::router(db, None),
+        )
+        .nest(
+            "/api/layers",
+            // layers::views::router(db, Some(keycloak_instance.clone())),
+            layers::views::router(db, None),
+        )
         // .nest(
         //     "/api/gnss",
         //     gnss::views::router(db, Some(keycloak_instance.clone())),

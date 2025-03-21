@@ -19,7 +19,7 @@ pub enum Relation {
     Layer,
 }
 
-impl Related<super::layer::Entity> for Entity {
+impl Related<crate::routes::layers::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Layer.def()
     }

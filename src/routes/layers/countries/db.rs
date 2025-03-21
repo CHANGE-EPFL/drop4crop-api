@@ -28,30 +28,30 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::country::Entity",
+        belongs_to = "crate::routes::countries::db::Entity",
         from = "Column::CountryId",
-        to = "super::country::Column::Id",
+        to = "crate::routes::countries::db::Column::Id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
     Country,
     #[sea_orm(
-        belongs_to = "super::layer::Entity",
+        belongs_to = "crate::routes::layers::db::Entity",
         from = "Column::LayerId",
-        to = "super::layer::Column::Id",
+        to = "crate::routes::layers::db::Column::Id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
     Layer,
 }
 
-impl Related<super::country::Entity> for Entity {
+impl Related<crate::routes::countries::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Country.def()
     }
 }
 
-impl Related<super::layer::Entity> for Entity {
+impl Related<crate::routes::layers::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Layer.def()
     }

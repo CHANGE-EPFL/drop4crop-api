@@ -20,7 +20,7 @@ RUN cargo build --release --bin drop4crop-api-rust
 
 # We do not need the Rust toolchain to run the binary!
 FROM debian:bookworm-slim AS runtime
-
+RUN apt-get update && apt-get install -y libgdal-dev
 WORKDIR /app
 COPY --from=builder /app/target/release/drop4crop-api-rust /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/drop4crop-api-rust"]

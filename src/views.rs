@@ -9,15 +9,9 @@ use axum::{
 use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
 use image::{ImageBuffer, Rgba, RgbaImage};
-use sea_orm::{
-    entity::prelude::*, ActiveModelTrait, ActiveValue, ColumnTrait, Condition, Database,
-    DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, LoaderTrait, Order,
-    QueryOrder, QuerySelect, Statement,
-};
-// use sea_orm::{DatabaseConnection};
 use sea_orm::JsonValue;
+use sea_orm::{entity::prelude::*, ColumnTrait, Database, DatabaseConnection, EntityTrait};
 use serde::Deserialize;
-use serde_json::Value;
 use std::cmp::Ordering;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -34,7 +28,6 @@ struct ColorStop {
     green: u8,
     blue: u8,
     opacity: u8,
-    label: f32,
 }
 
 pub async fn tile_handler(
@@ -89,7 +82,7 @@ pub async fn tile_handler(
         })?;
 
     // Attempt to extract the style from the first related record.
-    let dbstyle: Option<JsonValue> = related_styles.into_iter().next().map(|s| s.style).flatten();
+    let dbstyle: Option<JsonValue> = related_styles.into_iter().next().and_then(|s| s.style);
 
     // Convert the raw JSON into a vector of ColorStop.
     let stops: Vec<ColorStop> = match dbstyle {
@@ -116,7 +109,7 @@ pub async fn tile_handler(
     };
 
     // Build our color stops (value, Rgba) for interpolation.
-    let mut color_stops: Vec<(f32, Rgba<u8>)> = if stops.is_empty() {
+    let color_stops: Vec<(f32, Rgba<u8>)> = if stops.is_empty() {
         // Default grayscale mapping.
         vec![
             (0.0, Rgba([0, 0, 0, 255])),
@@ -182,6 +175,6 @@ fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
     }
     color_stops
         .last()
-        .map(|(_, c)| c.clone())
+        .map(|(_, c)| *c)
         .unwrap_or(Rgba([0, 0, 0, 255]))
 }

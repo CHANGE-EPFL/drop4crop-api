@@ -2,6 +2,7 @@ mod config;
 // pub mod redis;
 pub mod entity;
 pub mod s3;
+pub mod styling;
 pub mod tiles;
 pub mod views;
 

@@ -1,4 +1,4 @@
-use crate::s3;
+use crate::storage;
 use anyhow::{Context, Result};
 use gdal::{spatial_ref::SpatialRef, Dataset};
 use gdal_sys::{CPLErr::CE_None, GDALResampleAlg::GRA_NearestNeighbour};
@@ -50,7 +50,7 @@ impl XYZTile {
     pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
-        let object = s3::get_object(&filename).await?;
+        let object = storage::get_object(&filename).await?;
         let x = self.x;
         let y = self.y;
         let z = self.z;

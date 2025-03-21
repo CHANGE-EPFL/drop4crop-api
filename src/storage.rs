@@ -26,52 +26,20 @@ fn get_bucket() -> Box<Bucket> {
     Bucket::new(&config.s3_bucket_id, region, credentials).unwrap()
 }
 
-/// Builds the cache key based on the app configuration and object ID.
-fn build_cache_key(object_id: &str) -> String {
-    let config = crate::config::Config::from_env();
-    let path = format!("{}-{}", config.app_name, config.deployment);
-    format!("{}/{}", path, object_id)
-}
-
-/// Builds the key used to indicate that a download is in progress.
-fn build_downloading_key(object_id: &str) -> String {
-    let cache_key = build_cache_key(object_id);
-    format!("{}:downloading", cache_key)
-}
-
-/// Returns a Redis connection URL. When `with_db` is true, it includes the database number.
-fn get_redis_connection_url(with_db: bool) -> String {
-    let config = crate::config::Config::from_env();
-    if with_db {
-        format!(
-            "redis://{}:{}/{}",
-            config.redis_url, config.redis_port, config.redis_db
-        )
-    } else {
-        format!("redis://{}:{}/", config.redis_url, config.redis_port)
-    }
-}
-
-/// Returns a Redis client using the cache DB.
-fn get_redis_client() -> redis::Client {
-    let url = get_redis_connection_url(true);
-    redis::Client::open(url).unwrap()
-}
-
 /// Asynchronously fetches an object by first checking the Redis cache. If the file is not cached,
 /// it attempts to set a downloading flag (with a TTL) and spawns a background task to fetch it from S3.
 /// Meanwhile, callers loop waiting for the cache to be filled.
 pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Create the keys for the cache and downloading state.
-    let cache_key = build_cache_key(object_id);
+    let cache_key = crate::cache::build_cache_key(object_id);
     // Create a key to indicate that a download is in progress.
-    let downloading_key = build_downloading_key(object_id);
+    let downloading_key = crate::cache::build_downloading_key(object_id);
 
-    let client = get_redis_client();
+    let client = crate::cache::get_redis_client();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
     // Check if the object is already in the cache.
-    if let Some(data) = redis_get(&mut con, &cache_key).await? {
+    if let Some(data) = crate::cache::redis_get(&mut con, &cache_key).await? {
         // println!("Cache hit for {}", cache_key);
         return Ok(data);
     }
@@ -101,7 +69,7 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Loop until the file appears in the cache.
     loop {
         sleep(Duration::from_secs(1)).await;
-        if let Some(data) = redis_get(&mut con, &cache_key).await? {
+        if let Some(data) = crate::cache::redis_get(&mut con, &cache_key).await? {
             println!("Cache filled for {}", cache_key);
             return Ok(data);
         }
@@ -133,15 +101,6 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     }
 }
 
-/// Helper function to get a value from Redis by key.
-async fn redis_get(
-    con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
-) -> Result<Option<Vec<u8>>> {
-    let result: Option<Vec<u8>> = redis::cmd("GET").arg(key).query_async(con).await?;
-    Ok(result)
-}
-
 /// Downloads the object from S3 and pushes it to the cache. On completion (or error), it removes
 /// the downloading flag so that waiting threads can act accordingly.
 async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()> {
@@ -150,28 +109,8 @@ async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()
     // Here the S3 object key is the same as the cache_key (which includes the app/deployment prefix).
     let data = bucket.get_object(cache_key).await?.bytes().to_vec();
     println!("Downloaded object {} from S3, pushing to cache", cache_key);
-    push_cache_raw(cache_key, &data).await?;
+    crate::cache::push_cache_raw(cache_key, &data).await?;
     println!("Removing downloading state for {}", cache_key);
-    remove_downloading_state_raw(downloading_key).await?;
-    Ok(())
-}
-
-/// Pushes the data to Redis using the provided key.
-async fn push_cache_raw(key: &str, data: &[u8]) -> Result<()> {
-    let client = get_redis_client();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-    let _: () = redis::cmd("SET")
-        .arg(key)
-        .arg(data)
-        .query_async(&mut con)
-        .await?;
-    Ok(())
-}
-
-/// Removes the downloading flag from Redis.
-async fn remove_downloading_state_raw(key: &str) -> Result<()> {
-    let client = get_redis_client();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
-    let _: () = redis::cmd("DEL").arg(key).query_async(&mut con).await?;
+    crate::cache::remove_downloading_state_raw(downloading_key).await?;
     Ok(())
 }

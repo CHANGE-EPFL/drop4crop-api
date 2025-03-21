@@ -9,7 +9,7 @@ import concurrent.futures
 import logging
 import typer
 from keycloak import KeycloakOpenID
-import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # Constants
 APPLICATION_NAME: str = "Drop4Crop"
@@ -18,7 +18,7 @@ TOKEN_CACHE_FILE: str = "token_cache.json"
 UPLOAD_ENDPOINT: str = "/api/layers/uploads"
 EXISTING_LAYERS_ENDPOINT: str = "/api/layers"
 DEFAULT_THREADS: int = 10
-OVERWRITE_DUPLICATES: bool = True
+OVERWRITE_DUPLICATES: bool = False
 
 # The various items used to match in the directory structure
 CROP_ITEMS = [
@@ -82,8 +82,13 @@ def query_existing_layers(server, token):
 
     try:
         response = requests.get(
-            f"{server}{EXISTING_LAYERS_ENDPOINT}?filter=%7B%7D&range=%5B0%2C10000%5D&sort=%5B%22uploaded_at%22%2C%22DESC%22%5D",
+            f"{server}{EXISTING_LAYERS_ENDPOINT}",
             headers=headers,
+            params={
+                "filter": "{}",
+                "range": "[0,10000]",
+                "sort": '["uploaded_at","DESC"]',
+            },
         )
 
         if response.status_code == 200:
@@ -341,33 +346,36 @@ def get_token(server: str):
 
 
 def upload_file(server, file_path, token, filename, overwrite_duplicates):
-    """Upload a single file to the server."""
-    with open(file_path, "rb") as f:
-        files = {"file": (filename, f)}
-        headers = {"Authorization": f"Bearer {token}"}
+    """Upload a single file to the server explicitly using POST."""
+    try:
+        with open(file_path, "rb") as f:
+            files = {"file": (filename, f)}
+            headers = {"Authorization": f"Bearer {token}"}
 
-        response = requests.post(
-            f"{server}{UPLOAD_ENDPOINT}",
-            files=files,
-            headers=headers,
-            params={"overwrite_duplicates": overwrite_duplicates},
-        )
+            response = requests.post(
+                f"{server}{UPLOAD_ENDPOINT}",
+                files=files,
+                headers=headers,
+                params={"overwrite_duplicates": overwrite_duplicates},
+            )
 
-    if response.status_code == 200:
-        logger.info(f"Successfully uploaded {filename}")
-    else:
-        logger.error(
-            f"Failed to upload {filename}: {response.status_code} - {response.text}"
-        )
+            if response.status_code == 200:
+                logger.info(f"Successfully uploaded {filename}")
+            else:
+                logger.error(
+                    f"Failed to upload {filename}: {response.status_code} - {response.text}"
+                )
+    except IOError as e:
+        logger.error(f"Failed to open file: {file_path}, IOError: {e}")
+    except Exception as e:
+        logger.error(f"Error uploading file {file_path}: {e}")
 
 
 def parallel_upload(
     files_to_upload, server, token, threads, overwrite_duplicates
 ):
-    """Upload files in parallel."""
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=threads
-    ) as executor:
+    """Upload files in parallel, reading and uploading in separate threads."""
+    with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
             executor.submit(
                 upload_file,
@@ -440,7 +448,7 @@ def flattened(
     directory: str,
     server: str = DROP4CROP_SERVER,
     threads: int = DEFAULT_THREADS,
-    overwrite: bool = False,
+    overwrite: bool = OVERWRITE_DUPLICATES,
     noconfirm: bool = False,  # Added noconfirm flag for skipping confirmation
     debug: bool = False,
 ):

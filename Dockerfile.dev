@@ -1,0 +1,11 @@
+FROM rust:1.85.0
+
+# Add GDAL
+RUN apt-get update && apt-get install -y libgdal-dev clang libclang1
+RUN cargo install bacon
+WORKDIR /app
+
+COPY Cargo.lock Cargo.toml bacon.toml /app/
+COPY ./src/ /app/src/
+
+ENTRYPOINT ["bacon", "--headless", "run"]

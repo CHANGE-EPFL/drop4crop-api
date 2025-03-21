@@ -1,25 +1,32 @@
-pub mod cache;
+pub mod common;
 pub mod config;
-pub mod entity;
-pub mod storage;
-pub mod styling;
-pub mod tiles;
-pub mod views;
+pub mod routes;
 
-use axum::{routing::get, routing::Router};
+use sea_orm::{Database, DatabaseConnection};
 
 #[tokio::main]
 async fn main() {
     // Load config to validate runtime environment used later in app
-    config::Config::from_env();
-    let app = Router::new().route("/tiles/{z}/{x}/{y}", get(views::tile_handler));
-
-    let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
-
-    println!("Listening on {}", addr);
-
-    // Run the server (correct axum usage without `hyper::Server`)
-    axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+    let config = config::Config::from_env();
+    // let app = Router::new().route("/tiles/{z}/{x}/{y}", get(views::tile_handler));
+    let db: DatabaseConnection = Database::connect(config.db_uri.as_ref().unwrap())
         .await
         .unwrap();
+
+    if db.ping().await.is_ok() {
+        println!("Connected to the database");
+    } else {
+        println!("Could not connect to the database");
+    }
+
+    let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
+    println!("Listening on {}", addr);
+
+    let router = routes::build_router(&db);
+    axum::serve(
+        tokio::net::TcpListener::bind(addr).await.unwrap(),
+        router.into_make_service(),
+    )
+    .await
+    .unwrap();
 }

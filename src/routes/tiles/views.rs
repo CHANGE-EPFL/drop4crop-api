@@ -1,25 +1,53 @@
-use crate::entity::{layer, style};
-use crate::tiles::XYZTile;
+use crate::routes::layers::db as layer;
+use crate::routes::styles::db as style;
+use crate::routes::tiles::tiles::XYZTile;
 use anyhow::Result;
 use axum::{
-    extract::{Path, Query},
-    http::{header, StatusCode},
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
     response::IntoResponse,
 };
 use image::ImageBuffer;
-use sea_orm::{
-    entity::prelude::*, ColumnTrait, Database, DatabaseConnection, EntityTrait, JsonValue,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, JsonValue, entity::prelude::*};
 use serde::Deserialize;
-use tokio_retry::{strategy::FixedInterval, RetryIf};
-#[derive(Deserialize)]
+use tokio_retry::{RetryIf, strategy::FixedInterval};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+#[derive(Deserialize, ToSchema)]
 pub struct Params {
     layer: String,
 }
 
+pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(tile_handler))
+        .with_state(db.clone())
+}
+
+#[utoipa::path(
+    get,
+    path = "/{z}/{x}/{y}",
+    responses(
+        (status = 200, description = "Tile image found", body = [u8], content_type = "image/png"),
+        (status = 404, description = "Layer not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("z" = u32, description = "Zoom level"),
+        ("x" = u32, description = "Tile x coordinate"),
+        ("y" = u32, description = "Tile y coordinate"),
+        ("layer" = String, Query, description = "Layer name")
+    ),
+    summary = "Get tile image",
+    description = "Returns a tile image for the specified layer and coordinates."
+)]
+#[axum::debug_handler]
 pub async fn tile_handler(
     Query(params): Query<Params>,
     Path((z, x, y)): Path<(u32, u32, u32)>,
+    State(db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let xyz_tile = XYZTile { x, y, z };
     let retry_strategy = FixedInterval::from_millis(200).take(5);
@@ -38,9 +66,6 @@ pub async fn tile_handler(
     })?;
 
     let config = crate::config::Config::from_env();
-    let db: DatabaseConnection = Database::connect(config.db_uri.as_ref().unwrap())
-        .await
-        .unwrap();
 
     // Find the layer record by layer name.
     let layer_record = match layer::Entity::find()
@@ -72,7 +97,7 @@ pub async fn tile_handler(
     let dbstyle: Option<JsonValue> = related_styles.into_iter().next().and_then(|s| s.style);
 
     // Apply the style to the image.
-    let png_data = crate::styling::style_layer(img, dbstyle).map_err(|e| {
+    let png_data = super::styling::style_layer(img, dbstyle).map_err(|e| {
         println!("[tile_handler] Error applying style: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

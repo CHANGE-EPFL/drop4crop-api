@@ -1,4 +1,4 @@
-use crate::storage;
+use crate::routes::tiles::storage;
 use anyhow::{Context, Result};
 use gdal::{spatial_ref::SpatialRef, Dataset};
 use gdal_sys::{CPLErr::CE_None, GDALResampleAlg::GRA_NearestNeighbour};

@@ -31,15 +31,15 @@ fn get_bucket() -> Box<Bucket> {
 /// Meanwhile, callers loop waiting for the cache to be filled.
 pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Create the keys for the cache and downloading state.
-    let cache_key = crate::cache::build_cache_key(object_id);
+    let cache_key = super::cache::build_cache_key(object_id);
     // Create a key to indicate that a download is in progress.
-    let downloading_key = crate::cache::build_downloading_key(object_id);
+    let downloading_key = super::cache::build_downloading_key(object_id);
 
-    let client = crate::cache::get_redis_client();
+    let client = super::cache::get_redis_client();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
     // Check if the object is already in the cache.
-    if let Some(data) = crate::cache::redis_get(&mut con, &cache_key).await? {
+    if let Some(data) = super::cache::redis_get(&mut con, &cache_key).await? {
         // println!("Cache hit for {}", cache_key);
         return Ok(data);
     }
@@ -69,7 +69,7 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Loop until the file appears in the cache.
     loop {
         sleep(Duration::from_secs(1)).await;
-        if let Some(data) = crate::cache::redis_get(&mut con, &cache_key).await? {
+        if let Some(data) = super::cache::redis_get(&mut con, &cache_key).await? {
             println!("Cache filled for {}", cache_key);
             return Ok(data);
         }
@@ -109,8 +109,8 @@ async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()
     // Here the S3 object key is the same as the cache_key (which includes the app/deployment prefix).
     let data = bucket.get_object(cache_key).await?.bytes().to_vec();
     println!("Downloaded object {} from S3, pushing to cache", cache_key);
-    crate::cache::push_cache_raw(cache_key, &data).await?;
+    super::cache::push_cache_raw(cache_key, &data).await?;
     println!("Removing downloading state for {}", cache_key);
-    crate::cache::remove_downloading_state_raw(downloading_key).await?;
+    super::cache::remove_downloading_state_raw(downloading_key).await?;
     Ok(())
 }

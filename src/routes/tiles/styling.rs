@@ -84,7 +84,7 @@ pub fn style_layer(
         if p == 0.0 {
             Rgba([0, 0, 0, 0])
         } else {
-            crate::styling::get_color(p, &color_stops)
+            super::styling::get_color(p, &color_stops)
         }
     });
 

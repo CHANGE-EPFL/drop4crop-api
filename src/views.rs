@@ -11,18 +11,30 @@ use image::ImageEncoder;
 use image::{ImageBuffer, Rgba, RgbaImage};
 use sea_orm::{
     entity::prelude::*, ActiveModelTrait, ActiveValue, ColumnTrait, Condition, Database,
-    DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, Order, QueryOrder,
-    QuerySelect, Statement,
+    DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, LoaderTrait, Order,
+    QueryOrder, QuerySelect, Statement,
 };
 // use sea_orm::{DatabaseConnection};
+use sea_orm::JsonValue;
 use serde::Deserialize;
+use serde_json::Value;
 use std::cmp::Ordering;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
-
 #[derive(Deserialize)]
 pub struct Params {
     layer: String,
+}
+
+// Representation of the JSON style
+#[derive(Deserialize)]
+struct ColorStop {
+    value: f32,
+    red: u8,
+    green: u8,
+    blue: u8,
+    opacity: u8,
+    label: f32,
 }
 
 pub async fn tile_handler(
@@ -49,74 +61,76 @@ pub async fn tile_handler(
     let db: DatabaseConnection = Database::connect(config.db_url.as_ref().unwrap())
         .await
         .unwrap();
-    // Get the filename from the layer name in the database
-    let dbres = layer::Entity::find()
-        .find_with_related(style::Entity)
+
+    // Find the layer record by layer name.
+    let layer_record = match layer::Entity::find()
         .filter(layer::Column::LayerName.eq(&params.layer))
+        .one(&db)
+        .await
+        .map_err(|e| {
+            println!("[tile_handler] Database query error: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+        Some(rec) => rec,
+        None => {
+            println!("[tile_handler] No layer found for {}", &params.layer);
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
+
+    // Load the related style record(s).
+    let related_styles = layer_record
+        .find_related(style::Entity)
         .all(&db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if dbres.is_empty() {
-        println!("[tile_handler] No layer found for {}", &params.layer);
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let (dblayer, dbstyle_res) = dbres.first().unwrap();
-    let dbstyle = dbstyle_res
-        .clone()
-        .pop()
-        .map(|s| s.style)
-        .unwrap_or_default();
-    println!("Dbstyle: {:?}", dbstyle);
-    // if dbstyle.is_none() {
-    //     println!("[tile_handler] No style found for {}", &params.layer);
-    // } else {
-    //     println!(
-    //         "[tile_handler] Found style for {}: {:?}",
-    //         &params.layer,
-    //         dbstyle.clone().unwrap()
-    //     );
-    // }
-    // println!("[tile_handler] dbres: {:?}", dbstyle);
-    // Unwrap the style. It is structured as a JSON: [{"value": 0.52352285385132, "red": 215, "green": 25, "blue": 28, "opacity": 255, "label": 0.5235}, {"value": 2.24634027481079, "red": 253, "green": 174, "blue": 97, "opacity": 255, "label": 2.2463}, {"value": 3.96915769577026, "red": 255, "green": 255, "blue": 191, "opacity": 255, "label": 3.9692}, {"value": 5.69197511672973, "red": 171, "green": 221, "blue": 164, "opacity": 255, "label": 5.692}, {"value": 7.4147925376892, "red": 43, "green": 131, "blue": 186, "opacity": 255, "label": 7.4148}]
-
-    // let dbstyle = dbstyle.unwrap().style;
-    // let style_vec: Vec<serde_json::Value> =
-    // serde_json::from_str(&dbstyle).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // println!("[tile_handler] style_vec: {:?}", style_vec);
-    // Parse JSON style
-    let dbstyle_str = dbstyle.as_ref().ok_or_else(|| {
-        println!("[tile_handler] dbstyle is None");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let style_vec: Vec<serde_json::Value> = serde_json::from_str(dbstyle_str.to_string().as_str())
         .map_err(|e| {
-            println!("[tile_handler] Failed to parse JSON: {:?}", e);
+            println!("[tile_handler] Database query error: {:?}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    println!("style_vec: {:?}", style_vec);
-    // Convert JSON to a sorted vector of tuples (value, rgba)
-    let mut color_stops: Vec<(f32, Rgba<u8>)> = style_vec
-        .iter()
-        .filter_map(|entry| {
-            Some((
-                entry.get("value")?.as_f64()? as f32,
-                Rgba([
-                    entry.get("red")?.as_u64()? as u8,
-                    entry.get("green")?.as_u64()? as u8,
-                    entry.get("blue")?.as_u64()? as u8,
-                    entry.get("opacity")?.as_u64()? as u8,
-                ]),
-            ))
-        })
-        .collect();
 
-    // Sort by value
-    color_stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    // Attempt to extract the style from the first related record.
+    let dbstyle: Option<JsonValue> = related_styles.into_iter().next().map(|s| s.style).flatten();
 
-    // Convert the grayscale ImageBuffer to RGBA.
-    // Convert grayscale ImageBuffer to RGBA using the style
+    // Convert the raw JSON into a vector of ColorStop.
+    let stops: Vec<ColorStop> = match dbstyle {
+        // If the column is stored as a JSON array, we can deserialize it directly.
+        Some(JsonValue::Array(arr)) => serde_json::from_value(JsonValue::Array(arr.clone()))
+            .unwrap_or_else(|e| {
+                println!("[tile_handler] Failed to deserialize style array: {:?}", e);
+                vec![]
+            }),
+        // If the column is stored as a non-empty JSON string, parse it.
+        Some(JsonValue::String(ref s)) if !s.trim().is_empty() => serde_json::from_str(s)
+            .unwrap_or_else(|e| {
+                println!("[tile_handler] Failed to parse JSON style string: {:?}", e);
+                vec![]
+            }),
+        // No valid style provided.
+        _ => {
+            println!(
+                "[tile_handler] No valid style found for {}, using default grayscale.",
+                &params.layer
+            );
+            vec![]
+        }
+    };
+
+    // Build our color stops (value, Rgba) for interpolation.
+    let mut color_stops: Vec<(f32, Rgba<u8>)> = if stops.is_empty() {
+        // Default grayscale mapping.
+        vec![
+            (0.0, Rgba([0, 0, 0, 255])),
+            (255.0, Rgba([255, 255, 255, 255])),
+        ]
+    } else {
+        let mut stops = stops
+            .into_iter()
+            .map(|cs| (cs.value, Rgba([cs.red, cs.green, cs.blue, cs.opacity])))
+            .collect::<Vec<_>>();
+        stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        stops
+    };
+
     let (width, height) = img.dimensions();
     let img_rgba: RgbaImage = ImageBuffer::from_fn(width, height, |x, y| {
         let p = img.get_pixel(x, y)[0] as f32;
@@ -127,7 +141,6 @@ pub async fn tile_handler(
         }
     });
 
-    // Encode the ImageBuffer to PNG
     let mut png_data = Vec::new();
     {
         let encoder = PngEncoder::new(&mut png_data);
@@ -144,12 +157,11 @@ pub async fn tile_handler(
             })?;
     }
 
-    // Build the response with a Content-Type header.
     let response = ([(header::CONTENT_TYPE, "image/png")], png_data);
     Ok(response)
 }
 
-// Function to find the closest colour for a given value
+/// Returns an interpolated colour based on a value and a set of colour stops.
 fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
     for window in color_stops.windows(2) {
         let (v1, c1) = window[0];

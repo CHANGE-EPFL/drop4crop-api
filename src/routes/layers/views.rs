@@ -155,31 +155,26 @@ pub async fn get_all_map_layers(
     let mut response = Vec::new();
 
     for layer in layers {
-        // let style = if let Some(style_model) = layer.style {
-        //     sort_styles(style_model.style)
-        // } else {
-        //     generate_grayscale_style(layer.min_value, layer.max_value, 10)
-        // };
+        let mut layer: super::models::Layer = layer.into();
+        layer.style = vec![];
 
-        let mut read = Layer::from(layer);
+        let style = if !layer.style.is_empty() {
+            sort_styles(layer.style.clone())
+        } else {
+            generate_grayscale_style(layer.min_value.unwrap(), layer.max_value.unwrap(), 10)
+        };
+        layer.style = style;
+        // let mut read = Layer::from(layer);
         // read.style = style;
-        response.push(read);
+        response.push(layer);
     }
 
     Ok(Json(response))
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct StyleItem {
-    pub value: f32,
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
-    pub opacity: u8,
-    pub label: f32,
-}
-
-pub fn sort_styles(mut style_list: Vec<StyleItem>) -> Vec<StyleItem> {
+pub fn sort_styles(
+    mut style_list: Vec<crate::routes::styles::models::StyleItem>,
+) -> Vec<crate::routes::styles::models::StyleItem> {
     style_list.sort_by(|a, b| {
         a.value
             .partial_cmp(&b.value)
@@ -188,15 +183,19 @@ pub fn sort_styles(mut style_list: Vec<StyleItem>) -> Vec<StyleItem> {
     style_list
 }
 
-pub fn generate_grayscale_style(min: f32, max: f32, num_segments: usize) -> Vec<StyleItem> {
-    let step = (max - min) / num_segments as f32;
+pub fn generate_grayscale_style(
+    min: f64,
+    max: f64,
+    num_segments: usize,
+) -> Vec<crate::routes::styles::models::StyleItem> {
+    let step = (max - min) / num_segments as f64;
     let mut style = Vec::with_capacity(num_segments);
 
     for i in 0..num_segments {
-        let value = min + i as f32 * step;
+        let value = min + i as f64 * step;
         let grey_value =
-            ((255.0 * i as f32) / (num_segments.saturating_sub(1) as f32)).round() as u8;
-        style.push(StyleItem {
+            ((255.0 * i as f64) / (num_segments.saturating_sub(1) as f64)).round() as u8;
+        style.push(crate::routes::styles::models::StyleItem {
             value,
             red: grey_value,
             green: grey_value,

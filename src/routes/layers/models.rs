@@ -1,3 +1,5 @@
+use std::vec;
+
 use super::db::Model;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -10,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(
-    ToSchema, Serialize, Deserialize, FromQueryResult, ToUpdateModel, ToCreateModel, Clone,
-)]
+#[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
 #[active_model = "super::db::ActiveModel"]
 pub struct Layer {
     #[crudcrate(update_model = false, update_model = false, on_create = Uuid::new_v4())]
@@ -31,12 +31,12 @@ pub struct Layer {
     last_updated: chrono::DateTime<Utc>,
     global_average: Option<f64>,
     filename: Option<String>,
-    min_value: Option<f64>,
-    max_value: Option<f64>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
     style_id: Option<Uuid>,
     is_crop_specific: bool,
-    // #[crudcrate(non_db_attr=true, default = None)]
-    // style: Option<crate::routes::styles::models::Style>,
+    #[crudcrate(non_db_attr=true, default = vec![])]
+    pub style: Vec<crate::routes::styles::models::StyleItem>,
 }
 
 impl From<Model> for Layer {
@@ -60,7 +60,7 @@ impl From<Model> for Layer {
             max_value: model.max_value,
             style_id: model.style_id,
             is_crop_specific: model.is_crop_specific,
-            // style: model.style,
+            style: vec![],
         }
     }
 }

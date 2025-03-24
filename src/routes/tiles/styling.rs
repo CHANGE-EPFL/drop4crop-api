@@ -1,12 +1,13 @@
 use anyhow::Result;
-use image::{codecs::png::PngEncoder, ImageBuffer, ImageEncoder, Rgba, RgbaImage};
-use sea_orm::JsonValue;
-use serde::Deserialize;
+use image::{ImageBuffer, ImageEncoder, Rgba, RgbaImage, codecs::png::PngEncoder};
+use sea_orm::{FromQueryResult, JsonValue};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use utoipa::ToSchema;
 
 // Representation of the JSON style
-#[derive(Deserialize)]
-struct ColorStop {
+#[derive(Deserialize, Clone, ToSchema, Serialize, FromQueryResult)]
+pub struct ColorStop {
     value: f32,
     red: u8,
     green: u8,

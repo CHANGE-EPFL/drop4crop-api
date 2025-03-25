@@ -1,6 +1,6 @@
 use crate::routes::tiles::storage;
 use anyhow::{Context, Result};
-use gdal::{spatial_ref::SpatialRef, Dataset};
+use gdal::{Dataset, spatial_ref::SpatialRef};
 use gdal_sys::{CPLErr::CE_None, GDALResampleAlg::GRA_NearestNeighbour};
 use image::ImageBuffer;
 use image::Luma;
@@ -47,7 +47,7 @@ impl XYZTile {
     /// The function first fetches the GeoTIFF data from S3 (in EPSG:4326), then uses GDAL to
     /// reproject it to Web Mercator (EPSG:3857) for correct alignment with basemaps like OSM.
     /// Heavy GDAL operations run in a blocking thread.
-    pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
+    pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
         let object = storage::get_object(&filename).await?;
@@ -57,7 +57,7 @@ impl XYZTile {
         let tile = XYZTile { x, y, z };
 
         // Offload the heavy reprojection to a blocking task.
-        let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u8>, Vec<u8>>> {
+        let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
             // println!("Generating tile for x: {}, y: {}, z: {}", x, y, z);
 
             // Compute the expected Web Mercator bounds for this tile.
@@ -102,7 +102,7 @@ impl XYZTile {
                 gdal::DriverManager::get_driver_by_name("MEM").context("Getting MEM driver")?;
             let band_count = src_ds.raster_count();
             let mut dest_ds = mem_driver
-                .create_with_band_type::<u8, _>("", 256, 256, band_count as usize)
+                .create_with_band_type::<u32, _>("", 256, 256, band_count as usize)
                 .context("Creating destination dataset")?;
 
             // Set the destination projection to EPSG:3857.
@@ -149,11 +149,25 @@ impl XYZTile {
                     return Err(anyhow::Error::new(e).context("Error getting raster band 1"));
                 }
             };
+
+            // Compute statistics to see the data range.
+            let stats = band
+                .get_statistics(true, true)
+                .context("Getting statistics for warped dataset")?;
+            if let Some(statistics) = stats {
+                println!(
+                    "[debug] Reprojected band statistics: min = {}, max = {}",
+                    statistics.min, statistics.max
+                );
+            } else {
+                println!("[debug] No statistics available for the reprojected band.");
+            }
+
             let buf = band
-                .read_as::<u8>((0, 0), (256, 256), (256, 256), None)
+                .read_as::<u16>((0, 0), (256, 256), (256, 256), None)
                 .context("Reading raster data")?;
-            let buffer: Vec<u8> = buf.data().to_vec();
-            let img = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(256, 256, buffer)
+            let buffer: Vec<u16> = buf.data().to_vec();
+            let img = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(256, 256, buffer)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
             Ok(img)
         })

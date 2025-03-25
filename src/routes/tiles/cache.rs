@@ -17,7 +17,6 @@ pub fn build_downloading_key(object_id: &str) -> String {
 /// Returns a Redis client using the cache DB.
 pub fn get_redis_client() -> redis::Client {
     let config = crate::config::Config::from_env();
-    println!("Connecting to Redis at {}", config.tile_cache_uri);
     redis::Client::open(config.tile_cache_uri).unwrap()
 }
 

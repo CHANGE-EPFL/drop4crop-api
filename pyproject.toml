@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "drop4crop-api"
-version = "0.1.0"
+version = "0.3.2"
 description = "The API for drop4crop"
 authors = ["Evan Thomas <evan.thomas@epfl.ch>"]
 readme = "README.md"

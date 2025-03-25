@@ -118,10 +118,7 @@ pub fn style_layer(
             return Rgba([0, 0, 0, 0]);
         }
         let color = get_color(data_value, &color_stops);
-        println!(
-            "[debug] Pixel at ({}, {}): data_value: {}, color: {:?}",
-            x, y, data_value, color
-        );
+
         color
     });
 

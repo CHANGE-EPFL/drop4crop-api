@@ -150,11 +150,6 @@ impl XYZTile {
                 }
             };
 
-            // Compute statistics to see the data range.
-            let stats = band
-                .get_statistics(true, true)
-                .context("Getting statistics for warped dataset")?;
-
             let buf = band
                 .read_as::<u16>((0, 0), (256, 256), (256, 256), None)
                 .context("Reading raster data")?;

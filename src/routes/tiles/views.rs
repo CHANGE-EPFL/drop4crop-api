@@ -1,6 +1,6 @@
 use crate::routes::layers::db as layer;
 use crate::routes::styles::db as style;
-use crate::routes::tiles::tiles::XYZTile;
+use crate::routes::tiles::utils::XYZTile;
 use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
@@ -64,8 +64,6 @@ pub async fn tile_handler(
         println!("[tile_handler] Failed after 5 attempts: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-    let config = crate::config::Config::from_env();
 
     // Find the layer record by layer name.
     let layer_record = match layer::Entity::find()

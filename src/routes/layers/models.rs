@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use crudcrate::{CRUDResource, ToCreateModel, ToUpdateModel};
 use sea_orm::{
-    ActiveValue, Condition, DatabaseConnection, EntityTrait, FromQueryResult, Order, QueryOrder,
-    QuerySelect, entity::prelude::*,
+    ActiveValue, Condition, DatabaseConnection, EntityTrait, Order, QueryOrder, QuerySelect,
+    entity::prelude::*,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -124,7 +124,7 @@ impl CRUDResource for Layer {
             models.push(layer);
         }
 
-        Ok(models.into_iter().map(Self::ApiModel::from).collect())
+        Ok(models)
     }
 
     async fn get_one(db: &DatabaseConnection, id: Uuid) -> Result<Self::ApiModel, DbErr> {

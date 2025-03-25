@@ -8,7 +8,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(Serialize, ToSchema)]
 pub struct KeycloakConfig {
-    clientId: String,
+    #[serde(rename = "clientId")]
+    client_id: String,
     realm: String,
     url: String,
 }
@@ -40,7 +41,10 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
             }),
         );
     }
-
+    println!(
+        "[healthz {}] Database connection is healthy",
+        chrono::Utc::now()
+    );
     (
         StatusCode::OK,
         Json(HealthCheck {
@@ -64,7 +68,7 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
 pub async fn get_keycloak_config() -> (StatusCode, Json<KeycloakConfig>) {
     let config = Config::from_env();
     let keycloak_config = KeycloakConfig {
-        clientId: config.keycloak_client_id,
+        client_id: config.keycloak_client_id,
         realm: config.keycloak_realm,
         url: config.keycloak_url,
     };

@@ -55,15 +55,18 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
         .nest("/api/tiles", tiles::views::router(db))
         .nest(
             "/api/countries",
-            // countries::views::router(db, Some(keycloak_instance.clone())),
-            countries::views::router(db, None),
+            countries::views::router(db, Some(keycloak_instance.clone())),
+            // countries::views::router(db, None),
         )
         .nest(
             "/api/layers",
-            // layers::views::router(db, Some(keycloak_instance.clone())),
-            layers::views::router(db, None),
+            layers::views::router(db, Some(keycloak_instance.clone())),
+            // layers::views::router(db, None),
         )
-        .nest("/api/styles", styles::views::router(db, None))
+        .nest(
+            "/api/styles",
+            styles::views::router(db, Some(keycloak_instance.clone())),
+        )
         // .nest(
         //     "/api/plot_samples",
         //     samples::views::router(db, Some(keycloak_instance.clone())),

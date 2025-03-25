@@ -1,4 +1,3 @@
-use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 

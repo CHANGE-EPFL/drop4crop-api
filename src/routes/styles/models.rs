@@ -1,8 +1,6 @@
-use super::db::Model;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crudcrate::{CRUDResource, ToCreateModel, ToUpdateModel};
-use rand::Rng;
 use sea_orm::{
     ActiveValue, Condition, DatabaseConnection, EntityTrait, FromQueryResult, Order, QueryOrder,
     QuerySelect, entity::prelude::*,
@@ -110,11 +108,6 @@ impl CRUDResource for Style {
     fn filterable_columns() -> Vec<(&'static str, Self::ColumnType)> {
         vec![("name", Self::ColumnType::Name)]
     }
-}
-
-fn generate_random_color() -> String {
-    let mut rng = rand::rng();
-    format!("#{:06x}", rng.random::<u32>() & 0xFF_FFFF)
 }
 
 #[derive(Serialize, Deserialize, Clone, ToSchema)]

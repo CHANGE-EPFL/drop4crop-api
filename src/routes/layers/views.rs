@@ -27,20 +27,23 @@ pub fn router(
 where
     Layer: CRUDResource,
 {
-    let mut mutating_router = OpenApiRouter::new()
+    let public_router = OpenApiRouter::new()
+        .routes(routes!(get_groups))
+        .routes(routes!(get_all_map_layers))
+        .routes(routes!(get_pixel_value))
+        .with_state(db.clone());
+
+    let mut protected_router = OpenApiRouter::new()
         .routes(routes!(get_one_handler))
         .routes(routes!(get_all_handler))
         .routes(routes!(create_one_handler))
         .routes(routes!(update_one_handler))
         .routes(routes!(delete_one_handler))
         .routes(routes!(delete_many_handler))
-        .routes(routes!(get_groups))
-        .routes(routes!(get_all_map_layers))
-        .routes(routes!(get_pixel_value))
         .with_state(db.clone());
 
     if let Some(instance) = keycloak_auth_instance {
-        mutating_router = mutating_router.layer(
+        protected_router = protected_router.layer(
             KeycloakAuthLayer::<Role>::builder()
                 .instance(instance)
                 .passthrough_mode(PassthroughMode::Block)
@@ -56,7 +59,7 @@ where
         );
     }
 
-    mutating_router
+    public_router.merge(protected_router)
 }
 
 #[utoipa::path(
@@ -293,7 +296,7 @@ pub async fn get_pixel_value(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let buf = buf_result.data();
-    let value = buf.get(0).cloned().unwrap_or(0.0);
+    let value = buf.first().cloned().unwrap_or(0.0);
 
     let response = PixelValueResponse { value };
     Ok(Json(response))

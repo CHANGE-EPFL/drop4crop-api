@@ -78,7 +78,7 @@ pub fn style_layer(
 
     // Determine the data range from the style stops.
     // If no stops are provided, we default to 0–255.
-    let (data_min, data_max) = if stops.is_empty() {
+    let (_data_min, _data_max) = if stops.is_empty() {
         (0.0, 255.0)
     } else {
         let mut stops_sorted = stops.clone();
@@ -117,9 +117,7 @@ pub fn style_layer(
         {
             return Rgba([0, 0, 0, 0]);
         }
-        let color = get_color(data_value, &color_stops);
-
-        color
+        get_color(data_value, &color_stops)
     });
 
     // Encode the final RGBA image as a PNG.

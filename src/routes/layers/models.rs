@@ -65,6 +65,21 @@ impl From<Model> for Layer {
     }
 }
 
+impl From<(Model, crate::routes::styles::db::Model)> for Layer {
+    fn from((model, style): (Model, crate::routes::styles::db::Model)) -> Self {
+        let style: Vec<crate::routes::styles::models::StyleItem> =
+            crate::routes::styles::models::StyleItem::from_json(
+                &style.style.unwrap_or_default(),
+                model.min_value.unwrap_or_default(),
+                model.max_value.unwrap_or_default(),
+                10,
+            );
+        let mut layer = Self::from(model);
+        layer.style = style;
+        layer
+    }
+}
+
 #[async_trait]
 impl CRUDResource for Layer {
     type EntityType = super::db::Entity;
@@ -88,13 +103,27 @@ impl CRUDResource for Layer {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<Self::ApiModel>, DbErr> {
-        let models = Self::EntityType::find()
+        let objs = Self::EntityType::find()
             .filter(condition)
             .order_by(order_column, order_direction)
             .offset(offset)
             .limit(limit)
             .all(db)
             .await?;
+        let styles = objs.load_one(crate::routes::styles::db::Entity, db).await?;
+
+        let mut models: Vec<Layer> = vec![];
+        for (model, style) in objs.into_iter().zip(styles.into_iter()) {
+            let layer: Layer = match style {
+                Some(style) => {
+                    // let style: crate::routes::styles::models::Style = style.into();
+                    Self::ApiModel::from((model, style))
+                }
+                None => Self::ApiModel::from(model),
+            };
+            models.push(layer);
+        }
+
         Ok(models.into_iter().map(Self::ApiModel::from).collect())
     }
 

@@ -1,14 +1,14 @@
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
-
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "style")]
 pub struct Model {
     #[sea_orm(unique)]
     pub name: String,
-    pub last_updated: DateTime,
+    pub last_updated: DateTime<Utc>,
     #[sea_orm(primary_key)]
-    pub iterator: i32,
-    #[sea_orm(unique)]
+    // pub iterator: i32,
+    // #[sea_orm(unique)]
     pub id: Uuid,
     pub style: Option<Json>,
 }

@@ -1,4 +1,4 @@
-use super::models::{Project, ProjectCreate, ProjectUpdate};
+use super::models::{Style, StyleCreate, StyleUpdate};
 use crate::common::auth::Role;
 use axum_keycloak_auth::{
     PassthroughMode, instance::KeycloakAuthInstance, layer::KeycloakAuthLayer,
@@ -8,14 +8,14 @@ use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-crud_handlers!(Project, ProjectUpdate, ProjectCreate);
+crud_handlers!(Style, StyleUpdate, StyleCreate);
 
 pub fn router(
     db: &DatabaseConnection,
     keycloak_auth_instance: Option<Arc<KeycloakAuthInstance>>,
 ) -> OpenApiRouter
 where
-    Project: CRUDResource,
+    Style: CRUDResource,
 {
     let mut mutating_router = OpenApiRouter::new()
         .routes(routes!(get_one_handler))
@@ -39,7 +39,7 @@ where
     } else {
         println!(
             "Warning: Mutating routes of {} router are not protected",
-            Project::RESOURCE_NAME_PLURAL
+            Style::RESOURCE_NAME_PLURAL
         );
     }
 

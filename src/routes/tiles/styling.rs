@@ -39,30 +39,42 @@ pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
         .map(|(_, c)| *c)
         .unwrap_or(Rgba([0, 0, 0, 255]))
 }
+
 pub fn style_layer(
     img: ImageBuffer<image::Luma<u8>, Vec<u8>>,
     style: Option<JsonValue>,
 ) -> Result<Vec<u8>> {
     // Convert the raw JSON into a vector of ColorStop.
     let stops: Vec<ColorStop> = match style {
-        // If the column is stored as a JSON array, we can deserialize it directly.
         Some(JsonValue::Array(arr)) => serde_json::from_value(JsonValue::Array(arr.clone()))
             .unwrap_or_else(|e| {
                 println!("[tile_handler] Failed to deserialize style array: {:?}", e);
                 vec![]
             }),
-        // If the column is stored as a non-empty JSON string, parse it.
         Some(JsonValue::String(ref s)) if !s.trim().is_empty() => serde_json::from_str(s)
             .unwrap_or_else(|e| {
                 println!("[tile_handler] Failed to parse JSON style string: {:?}", e);
                 vec![]
             }),
-        // No valid style provided.
         _ => {
-            println!("[tile_handler] No valid style found, using default grayscale.",);
+            println!("[tile_handler] No valid style found, using default grayscale.");
             vec![]
         }
     };
+
+    // Determine the value range. If no stops are provided, use a default range.
+    let (min_value, max_value) = if stops.is_empty() {
+        (0.0, 255.0)
+    } else {
+        // Here, we assume the first and last stops define the range.
+        let mut stops_sorted = stops.clone();
+        stops_sorted.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(Ordering::Equal));
+        (
+            stops_sorted.first().unwrap().value,
+            stops_sorted.last().unwrap().value,
+        )
+    };
+
     // Build our color stops (value, Rgba) for interpolation.
     let color_stops: Vec<(f32, Rgba<u8>)> = if stops.is_empty() {
         // Default grayscale mapping.
@@ -81,11 +93,13 @@ pub fn style_layer(
 
     let (width, height) = img.dimensions();
     let img_rgba: RgbaImage = ImageBuffer::from_fn(width, height, |x, y| {
-        let p = img.get_pixel(x, y)[0] as f32;
-        if p == 0.0 {
+        let raw_value = img.get_pixel(x, y)[0] as f32;
+        if raw_value == 0.0 {
             Rgba([0, 0, 0, 0])
         } else {
-            super::styling::get_color(p, &color_stops)
+            // Normalize the raw_value from 0-255 to the [min_value, max_value] range.
+            let normalized_value = (raw_value / 255.0) * (max_value - min_value) + min_value;
+            get_color(normalized_value, &color_stops)
         }
     });
 

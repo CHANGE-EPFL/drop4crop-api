@@ -63,10 +63,7 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
             // layers::views::router(db, Some(keycloak_instance.clone())),
             layers::views::router(db, None),
         )
-        // .nest(
-        //     "/api/gnss",
-        //     gnss::views::router(db, Some(keycloak_instance.clone())),
-        // )
+        .nest("/api/styles", styles::views::router(db, None))
         // .nest(
         //     "/api/plot_samples",
         //     samples::views::router(db, Some(keycloak_instance.clone())),

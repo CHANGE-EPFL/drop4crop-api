@@ -49,6 +49,14 @@ pub async fn tile_handler(
     Path((z, x, y)): Path<(u32, u32, u32)>,
     State(db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let max_tiles = 1 << z;
+    if x >= max_tiles {
+        println!(
+            "[tile_handler] x coordinate out-of-range: {} for zoom {}",
+            x, z
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
     let xyz_tile = XYZTile { x, y, z };
     let retry_strategy = FixedInterval::from_millis(200).take(5);
     let img: ImageBuffer<image::Luma<u16>, Vec<u16>> = RetryIf::spawn(

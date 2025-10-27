@@ -14,8 +14,11 @@ pub struct Config {
     pub s3_secret_key: String,
     pub s3_region: String,
     pub s3_endpoint: String,
+    pub s3_prefix: String,
     pub app_name: String,
     pub deployment: String,
+    pub overwrite_duplicate_layers: bool,
+    pub crop_variables: Vec<String>,
 }
 
 impl Config {
@@ -53,11 +56,21 @@ impl Config {
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".to_string()),
             s3_endpoint: env::var("S3_ENDPOINT")
                 .unwrap_or_else(|_| "https://s3.epfl.ch".to_string()),
+            s3_prefix: env::var("S3_PREFIX").unwrap_or_else(|_| "drop4crop".to_string()),
             keycloak_client_id: env::var("KEYCLOAK_CLIENT_ID").expect("KEYCLOAK_UI_ID must be set"),
             keycloak_url: env::var("KEYCLOAK_URL").expect("KEYCLOAK_URL must be set"),
             keycloak_realm: env::var("KEYCLOAK_REALM").expect("KEYCLOAK_REALM must be set"),
             deployment: env::var("DEPLOYMENT")
                 .expect("DEPLOYMENT must be set, this can be local, dev, stage, or prod"),
+            overwrite_duplicate_layers: env::var("OVERWRITE_DUPLICATE_LAYERS")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true),
+            crop_variables: env::var("CROP_VARIABLES")
+                .unwrap_or_else(|_| "mirca_area_irrigated,mirca_area_total,mirca_rainfed,yield,production".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
         }
     }
 }

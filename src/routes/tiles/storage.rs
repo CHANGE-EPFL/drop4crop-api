@@ -114,3 +114,53 @@ async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()
     super::cache::remove_downloading_state_raw(downloading_key).await?;
     Ok(())
 }
+
+/// Uploads an object to S3 with the given key and data.
+pub async fn upload_object(key: &str, data: &[u8]) -> Result<()> {
+    println!("Uploading object {} to S3", key);
+    let bucket = get_bucket();
+
+    let response = bucket
+        .put_object(key, data)
+        .await?;
+
+    // Check if upload was successful
+    if response.status_code() == 200 {
+        println!("Successfully uploaded {} to S3", key);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Failed to upload {} to S3. Status: {}",
+            key,
+            response.status_code()
+        ))
+    }
+}
+
+/// Deletes an object from S3 with the given key.
+pub async fn delete_object(key: &str) -> Result<()> {
+    println!("Deleting object {} from S3", key);
+    let bucket = get_bucket();
+
+    let response = bucket
+        .delete_object(key)
+        .await?;
+
+    // Check if deletion was successful
+    if response.status_code() == 204 {
+        println!("Successfully deleted {} from S3", key);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Failed to delete {} from S3. Status: {}",
+            key,
+            response.status_code()
+        ))
+    }
+}
+
+/// Gets the S3 key for a given filename based on configuration.
+pub fn get_s3_key(filename: &str) -> String {
+    let config = crate::config::Config::from_env();
+    format!("{}/{}", config.s3_prefix, filename)
+}

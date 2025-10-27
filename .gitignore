@@ -167,3 +167,6 @@ tools/*.json
 .env
 *.png
 *.xml
+*.md
+*.csv
+*.sql

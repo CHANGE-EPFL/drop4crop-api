@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct LayerStyle {
+    pub id: Option<uuid::Uuid>,
+    pub name: Option<String>,
+    pub last_updated: Option<chrono::DateTime<Utc>>,
+    pub style: Vec<crate::routes::styles::models::StyleItem>,
+}
+
 #[derive(ToSchema, Serialize, Deserialize, ToUpdateModel, ToCreateModel, Clone)]
 #[active_model = "super::db::ActiveModel"]
 pub struct Layer {
@@ -35,8 +43,8 @@ pub struct Layer {
     pub max_value: Option<f64>,
     style_id: Option<Uuid>,
     is_crop_specific: bool,
-    #[crudcrate(non_db_attr=true, default = vec![])]
-    pub style: Vec<crate::routes::styles::models::StyleItem>,
+    #[crudcrate(non_db_attr=true)]
+    pub style: Option<LayerStyle>,
 }
 
 impl From<Model> for Layer {
@@ -60,22 +68,29 @@ impl From<Model> for Layer {
             max_value: model.max_value,
             style_id: model.style_id,
             is_crop_specific: model.is_crop_specific,
-            style: vec![],
+            style: None,
         }
     }
 }
 
 impl From<(Model, crate::routes::styles::db::Model)> for Layer {
-    fn from((model, style): (Model, crate::routes::styles::db::Model)) -> Self {
-        let style: Vec<crate::routes::styles::models::StyleItem> =
-            crate::routes::styles::models::StyleItem::from_json(
-                &style.style.unwrap_or_default(),
-                model.min_value.unwrap_or_default(),
-                model.max_value.unwrap_or_default(),
-                10,
-            );
+    fn from((model, style_model): (Model, crate::routes::styles::db::Model)) -> Self {
+        let style_items = crate::routes::styles::models::StyleItem::from_json(
+            &style_model.style.unwrap_or_default(),
+            model.min_value.unwrap_or_default(),
+            model.max_value.unwrap_or_default(),
+            10,
+        );
+
+        let layer_style = LayerStyle {
+            id: Some(style_model.id),
+            name: Some(style_model.name),
+            last_updated: Some(style_model.last_updated),
+            style: style_items,
+        };
+
         let mut layer = Self::from(model);
-        layer.style = style;
+        layer.style = Some(layer_style);
         layer
     }
 }
@@ -113,13 +128,27 @@ impl CRUDResource for Layer {
         let styles = objs.load_one(crate::routes::styles::db::Entity, db).await?;
 
         let mut models: Vec<Layer> = vec![];
-        for (model, style) in objs.into_iter().zip(styles.into_iter()) {
-            let layer: Layer = match style {
-                Some(style) => {
-                    // let style: crate::routes::styles::models::Style = style.into();
-                    Self::ApiModel::from((model, style))
+        for (model, style_option) in objs.into_iter().zip(styles.into_iter()) {
+            let layer: Layer = match style_option {
+                Some(style) => Self::ApiModel::from((model, style)),
+                None => {
+                    // Create a default style if none exists
+                    let style_items = crate::routes::styles::models::StyleItem::from_json(
+                        &serde_json::Value::Null,
+                        model.min_value.unwrap_or_default(),
+                        model.max_value.unwrap_or_default(),
+                        10,
+                    );
+                    let layer_style = LayerStyle {
+                        id: None,
+                        name: None,
+                        last_updated: None,
+                        style: style_items,
+                    };
+                    let mut layer = Self::ApiModel::from(model);
+                    layer.style = Some(layer_style);
+                    layer
                 }
-                None => Self::ApiModel::from(model),
             };
             models.push(layer);
         }
@@ -128,15 +157,37 @@ impl CRUDResource for Layer {
     }
 
     async fn get_one(db: &DatabaseConnection, id: Uuid) -> Result<Self::ApiModel, DbErr> {
-        let model =
-            Self::EntityType::find_by_id(id)
-                .one(db)
-                .await?
-                .ok_or(DbErr::RecordNotFound(format!(
-                    "{} not found",
-                    Self::RESOURCE_NAME_SINGULAR
-                )))?;
-        Ok(Self::ApiModel::from(model))
+        let (model, style_option) = Self::EntityType::find_by_id(id)
+            .find_with_related(crate::routes::styles::db::Entity)
+            .one(db)
+            .await?
+            .ok_or(DbErr::RecordNotFound(format!(
+                "{} not found",
+                Self::RESOURCE_NAME_SINGULAR
+            )))?;
+
+        let layer: Layer = match style_option {
+            Some(style) => Self::ApiModel::from((model, style)),
+            None => {
+                // Create a default style if none exists
+                let style_items = crate::routes::styles::models::StyleItem::from_json(
+                    &serde_json::Value::Null,
+                    model.min_value.unwrap_or_default(),
+                    model.max_value.unwrap_or_default(),
+                    10,
+                );
+                let layer_style = LayerStyle {
+                    id: None,
+                    name: None,
+                    last_updated: None,
+                    style: style_items,
+                };
+                let mut layer = Self::ApiModel::from(model);
+                layer.style = Some(layer_style);
+                layer
+            }
+        };
+        Ok(layer)
     }
 
     async fn update(

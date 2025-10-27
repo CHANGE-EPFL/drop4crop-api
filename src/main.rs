@@ -3,6 +3,10 @@ pub mod config;
 pub mod routes;
 
 use sea_orm::{Database, DatabaseConnection};
+use sea_orm_migration::prelude::*;
+
+#[path = "../migration/src/lib.rs"]
+mod migration_lib;
 
 #[tokio::main]
 async fn main() {
@@ -15,8 +19,19 @@ async fn main() {
 
     if db.ping().await.is_ok() {
         println!("Connected to the database");
+
+        // Run database migrations
+        println!("Running database migrations...");
+        match migration_lib::Migrator::up(&db, None).await {
+            Ok(_) => println!("Migrations completed successfully"),
+            Err(e) => {
+                eprintln!("Migration failed: {:?}", e);
+                panic!("Failed to run database migrations");
+            }
+        }
     } else {
         println!("Could not connect to the database");
+        panic!("Failed to connect to database");
     }
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();

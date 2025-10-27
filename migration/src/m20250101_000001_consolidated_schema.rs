@@ -1,4 +1,5 @@
 use sea_orm_migration::prelude::*;
+use serde_json::Value;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -26,60 +27,11 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
-        // Enable PostGIS topology extensions
-        if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
-            manager
-                .get_connection()
-                .execute_unprepared("CREATE EXTENSION IF NOT EXISTS \"postgis_topology\";")
-                .await?;
-        }
-
-        // Create PostGIS schemas
-        if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
-            manager
-                .get_connection()
-                .execute_unprepared("CREATE SCHEMA IF NOT EXISTS tiger;")
-                .await?;
-            manager
-                .get_connection()
-                .execute_unprepared("CREATE SCHEMA IF NOT EXISTS tiger_data;")
-                .await?;
-            manager
-                .get_connection()
-                .execute_unprepared("CREATE SCHEMA IF NOT EXISTS topology;")
-                .await?;
-            manager
-                .get_connection()
-                .execute_unprepared("COMMENT ON SCHEMA topology IS 'PostGIS Topology schema';")
-                .await?;
-        }
-
-        // Create alembic_version table for migration tracking
-        manager
-            .create_table(
-                Table::create()
-                    .table(AlembicVersion::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(AlembicVersion::VersionNum)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
         // Create style table
         let mut style_table = Table::create()
             .table(Style::Table)
             .if_not_exists()
-            .col(
-                ColumnDef::new(Style::Name)
-                    .string()
-                    .not_null()
-                    .unique_key(),
-            )
+            .col(ColumnDef::new(Style::Name).string().not_null().unique_key())
             .col(
                 ColumnDef::new(Style::LastUpdated)
                     .timestamp_with_time_zone()
@@ -92,20 +44,10 @@ impl MigrationTrait for Migration {
         // Add ID column with appropriate type and default based on database backend
         match manager.get_database_backend() {
             sea_orm::DatabaseBackend::Postgres => {
-                style_table.col(
-                    ColumnDef::new(Style::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                style_table.col(ColumnDef::new(Style::Id).uuid().not_null().unique_key());
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                style_table.col(
-                    ColumnDef::new(Style::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                style_table.col(ColumnDef::new(Style::Id).uuid().not_null().unique_key());
             }
             _ => {
                 return Err(DbErr::Custom("Unsupported database backend".to_string()));
@@ -120,12 +62,6 @@ impl MigrationTrait for Migration {
                     .not_null()
                     .auto_increment()
                     .primary_key(),
-            )
-            .index(
-                Index::create()
-                    .name("style_iterator_seq")
-                    .col(Style::Iterator)
-                    .unique(),
             );
 
         manager.create_table(style_table).await?;
@@ -140,41 +76,19 @@ impl MigrationTrait for Migration {
                     .not_null()
                     .unique_key(),
             )
-            .col(
-                ColumnDef::new(Country::IsoA2)
-                    .string()
-                    .not_null(),
-            )
-            .col(
-                ColumnDef::new(Country::IsoA3)
-                    .string()
-                    .not_null(),
-            )
-            .col(
-                ColumnDef::new(Country::IsoN3)
-                    .integer()
-                    .not_null(),
-            )
+            .col(ColumnDef::new(Country::IsoA2).string().not_null())
+            .col(ColumnDef::new(Country::IsoA3).string().not_null())
+            .col(ColumnDef::new(Country::IsoN3).integer().not_null())
             .col(ColumnDef::new(Country::Geom).custom("GEOMETRY(MULTIPOLYGON, 4326)"))
             .to_owned();
 
         // Add ID column with appropriate type and default based on database backend
         match manager.get_database_backend() {
             sea_orm::DatabaseBackend::Postgres => {
-                country_table.col(
-                    ColumnDef::new(Country::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                country_table.col(ColumnDef::new(Country::Id).uuid().not_null().unique_key());
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                country_table.col(
-                    ColumnDef::new(Country::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                country_table.col(ColumnDef::new(Country::Id).uuid().not_null().unique_key());
             }
             _ => {
                 return Err(DbErr::Custom("Unsupported database backend".to_string()));
@@ -189,12 +103,6 @@ impl MigrationTrait for Migration {
                     .not_null()
                     .auto_increment()
                     .primary_key(),
-            )
-            .index(
-                Index::create()
-                    .name("country_iterator_seq")
-                    .col(Country::Iterator)
-                    .unique(),
             );
 
         manager.create_table(country_table).await?;
@@ -203,11 +111,7 @@ impl MigrationTrait for Migration {
         let mut layer_table = Table::create()
             .table(Layer::Table)
             .if_not_exists()
-            .col(
-                ColumnDef::new(Layer::LayerName)
-                    .string()
-                    .unique_key(),
-            )
+            .col(ColumnDef::new(Layer::LayerName).string().unique_key())
             .col(ColumnDef::new(Layer::Crop).string())
             .col(ColumnDef::new(Layer::WaterModel).string())
             .col(ColumnDef::new(Layer::ClimateModel).string())
@@ -248,20 +152,10 @@ impl MigrationTrait for Migration {
         // Add ID column with appropriate type and default based on database backend
         match manager.get_database_backend() {
             sea_orm::DatabaseBackend::Postgres => {
-                layer_table.col(
-                    ColumnDef::new(Layer::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                layer_table.col(ColumnDef::new(Layer::Id).uuid().not_null().unique_key());
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                layer_table.col(
-                    ColumnDef::new(Layer::Id)
-                        .uuid()
-                        .not_null()
-                        .unique_key(),
-                );
+                layer_table.col(ColumnDef::new(Layer::Id).uuid().not_null().unique_key());
             }
             _ => {
                 return Err(DbErr::Custom("Unsupported database backend".to_string()));
@@ -276,12 +170,6 @@ impl MigrationTrait for Migration {
                     .not_null()
                     .auto_increment()
                     .primary_key(),
-            )
-            .index(
-                Index::create()
-                    .name("layer_iterator_seq")
-                    .col(Layer::Iterator)
-                    .unique(),
             );
 
         // Add unique constraint for layer identification
@@ -313,7 +201,11 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(LayerCountryLink::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(LayerCountryLink::CountryId).uuid().not_null())
+                    .col(
+                        ColumnDef::new(LayerCountryLink::CountryId)
+                            .uuid()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(LayerCountryLink::LayerId).uuid().not_null())
                     .col(ColumnDef::new(LayerCountryLink::VarWf).double())
                     .col(ColumnDef::new(LayerCountryLink::VarWfb).double())
@@ -321,8 +213,8 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(LayerCountryLink::VarVwc).double())
                     .col(ColumnDef::new(LayerCountryLink::VarVwcb).double())
                     .col(ColumnDef::new(LayerCountryLink::VarVwcg).double())
-                    .col(ColumnDef::new(LayerCountryLink::VarVdb).double())
                     .col(ColumnDef::new(LayerCountryLink::VarWdg).double())
+                    .col(ColumnDef::new(LayerCountryLink::VarWdb).double())
                     .primary_key(
                         Index::create()
                             .col(LayerCountryLink::CountryId)
@@ -361,7 +253,9 @@ impl MigrationTrait for Migration {
         if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
             manager
                 .get_connection()
-                .execute_unprepared("CREATE INDEX idx_country_geom ON public.country USING gist (geom);")
+                .execute_unprepared(
+                    "CREATE INDEX idx_country_geom ON public.country USING gist (geom);",
+                )
                 .await?;
         }
 
@@ -394,7 +288,6 @@ impl MigrationTrait for Migration {
         let style_indexes = vec![
             ("ix_style_name", Style::Name),
             ("ix_style_id", Style::Id),
-            ("ix_style_iterator", Style::Iterator),
         ];
 
         for (index_name, column) in style_indexes {
@@ -411,11 +304,84 @@ impl MigrationTrait for Migration {
 
         // Insert country data from GeoJSON if resource file exists
         if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
-            // Try to insert country data if GeoJSON file exists
-            if std::path::Path::new("migrations/resources/ne_50m_admin_0_countries.geojson").exists() {
-                // Note: This data insertion would typically be handled by a separate seed script
-                // For now, we're just ensuring that schema is properly created
-                println!("Country GeoJSON file found. Consider running a seed script to populate data.");
+            // Try to load and insert country data from GeoJSON file
+            let geojson_path =
+                std::path::Path::new("migration/resources/ne_50m_admin_0_countries.geojson");
+            if geojson_path.exists() {
+                match std::fs::read_to_string(&geojson_path) {
+                    Ok(json_content) => {
+                        match serde_json::from_str::<Value>(&json_content) {
+                            Ok(geojson_data) => {
+                                if let Some(features) =
+                                    geojson_data.get("features").and_then(|f| f.as_array())
+                                {
+                                    let mut country_count = 0;
+                                    for feature in features {
+                                        if let (Some(properties), Some(geometry)) =
+                                            (feature.get("properties"), feature.get("geometry"))
+                                        {
+                                            if let (
+                                                Some(name),
+                                                Some(iso_a2),
+                                                Some(iso_a3),
+                                                Some(iso_n3),
+                                            ) = (
+                                                properties.get("NAME").and_then(|n| n.as_str()),
+                                                properties.get("ISO_A2").and_then(|n| n.as_str()),
+                                                properties.get("ISO_A3").and_then(|n| n.as_str()),
+                                                properties.get("ISO_N3").and_then(|n| n.as_str()),
+                                            ) {
+                                                // Only insert countries with valid ISO codes
+                                                if !iso_a2.is_empty()
+                                                    && !iso_a3.is_empty()
+                                                    && !iso_n3.is_empty()
+                                                {
+                                                    if let Ok(geom_json) =
+                                                        serde_json::to_string(geometry)
+                                                    {
+                                                        let sql = format!(
+                                                            "INSERT INTO country (id, name, iso_a2, iso_a3, iso_n3, geom) VALUES (uuid_generate_v4(), '{}', '{}', '{}', {}, ST_SetSRID(ST_GeomFromGeoJSON('{}'), 4326))",
+                                                            name.replace('\'', "''"), // Escape single quotes
+                                                            iso_a2,
+                                                            iso_a3,
+                                                            iso_n3,
+                                                            geom_json.replace('\'', "''") // Escape single quotes in JSON
+                                                        );
+
+                                                        match manager
+                                                            .get_connection()
+                                                            .execute_unprepared(&sql)
+                                                            .await
+                                                        {
+                                                            Ok(_) => country_count += 1,
+                                                            Err(e) => {
+                                                                println!("Warning: Failed to insert country {}: {:?}", name, e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    println!(
+                                        "Successfully loaded {} countries from GeoJSON",
+                                        country_count
+                                    );
+                                } else {
+                                    println!("No features found in GeoJSON file");
+                                }
+                            }
+                            Err(_) => {
+                                println!("Failed to parse GeoJSON: invalid format");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Failed to read GeoJSON file: {:?}", e);
+                    }
+                }
+            } else {
+                println!("GeoJSON file not found at migration/resources/ne_50m_admin_0_countries.geojson");
             }
         }
 
@@ -425,7 +391,12 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // Drop tables in reverse dependency order
         manager
-            .drop_table(Table::drop().table(LayerCountryLink::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(LayerCountryLink::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
             .drop_table(Table::drop().table(Layer::Table).if_exists().to_owned())
@@ -437,7 +408,12 @@ impl MigrationTrait for Migration {
             .drop_table(Table::drop().table(Style::Table).if_exists().to_owned())
             .await?;
         manager
-            .drop_table(Table::drop().table(AlembicVersion::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(AlembicVersion::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
 
         // Drop PostGIS schemas (PostgreSQL only)
@@ -517,6 +493,7 @@ pub enum Layer {
 
 #[derive(DeriveIden)]
 pub enum LayerCountryLink {
+    #[sea_orm(iden = "layercountrylink")]
     Table,
     CountryId,
     LayerId,
@@ -526,7 +503,6 @@ pub enum LayerCountryLink {
     VarVwc,
     VarVwcb,
     VarVwcg,
-    VarVdb,
     VarWdg,
+    VarWdb,
 }
-

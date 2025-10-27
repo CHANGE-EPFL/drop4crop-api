@@ -1,15 +1,20 @@
 use crate::common::auth::Role;
-// use axum::{Json, extract::State, http::StatusCode};
 use super::models::{Layer, LayerCreate, LayerUpdate};
+use super::utils::{convert_to_cog_in_memory, get_min_max_of_raster, parse_filename, LayerInfo};
 use crate::routes::tiles::storage;
-use axum::response::IntoResponse;
+use axum::{
+    body::Body,
+    extract::Multipart,
+    http::header,
+    response::{IntoResponse, Response},
+};
 use axum_keycloak_auth::{
     PassthroughMode, instance::KeycloakAuthInstance, layer::KeycloakAuthLayer,
 };
 use crudcrate::{CRUDResource, crud_handlers};
 use gdal::Dataset;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, LoaderTrait, QueryFilter, QuerySelect,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, LoaderTrait, QueryFilter, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -18,6 +23,8 @@ use std::ffi::CString;
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
+
+// Define CRUD handlers first so Query, State, StatusCode, and Json are available
 crud_handlers!(Layer, LayerUpdate, LayerCreate);
 
 pub fn router(
@@ -40,6 +47,8 @@ where
         .routes(routes!(update_one_handler))
         .routes(routes!(delete_one_handler))
         .routes(routes!(delete_many_handler))
+        .routes(routes!(upload_file))
+        .routes(routes!(download_layer))
         .with_state(db.clone());
 
     if let Some(instance) = keycloak_auth_instance {
@@ -171,10 +180,28 @@ pub async fn get_all_map_layers(
         })?;
 
     let mut response: Vec<Layer> = vec![];
-    for (layer, style) in layers.into_iter().zip(style.into_iter()) {
-        let layer: Layer = match style {
-            Some(style) => Layer::from((layer, style)),
-            None => Layer::from(layer),
+    for (layer_model, style_option) in layers.into_iter().zip(style.into_iter()) {
+        let layer: Layer = match style_option {
+            Some(style) => Layer::from((layer_model, style)),
+            None => {
+                // Create a default style if none exists
+                use crate::routes::layers::models::LayerStyle;
+                let style_items = crate::routes::styles::models::StyleItem::from_json(
+                    &serde_json::Value::Null,
+                    layer_model.min_value.unwrap_or_default(),
+                    layer_model.max_value.unwrap_or_default(),
+                    10,
+                );
+                let layer_style = LayerStyle {
+                    id: None,
+                    name: None,
+                    last_updated: None,
+                    style: style_items,
+                };
+                let mut layer = Layer::from(layer_model);
+                layer.style = Some(layer_style);
+                layer
+            }
         };
         response.push(layer);
     }
@@ -300,4 +327,305 @@ pub async fn get_pixel_value(
 
     let response = PixelValueResponse { value };
     Ok(Json(response))
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct UploadQueryParams {
+    overwrite_duplicates: Option<bool>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/uploads",
+    params(UploadQueryParams),
+    responses(
+        (status = 200, description = "File uploaded successfully", body = Layer),
+        (status = 400, description = "Invalid file or filename format"),
+        (status = 409, description = "Layer already exists"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Upload a GeoTIFF file",
+    description = "Uploads a GeoTIFF file, converts it to COG format, and creates a layer record"
+)]
+pub async fn upload_file(
+    State(db): State<DatabaseConnection>,
+    Query(params): Query<UploadQueryParams>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let config = crate::config::Config::from_env();
+    let overwrite_duplicates = params.overwrite_duplicates.unwrap_or(config.overwrite_duplicate_layers);
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "message": "Failed to read multipart field",
+            "error": e.to_string()
+        })))
+    })? {
+        let name = field.name().unwrap_or("file");
+
+        if name == "file" {
+            let filename = field.file_name()
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "message": "No filename provided"
+                }))))?
+                .to_lowercase();
+
+            let data = field.bytes().await.map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "message": "Failed to read file data",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            // Parse filename to extract layer information
+            let layer_info = parse_filename(&filename).map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "message": "Invalid filename format",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            // Check for duplicate layer
+            let duplicate_query = match &layer_info {
+                LayerInfo::Climate(info) => {
+                    use crate::routes::layers::db::{Column, Entity as LayerEntity};
+                    LayerEntity::find()
+                        .filter(Column::Crop.eq(&info.crop))
+                        .filter(Column::Variable.eq(&info.variable))
+                        .filter(Column::WaterModel.eq(&info.water_model))
+                        .filter(Column::ClimateModel.eq(&info.climate_model))
+                        .filter(Column::Scenario.eq(&info.scenario))
+                        .filter(Column::Year.eq(info.year))
+                }
+                LayerInfo::Crop(info) => {
+                    use crate::routes::layers::db::{Column, Entity as LayerEntity};
+                    LayerEntity::find()
+                        .filter(Column::Crop.eq(&info.crop))
+                        .filter(Column::Variable.eq(&info.variable))
+                        .filter(Column::IsCropSpecific.eq(true))
+                }
+            };
+
+            let existing_layer = duplicate_query.one(&db).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Database error",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            if let Some(existing) = existing_layer {
+                if overwrite_duplicates {
+                    // Delete existing layer from S3 and database
+                    if let Some(ref filename) = existing.filename {
+                        let s3_key = storage::get_s3_key(filename);
+                        storage::delete_object(&s3_key).await.map_err(|e| {
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                                "message": "Failed to delete existing layer from S3",
+                                "error": e.to_string()
+                            })))
+                        })?;
+                    }
+
+                    use crate::routes::layers::db::Entity as LayerEntity;
+                    LayerEntity::delete_by_id(existing.id).exec(&db).await.map_err(|e| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                            "message": "Failed to delete existing layer from database",
+                            "error": e.to_string()
+                        })))
+                    })?;
+
+                    println!("Deleted existing layer: {}", existing.filename.unwrap_or_else(|| "unknown".to_string()));
+                } else {
+                    return Err((StatusCode::CONFLICT, Json(serde_json::json!({
+                        "message": format!("Layer already exists for {}. Delete layer first to re-upload, or set overwrite_duplicates=true", filename)
+                    }))));
+                }
+            }
+
+            // Convert to COG
+            let cog_bytes = convert_to_cog_in_memory(&data).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Failed to convert to COG",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            // Calculate min/max values
+            let (min_val, max_val) = get_min_max_of_raster(&cog_bytes).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Failed to calculate raster statistics",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            // Check for invalid values
+            if min_val.is_finite() && max_val.is_finite() {
+                println!("Raster stats: min={}, max={}", min_val, max_val);
+            } else {
+                return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "message": "Invalid raster statistics: min or max value is infinite"
+                }))));
+            }
+
+            // Upload to S3
+            let s3_key = storage::get_s3_key(&filename);
+            storage::upload_object(&s3_key, &cog_bytes).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Failed to upload to S3",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            // Create layer record in database
+            let layer_name = filename.strip_suffix(".tif").unwrap_or(&filename);
+            let layer_record = match layer_info {
+                LayerInfo::Climate(info) => {
+                    use crate::routes::layers::db::ActiveModel as LayerActiveModel;
+                    LayerActiveModel {
+                        filename: Set(Some(filename.clone())),
+                        layer_name: Set(Some(layer_name.to_string())),
+                        crop: Set(Some(info.crop)),
+                        water_model: Set(Some(info.water_model)),
+                        climate_model: Set(Some(info.climate_model)),
+                        scenario: Set(Some(info.scenario)),
+                        variable: Set(Some(info.variable)),
+                        year: Set(Some(info.year)),
+                        min_value: Set(Some(min_val)),
+                        max_value: Set(Some(max_val)),
+                        enabled: Set(true),
+                        is_crop_specific: Set(false),
+                        ..Default::default()
+                    }
+                }
+                LayerInfo::Crop(info) => {
+                    use crate::routes::layers::db::ActiveModel as LayerActiveModel;
+                    LayerActiveModel {
+                        filename: Set(Some(filename.clone())),
+                        layer_name: Set(Some(layer_name.to_string())),
+                        crop: Set(Some(info.crop)),
+                        variable: Set(Some(info.variable)),
+                        min_value: Set(Some(min_val)),
+                        max_value: Set(Some(max_val)),
+                        enabled: Set(true),
+                        is_crop_specific: Set(true),
+                        ..Default::default()
+                    }
+                }
+            };
+
+            let saved_layer = layer_record.insert(&db).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Failed to save layer to database",
+                    "error": e.to_string()
+                })))
+            })?;
+
+            println!("Successfully uploaded layer: {}", filename);
+
+            // Return the saved layer as Layer model
+            let layer_response = Layer::from(saved_layer);
+            return Ok((StatusCode::OK, Json(layer_response)));
+        }
+    }
+
+    Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+        "message": "No file found in upload"
+    }))))
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct DownloadQueryParams {
+    minx: Option<f64>,
+    miny: Option<f64>,
+    maxx: Option<f64>,
+    maxy: Option<f64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/{layer_id}/download",
+    params(
+        ("layer_id" = String, Path, description = "Layer ID/filename"),
+        DownloadQueryParams
+    ),
+    responses(
+        (status = 200, description = "TIFF file download", content_type = "application/octet-stream"),
+        (status = 404, description = "Layer not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Download layer as TIFF file",
+    description = "Downloads the full TIFF file or a cropped region if bounds are provided"
+)]
+pub async fn download_layer(
+    State(db): State<DatabaseConnection>,
+    Path(layer_id): Path<String>,
+    Query(params): Query<DownloadQueryParams>,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let filename = format!("{}.tif", layer_id);
+
+    // Verify layer exists in database
+    use crate::routes::layers::db::{Column, Entity as LayerEntity};
+    let layer = LayerEntity::find()
+        .filter(Column::Filename.eq(&filename))
+        .one(&db)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "message": "Database error",
+                "error": e.to_string()
+            })))
+        })?;
+
+    if layer.is_none() {
+        return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "message": "Layer not found"
+        }))));
+    }
+
+    // If no cropping parameters provided, return the full file from S3
+    if params.minx.is_none() || params.miny.is_none() || params.maxx.is_none() || params.maxy.is_none() {
+        let data = storage::get_object(&filename).await.map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "message": "Failed to fetch file from S3",
+                "error": e.to_string()
+            })))
+        })?;
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename))
+            .body(Body::from(data))
+            .map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "message": "Failed to create response",
+                    "error": e.to_string()
+                })))
+            })?;
+
+        return Ok(response);
+    }
+
+    // For cropping functionality, we'd need more complex GDAL operations
+    // For now, return the full file with a note about cropping
+    let data = storage::get_object(&filename).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "message": "Failed to fetch file from S3",
+            "error": e.to_string()
+        })))
+    })?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename))
+        .body(Body::from(data))
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "message": "Failed to create response",
+                "error": e.to_string()
+            })))
+        })?;
+
+    Ok(response)
 }

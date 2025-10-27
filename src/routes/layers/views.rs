@@ -185,21 +185,14 @@ pub async fn get_all_map_layers(
             Some(style) => Layer::from((layer_model, style)),
             None => {
                 // Create a default style if none exists
-                use crate::routes::layers::models::LayerStyle;
                 let style_items = crate::routes::styles::models::StyleItem::from_json(
                     &serde_json::Value::Null,
                     layer_model.min_value.unwrap_or_default(),
                     layer_model.max_value.unwrap_or_default(),
                     10,
                 );
-                let layer_style = LayerStyle {
-                    id: None,
-                    name: None,
-                    last_updated: None,
-                    style: style_items,
-                };
                 let mut layer = Layer::from(layer_model);
-                layer.style = Some(layer_style);
+                layer.style = Some(style_items);
                 layer
             }
         };

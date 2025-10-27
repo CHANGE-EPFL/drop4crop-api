@@ -3,6 +3,9 @@ name = "drop4crop-api-rust"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "migration"]
+
 [dependencies]
 anyhow = "1.0.97"
 axum = "0.8.1"
@@ -42,3 +45,4 @@ utoipa-axum = "0.2.0"
 utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 uuid = "1.16.0"
 warp = "0.3"
+migration = { path = "migration" }

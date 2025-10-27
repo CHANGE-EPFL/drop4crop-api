@@ -1,0 +1,26 @@
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "migration"
+path = "src/lib.rs"
+
+[[bin]]
+name = "migration"
+path = "src/main.rs"
+
+[dependencies]
+sea-orm-migration = { version = "1.1.15", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
+async-trait = "0.1"
+uuid = { version = "1.16" }
+serde_json = "1.0"
+
+[lints.clippy]
+pedantic = "allow"

@@ -443,7 +443,6 @@ impl MigrationTrait for Migration {
 #[derive(DeriveIden)]
 pub enum AlembicVersion {
     Table,
-    VersionNum,
 }
 
 #[derive(DeriveIden)]

@@ -1,6 +1,6 @@
 [package]
-name = "drop4crop-api-rust"
-version = "0.1.0"
+name = "drop4crop-api"
+version = "0.3.5"
 edition = "2024"
 
 [workspace]
@@ -13,8 +13,8 @@ axum-keycloak-auth = "0.8.1"
 chrono = "0.4.40"
 crudcrate = "0.2.4"
 dotenvy = "0.15.7"
-gdal = { version = "0.17.1", features = ["bindgen"] }
-gdal-sys = { version = "0.10.0", features = ["bindgen"] }
+gdal = { version = "0.18.0", features = ["bindgen"] }
+gdal-sys = { version = "0.11.0", features = ["bindgen"] }
 geo-types = "0.7.15"
 georaster = "0.2.0"
 geotiff = "0.0.2"

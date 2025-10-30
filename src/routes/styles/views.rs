@@ -1,32 +1,16 @@
-use super::models::{Style, StyleCreate, StyleUpdate};
+pub use super::db::{Style, router};
 use crate::common::auth::Role;
-use axum_keycloak_auth::{
-    PassthroughMode, instance::KeycloakAuthInstance, layer::KeycloakAuthLayer,
-};
-use crudcrate::{CRUDResource, crud_handlers};
-use sea_orm::DatabaseConnection;
-use std::sync::Arc;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use crate::common::state::AppState;
+use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
+use crudcrate::CRUDResource;
+use utoipa_axum::router::OpenApiRouter;
 
-crud_handlers!(Style, StyleUpdate, StyleCreate);
+// crud_handlers!(Style, StyleUpdate, StyleCreate);
 
-pub fn router(
-    db: &DatabaseConnection,
-    keycloak_auth_instance: Option<Arc<KeycloakAuthInstance>>,
-) -> OpenApiRouter
-where
-    Style: CRUDResource,
-{
-    let mut mutating_router = OpenApiRouter::new()
-        .routes(routes!(get_one_handler))
-        .routes(routes!(get_all_handler))
-        .routes(routes!(create_one_handler))
-        .routes(routes!(update_one_handler))
-        .routes(routes!(delete_one_handler))
-        .routes(routes!(delete_many_handler))
-        .with_state(db.clone());
+pub fn router(state: &AppState) -> OpenApiRouter {
+    let mut mutating_router = router(&state.db.clone());
 
-    if let Some(instance) = keycloak_auth_instance {
+    if let Some(instance) = state.keycloak_auth_instance.clone() {
         mutating_router = mutating_router.layer(
             KeycloakAuthLayer::<Role>::builder()
                 .instance(instance)

@@ -5,9 +5,6 @@ pub mod routes;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::prelude::*;
 
-#[path = "../migration/src/lib.rs"]
-mod migration_lib;
-
 #[tokio::main]
 async fn main() {
     // Load config to validate runtime environment used later in app
@@ -22,7 +19,7 @@ async fn main() {
 
         // Run database migrations
         println!("Running database migrations...");
-        match migration_lib::Migrator::up(&db, None).await {
+        match migration::Migrator::up(&db, None).await {
             Ok(_) => println!("Migrations completed successfully"),
             Err(e) => {
                 eprintln!("Migration failed: {:?}", e);

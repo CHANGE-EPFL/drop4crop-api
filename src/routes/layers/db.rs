@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
+use crudcrate::EntityToModels;
 use sea_orm::entity::prelude::*;
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
 #[sea_orm(table_name = "layer")]
+#[crudcrate(generate_router, derive_eq = false)]
 pub struct Model {
     #[sea_orm(unique)]
     pub layer_name: Option<String>,

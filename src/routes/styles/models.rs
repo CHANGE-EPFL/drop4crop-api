@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use crudcrate::{CRUDResource, ToCreateModel, ToUpdateModel};
+use crudcrate::{CRUDResource, EntityToModels, ToCreateModel, ToUpdateModel};
 use sea_orm::{
     ActiveValue, Condition, DatabaseConnection, EntityTrait, FromQueryResult, Order, QueryOrder,
     QuerySelect, entity::prelude::*,
@@ -10,9 +10,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(
-    ToSchema, Serialize, Deserialize, FromQueryResult, ToUpdateModel, ToCreateModel, Clone,
-)]
+#[derive(ToSchema, Serialize, Deserialize, FromQueryResult, Clone)]
 #[active_model = "super::db::ActiveModel"]
 pub struct Style {
     #[crudcrate(update_model = false, create_model = false, on_create = Uuid::new_v4())]

@@ -2,7 +2,7 @@ use dotenvy::dotenv;
 use serde::Deserialize;
 use std::env;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct Config {
     pub db_uri: Option<String>,
     pub tile_cache_uri: String,
@@ -67,7 +67,10 @@ impl Config {
                 .parse()
                 .unwrap_or(true),
             crop_variables: env::var("CROP_VARIABLES")
-                .unwrap_or_else(|_| "mirca_area_irrigated,mirca_area_total,mirca_rainfed,yield,production".to_string())
+                .unwrap_or_else(|_| {
+                    "mirca_area_irrigated,mirca_area_total,mirca_rainfed,yield,production"
+                        .to_string()
+                })
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect(),

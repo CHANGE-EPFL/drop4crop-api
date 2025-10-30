@@ -3,7 +3,7 @@ mod layers;
 mod styles;
 mod tiles;
 
-use crate::config::Config;
+use crate::{common::state::AppState, config::Config};
 use axum::{Router, extract::DefaultBodyLimit};
 use axum_keycloak_auth::{Url, instance::KeycloakAuthInstance, instance::KeycloakConfig};
 use sea_orm::DatabaseConnection;
@@ -42,12 +42,26 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
 
     let config: Config = Config::from_env();
 
-    let keycloak_instance: Arc<KeycloakAuthInstance> = Arc::new(KeycloakAuthInstance::new(
-        KeycloakConfig::builder()
-            .server(Url::parse(&config.keycloak_url).unwrap())
-            .realm(String::from(&config.keycloak_realm))
-            .build(),
-    ));
+    println!(
+        "Keycloak config: url={}, realm={}",
+        config.keycloak_url, config.keycloak_realm
+    );
+
+    // For development, disable authentication to avoid SSL certificate issues
+    let keycloak_instance: Option<Arc<KeycloakAuthInstance>> = if config.deployment == "dev" {
+        println!("Development mode: authentication disabled");
+        None
+    } else {
+        let instance = Arc::new(KeycloakAuthInstance::new(
+            KeycloakConfig::builder()
+                .server(Url::parse(&config.keycloak_url).unwrap())
+                .realm(String::from(&config.keycloak_realm))
+                .build(),
+        ));
+        println!("Keycloak instance created successfully");
+        Some(instance)
+    };
+    let app_state: AppState = AppState::new(db.clone(), config.clone(), keycloak_instance);
 
     // Build the router with routes from the plots module
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -55,18 +69,13 @@ pub fn build_router(db: &DatabaseConnection) -> Router {
         .nest("/api/tiles", tiles::views::router(db))
         .nest(
             "/api/countries",
-            countries::views::router(db, Some(keycloak_instance.clone())),
-            // countries::views::router(db, None),
+            countries::views::router(db, keycloak_instance.clone()),
         )
         .nest(
             "/api/layers",
-            layers::views::router(db, Some(keycloak_instance.clone())),
-            // layers::views::router(db, None),
+            layers::views::router(db, keycloak_instance.clone()),
         )
-        .nest(
-            "/api/styles",
-            styles::views::router(db, Some(keycloak_instance.clone())),
-        )
+        .nest("/api/styles", styles::views::router(&app_state))
         // .nest(
         //     "/api/plot_samples",
         //     samples::views::router(db, Some(keycloak_instance.clone())),

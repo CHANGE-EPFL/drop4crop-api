@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
+use crudcrate::EntityToModels;
 use sea_orm::entity::prelude::*;
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
 #[sea_orm(table_name = "style")]
+#[crudcrate(generate_router)]
 pub struct Model {
     #[sea_orm(unique)]
     pub name: String,

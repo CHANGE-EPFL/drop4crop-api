@@ -1,7 +1,10 @@
+use crudcrate::EntityToModels;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
 #[sea_orm(table_name = "country")]
+#[crudcrate(generate_router)]
+
 pub struct Model {
     #[sea_orm(primary_key)]
     // pub iterator: i32,

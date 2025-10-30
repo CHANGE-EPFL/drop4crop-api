@@ -7,6 +7,49 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Check if alembic_version table exists (indicating migration from Alembic)
+        // If it exists, we skip all schema creation and just clean up the alembic table
+        let db = manager.get_connection();
+
+        let alembic_exists = if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
+            let result = db.query_one(sea_orm::Statement::from_string(
+                manager.get_database_backend(),
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alembic_version') as table_exists".to_string()
+            )).await;
+
+            match result {
+                Ok(Some(row)) => row.try_get::<bool>("", "table_exists").unwrap_or(false),
+                _ => false,
+            }
+        } else {
+            // For SQLite or other databases
+            let result = db.query_one(sea_orm::Statement::from_string(
+                manager.get_database_backend(),
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'".to_string()
+            )).await;
+
+            result.is_ok() && result.unwrap().is_some()
+        };
+
+        if alembic_exists {
+            println!("Alembic version table detected. Skipping schema creation and removing alembic_version table...");
+
+            // Drop the alembic_version table to complete migration to Sea-ORM
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(AlembicVersion::Table)
+                        .if_exists()
+                        .to_owned(),
+                )
+                .await?;
+
+            println!("Successfully migrated from Alembic to Sea-ORM migrations.");
+            return Ok(());
+        }
+
+        println!("No Alembic version table found. Running full schema migration...");
+
         // Enable PostGIS extensions for PostgreSQL
         if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
             manager

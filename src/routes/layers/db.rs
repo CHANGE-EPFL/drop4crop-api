@@ -1,11 +1,20 @@
 use chrono::{DateTime, Utc};
-use crudcrate::EntityToModels;
+use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, EntityToModels)]
 #[sea_orm(table_name = "layer")]
-#[crudcrate(generate_router, derive_eq = false)]
+#[crudcrate(
+    derive_eq = false,
+    api_struct = "Layer",
+    name_singular = "layer",
+    name_plural = "layers",
+    generate_router
+)]
 pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
+    pub id: Uuid,
     #[sea_orm(unique)]
     pub layer_name: Option<String>,
     pub crop: Option<String>,
@@ -15,10 +24,6 @@ pub struct Model {
     pub variable: Option<String>,
     pub year: Option<i32>,
     pub last_updated: DateTime<Utc>,
-    #[sea_orm(primary_key)]
-    // pub iterator: i32,
-    // #[sea_orm(unique)]
-    pub id: Uuid,
     pub enabled: bool,
     pub uploaded_at: DateTime<Utc>,
     #[sea_orm(column_type = "Double", nullable)]
@@ -30,6 +35,9 @@ pub struct Model {
     pub max_value: Option<f64>,
     pub style_id: Option<Uuid>,
     pub is_crop_specific: bool,
+    #[sea_orm(ignore)]
+    #[crudcrate(non_db_attr = true)]
+    pub style: Option<Vec<crate::routes::styles::models::StyleItem>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -24,6 +24,7 @@ pub struct Model {
     pub variable: Option<String>,
     pub year: Option<i32>,
     pub last_updated: DateTime<Utc>,
+    #[crudcrate(filterable)]
     pub enabled: bool,
     pub uploaded_at: DateTime<Utc>,
     #[sea_orm(column_type = "Double", nullable)]

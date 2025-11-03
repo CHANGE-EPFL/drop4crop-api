@@ -1,7 +1,7 @@
 use super::db::Layer;
 use super::utils::{LayerInfo, convert_to_cog_in_memory, get_min_max_of_raster, parse_filename};
 use crate::common::auth::Role;
-use crate::routes::styles::db::Style;
+use crate::common::state::AppState;
 use crate::routes::tiles::storage;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
+use chrono::Utc;
 use crudcrate::CRUDResource;
 use gdal::Dataset;
 use hyper::StatusCode;
@@ -28,34 +29,34 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
 
-// use crate::common::auth::Role;
-use crate::common::state::AppState;
-// use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
-// use crudcrate::CRUDResource;
-// use utoipa_axum::router::OpenApiRouter;
-
-// pub fn router(state: &AppState) -> OpenApiRouter {
-//     let mut mutating_router = crudrouter(&state.db.clone());
-
-//     if let Some(instance) = state.keycloak_auth_instance.clone() {
-//         mutating_router = mutating_router.layer(
-//             KeycloakAuthLayer::<Role>::builder()
-//                 .instance(instance)
-//                 .passthrough_mode(PassthroughMode::Block)
-//                 .persist_raw_claims(false)
-//                 .expected_audiences(vec![String::from("account")])
-//                 .required_roles(vec![Role::Administrator])
-//                 .build(),
-//         );
-//     } else if !state.config.tests_running {
-//         println!(
-//             "Warning: Mutating routes of {} router are not protected",
-//             Layer::RESOURCE_NAME_PLURAL
-//         );
-//     }
-
-//     mutating_router
-// }
+// Custom response type for /map endpoint that includes properly formatted style data for legend
+#[derive(Serialize, ToSchema)]
+pub struct MapLayerResponse {
+    pub id: uuid::Uuid,
+    pub layer_name: Option<String>,
+    pub crop: Option<String>,
+    pub water_model: Option<String>,
+    pub climate_model: Option<String>,
+    pub scenario: Option<String>,
+    pub variable: Option<String>,
+    pub year: Option<i32>,
+    pub enabled: bool,
+    pub uploaded_at: chrono::DateTime<Utc>,
+    pub last_updated: chrono::DateTime<Utc>,
+    pub global_average: Option<f64>,
+    pub filename: Option<String>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    pub style_id: Option<uuid::Uuid>,
+    pub is_crop_specific: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<Vec<crate::routes::styles::models::StyleItem>>,
+    pub country_values: Option<Vec<serde_json::Value>>,
+}
+#[derive(Deserialize, IntoParams)]
+pub struct UploadQueryParams {
+    overwrite_duplicates: Option<bool>,
+}
 
 pub fn router(state: &AppState) -> OpenApiRouter {
     let public_router = OpenApiRouter::new()
@@ -153,7 +154,7 @@ pub struct LayerQueryParams {
     path = "/map",
     params(LayerQueryParams),
     responses(
-        (status = 200, description = "Layer list", body = [Layer]),
+        (status = 200, description = "Layer list", body = [MapLayerResponse]),
         (status = 500, description = "Internal server error")
     ),
     summary = "Get all enabled layers for map",
@@ -162,7 +163,7 @@ pub struct LayerQueryParams {
 pub async fn get_all_map_layers(
     State(db): State<DatabaseConnection>,
     Query(params): Query<LayerQueryParams>,
-) -> Result<Json<Vec<Layer>>, (StatusCode, Json<String>)> {
+) -> Result<Json<Vec<MapLayerResponse>>, (StatusCode, Json<String>)> {
     use crate::routes::layers::db::{Column, Entity as LayerEntity};
     use crate::routes::styles::db::Entity as StyleEntity;
     println!("[get_all_map_layers] params: {:?}", params);
@@ -191,7 +192,7 @@ pub async fn get_all_map_layers(
         )
     })?;
 
-    let mut response: Vec<Layer> = vec![];
+    let mut response: Vec<MapLayerResponse> = vec![];
 
     for layer_model in layer_models {
         // Try to find associated style for this layer
@@ -211,10 +212,8 @@ pub async fn get_all_map_layers(
                 10,
             );
 
-            let style: Vec<Style> = vec![style_model.unwrap().into()];
-
-            // Manually construct layer with style
-            Layer {
+            // Construct MapLayerResponse with properly formatted style for legend
+            MapLayerResponse {
                 id: layer_model.id,
                 layer_name: layer_model.layer_name,
                 crop: layer_model.crop,
@@ -232,8 +231,8 @@ pub async fn get_all_map_layers(
                 max_value: layer_model.max_value,
                 style_id: layer_model.style_id,
                 is_crop_specific: layer_model.is_crop_specific,
-                style,
-                rendered_style: style_items,
+                style: Some(style_items), // Set style to the StyleItem array for legend
+                country_values: None,     // TODO: Calculate country values if needed
             }
         } else {
             // Create default style
@@ -244,8 +243,8 @@ pub async fn get_all_map_layers(
                 10,
             );
 
-            // Manually construct layer with default style
-            Layer {
+            // Construct MapLayerResponse with default style for legend
+            MapLayerResponse {
                 id: layer_model.id,
                 layer_name: layer_model.layer_name,
                 crop: layer_model.crop,
@@ -263,8 +262,8 @@ pub async fn get_all_map_layers(
                 max_value: layer_model.max_value,
                 style_id: layer_model.style_id,
                 is_crop_specific: layer_model.is_crop_specific,
-                style: vec![],
-                rendered_style: style_items,
+                style: Some(style_items), // Set style to the StyleItem array for legend
+                country_values: None,     // TODO: Calculate country values if needed
             }
         };
 
@@ -393,11 +392,6 @@ pub async fn get_pixel_value(
 
     let response = PixelValueResponse { value };
     Ok(Json(response))
-}
-
-#[derive(Deserialize, IntoParams)]
-pub struct UploadQueryParams {
-    overwrite_duplicates: Option<bool>,
 }
 
 #[utoipa::path(
@@ -559,7 +553,12 @@ pub async fn upload_file(
                         "Deleted existing layer: {}",
                         existing.filename.unwrap_or_else(|| "unknown".to_string())
                     );
+                    println!(
+                        "[upload_file] Continuing with upload of duplicate file: {}",
+                        filename
+                    );
                 } else {
+                    println!("[upload_file] Rejecting duplicate file: {}", filename);
                     return Err((
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({
@@ -662,24 +661,72 @@ pub async fn upload_file(
                 }
             };
 
-            let saved_layer = layer_record.insert(&db).await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "message": "Failed to save layer to database",
-                        "error": e.to_string()
-                    })),
-                )
-            })?;
+            println!(
+                "[upload_file] Attempting to save layer to database: {}",
+                filename
+            );
+            let saved_layer = match layer_record.insert(&db).await {
+                Ok(layer) => {
+                    println!(
+                        "[upload_file] Successfully saved layer to database: {}",
+                        filename
+                    );
+                    layer
+                }
+                Err(e) => {
+                    println!(
+                        "[upload_file] ERROR: Failed to save layer to database: {} - Error: {}",
+                        filename, e
+                    );
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "message": "Failed to save layer to database",
+                            "error": e.to_string()
+                        })),
+                    ));
+                }
+            };
 
             println!("Successfully uploaded layer: {}", filename);
 
             // Return the saved layer as Layer model
-            let layer_response = Layer::from(saved_layer);
+            println!(
+                "[upload_file] Creating response object for layer: {}",
+                filename
+            );
+            let layer_response = match std::panic::catch_unwind(|| Layer::from(saved_layer)) {
+                Ok(response) => {
+                    println!(
+                        "[upload_file] Successfully created response object for layer: {}",
+                        filename
+                    );
+                    response
+                }
+                Err(panic_info) => {
+                    println!(
+                        "[upload_file] PANIC during Layer::from() conversion for layer: {} - {:?}",
+                        filename, panic_info
+                    );
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "message": "Panic during response creation",
+                            "error": "Internal panic during layer conversion"
+                        })),
+                    ));
+                }
+            };
+            println!(
+                "[upload_file] Response object created, preparing to send for layer: {}",
+                filename
+            );
+            println!("[upload_file] Sending response for layer: {}", filename);
             return Ok((StatusCode::OK, Json(layer_response)));
         }
     }
 
+    println!("[upload_file] No file found in multipart data, returning error");
     Err((
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({

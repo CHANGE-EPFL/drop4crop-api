@@ -26,7 +26,8 @@ proj4rs = "0.1.9"
 rand = "0.9.2"
 redis = { version = "0.32.7", features = ["tokio-comp"] }
 retry = "2.1.0"
-rust-s3 = "0.37.0"
+aws-config = "1.5.5"
+aws-sdk-s3 = "1.37.0"
 sea-orm = { version = "1.1.17", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",

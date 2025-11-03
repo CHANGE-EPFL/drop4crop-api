@@ -1,11 +1,17 @@
+use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
 #[sea_orm(table_name = "country")]
+#[crudcrate(
+    api_struct = "Country",
+    name_singular = "country",
+    name_plural = "countries",
+    generate_router
+)]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    // pub iterator: i32,
-    // #[sea_orm(unique)]
+    #[sea_orm(primary_key, auto_increment = false)]
+    #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
     pub id: Uuid,
     #[sea_orm(unique)]
     pub name: String,

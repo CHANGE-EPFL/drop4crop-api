@@ -1,16 +1,22 @@
-use chrono::{DateTime, Utc};
+use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, EntityToModels)]
 #[sea_orm(table_name = "style")]
+#[crudcrate(
+    api_struct = "Style",
+    name_singular = "style",
+    name_plural = "styles",
+    generate_router,
+    derive_partial_eq
+)]
 pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
+    pub id: Uuid,
     #[sea_orm(unique)]
     pub name: String,
-    pub last_updated: DateTime<Utc>,
-    #[sea_orm(primary_key)]
-    // pub iterator: i32,
-    // #[sea_orm(unique)]
-    pub id: Uuid,
-    pub style: Option<Json>,
+    pub style: Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -1,32 +1,54 @@
 use chrono::{DateTime, Utc};
+use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+
+#[derive(Clone, Debug, DeriveEntityModel, EntityToModels)]
 #[sea_orm(table_name = "layer")]
+#[crudcrate(
+    api_struct = "Layer",
+    name_singular = "layer",
+    name_plural = "layers",
+    fn_delete_many = delete_many,
+    generate_router,
+)]
 pub struct Model {
-    #[sea_orm(unique)]
-    pub layer_name: Option<String>,
-    pub crop: Option<String>,
-    pub water_model: Option<String>,
-    pub climate_model: Option<String>,
-    pub scenario: Option<String>,
-    pub variable: Option<String>,
-    pub year: Option<i32>,
-    pub last_updated: DateTime<Utc>,
-    #[sea_orm(primary_key)]
-    // pub iterator: i32,
-    // #[sea_orm(unique)]
+    #[sea_orm(primary_key, auto_increment = false)]
+    #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
     pub id: Uuid,
+    #[sea_orm(unique)]
+    #[crudcrate(filterable)]
+    pub layer_name: Option<String>,
+    #[crudcrate(filterable)]
+    pub crop: Option<String>,
+    #[crudcrate(filterable)]
+    pub water_model: Option<String>,
+    #[crudcrate(filterable)]
+    pub climate_model: Option<String>,
+    #[crudcrate(filterable)]
+    pub scenario: Option<String>,
+    #[crudcrate(filterable)]
+    pub variable: Option<String>,
+    #[crudcrate(filterable)]
+    pub year: Option<i32>,
+    #[crudcrate(filterable, sortable)]
+    pub last_updated: DateTime<Utc>,
+    #[crudcrate(filterable)]
     pub enabled: bool,
     pub uploaded_at: DateTime<Utc>,
-    #[sea_orm(column_type = "Double", nullable)]
+    #[sea_orm(column_type = "Double", nullable, sortable)]
     pub global_average: Option<f64>,
     pub filename: Option<String>,
     #[sea_orm(column_type = "Double", nullable)]
     pub min_value: Option<f64>,
     #[sea_orm(column_type = "Double", nullable)]
     pub max_value: Option<f64>,
+    #[crudcrate(filterable)]
     pub style_id: Option<Uuid>,
+    #[crudcrate(filterable)]
     pub is_crop_specific: bool,
+    #[sea_orm(ignore)]
+    #[crudcrate(non_db_attr, join(one, all, depth = 1))]
+    pub style: Vec<crate::routes::styles::db::Style>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -65,3 +87,21 @@ impl Related<crate::routes::countries::db::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+pub async fn delete_many(
+    db: &sea_orm::DatabaseConnection,
+    ids: Vec<Uuid>,
+) -> Result<Vec<Uuid>, sea_orm::DbErr> {
+    println!("Called delete_many with IDs: {:?}", ids);
+    let mut deleted_ids = Vec::new();
+
+    for id in &ids {
+        let _ = crate::routes::tiles::storage::delete_s3_object_by_db_id(db, id).await;
+
+        if Entity::delete_by_id(*id).exec(db).await.is_ok() {
+            deleted_ids.push(*id);
+        }
+    }
+
+    Ok(deleted_ids)
+}

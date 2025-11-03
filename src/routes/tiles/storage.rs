@@ -115,25 +115,48 @@ async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()
     Ok(())
 }
 
-/// Uploads an object to S3 with the given key and data.
+/// Uploads an object to S3 using direct HTTP request to MinIO instead of rust-s3 library
 pub async fn upload_object(key: &str, data: &[u8]) -> Result<()> {
-    println!("Uploading object {} to S3", key);
-    let bucket = get_bucket();
+    println!("Uploading object {} to S3 using direct HTTP (size: {} bytes)", key, data.len());
 
-    let response = bucket
-        .put_object(key, data)
-        .await?;
+    let config = crate::config::Config::from_env();
 
-    // Check if upload was successful
-    if response.status_code() == 200 {
-        println!("Successfully uploaded {} to S3", key);
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "Failed to upload {} to S3. Status: {}",
-            key,
-            response.status_code()
-        ))
+    // Build MinIO upload URL
+    let upload_url = format!("{}/{}/{}", config.s3_endpoint.trim_end_matches('/'), config.s3_bucket_id, key);
+    println!("Upload URL: {}", upload_url);
+
+    let upload_start = std::time::Instant::now();
+
+    // Try without authentication first for local development
+    let client = reqwest::Client::new();
+    let response = client
+        .put(&upload_url)
+        .body(data.to_vec())
+        .header("Content-Type", "application/octet-stream")
+        .header("x-amz-acl", "public-read")
+        .send()
+        .await;
+
+    let upload_duration = upload_start.elapsed();
+    println!("HTTP upload completed after {:?}", upload_duration);
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            println!("HTTP upload response: Status: {}", status);
+
+            if status.is_success() {
+                println!("SUCCESS: {} uploaded to MinIO via HTTP in {:?}", key, upload_duration);
+                Ok(())
+            } else {
+                println!("FAILED: HTTP upload failed for {}. Status: {}", key, status);
+                Err(anyhow::anyhow!("HTTP upload failed with status: {}", status))
+            }
+        }
+        Err(e) => {
+            println!("FAILED: HTTP upload error for {}: {:?}", key, e);
+            Err(anyhow::anyhow!("HTTP upload error: {}", e))
+        }
     }
 }
 

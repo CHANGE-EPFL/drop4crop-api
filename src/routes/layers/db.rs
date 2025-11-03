@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, EntityToModels)]
+#[derive(Clone, Debug, DeriveEntityModel, EntityToModels)]
 #[sea_orm(table_name = "layer")]
 #[crudcrate(
     derive_eq = false,
+    no_partial_eq,
     api_struct = "Layer",
     name_singular = "layer",
     name_plural = "layers",
@@ -37,8 +38,11 @@ pub struct Model {
     pub style_id: Option<Uuid>,
     pub is_crop_specific: bool,
     #[sea_orm(ignore)]
-    #[crudcrate(non_db_attr = true)]
-    pub style: Option<Vec<crate::routes::styles::models::StyleItem>>,
+    #[crudcrate(non_db_attr, join(one, all, depth = 1))]
+    pub style: Vec<crate::routes::styles::db::Style>,
+    #[sea_orm(ignore)]
+    #[crudcrate(non_db_attr)]
+    pub rendered_style: Vec<crate::routes::styles::models::StyleItem>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

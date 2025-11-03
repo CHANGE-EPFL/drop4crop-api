@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
 
@@ -8,7 +7,8 @@ use sea_orm::entity::prelude::*;
     api_struct = "Style",
     name_singular = "style",
     name_plural = "styles",
-    generate_router
+    generate_router,
+    derive_partial_eq
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

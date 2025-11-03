@@ -1,7 +1,8 @@
 FROM rust:1.90.0
 
-# Add GDAL
-RUN apt-get update && apt-get install -y libgdal-dev clang libclang1
+# Add GDAL - use backports to get newer version
+RUN echo "deb http://deb.debian.org/debian trixie-backports main" >> /etc/apt/sources.list && \
+    apt-get update && apt-get install -y -t trixie-backports libgdal-dev clang libclang-dev
 RUN cargo install bacon
 WORKDIR /app
 

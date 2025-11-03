@@ -8,7 +8,6 @@ use axum::{Router, extract::DefaultBodyLimit};
 use axum_keycloak_auth::{Url, instance::KeycloakAuthInstance, instance::KeycloakConfig};
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_scalar::{Scalar, Servable};
@@ -63,12 +62,6 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
         .split_for_parts();
 
     router.merge(Scalar::with_url("/api/docs", api))

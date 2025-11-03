@@ -1,6 +1,7 @@
 use super::db::Layer;
 use super::utils::{LayerInfo, convert_to_cog_in_memory, get_min_max_of_raster, parse_filename};
 use crate::common::auth::Role;
+use crate::routes::styles::db::Style;
 use crate::routes::tiles::storage;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -21,9 +22,11 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::vec;
 use std::{collections::HashMap, ffi::CString};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
+use uuid::Uuid;
 
 // use crate::common::auth::Role;
 use crate::common::state::AppState;
@@ -161,6 +164,7 @@ pub async fn get_all_map_layers(
     Query(params): Query<LayerQueryParams>,
 ) -> Result<Json<Vec<Layer>>, (StatusCode, Json<String>)> {
     use crate::routes::layers::db::{Column, Entity as LayerEntity};
+    use crate::routes::styles::db::Entity as StyleEntity;
     println!("[get_all_map_layers] params: {:?}", params);
     let mut query = LayerEntity::find().filter(Column::Enabled.eq(true));
 
@@ -180,43 +184,94 @@ pub async fn get_all_map_layers(
         query = query.filter(Column::Year.eq(year));
     }
 
-    let layers = query.all(&db).await.map_err(|e| {
+    let layer_models = query.all(&db).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(format!("DB error: {}", e)),
         )
     })?;
 
-    let style = layers
-        .load_one(crate::routes::styles::db::Entity, &db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(format!("DB error: {}", e)),
-            )
-        })?;
-
     let mut response: Vec<Layer> = vec![];
-    // for (layer_model, style_option) in layers.into_iter().zip(style.into_iter()) {
-    //     let layer: Layer = match style_option {
-    //         Some(style) => Layer::from((layer_model, style)),
-    //         None => {
-    //             // Create a default style if none exists
-    //             let style_items = crate::routes::styles::models::StyleItem::from_json(
-    //                 &serde_json::Value::Null,
-    //                 layer_model.min_value.unwrap_or_default(),
-    //                 layer_model.max_value.unwrap_or_default(),
-    //                 10,
-    //             );
-    //             let mut layer = Layer::from(layer_model);
-    //             layer.style = style_items;
-    //             layer
-    //         }
-    //     };
-    //     response.push(layer);
-    // }
-    // println!("[get_all_map_layers] response: {:?}", response);
+
+    for layer_model in layer_models {
+        // Try to find associated style for this layer
+        let style_model = if let Some(style_id) = layer_model.style_id {
+            StyleEntity::find_by_id(style_id).one(&db).await.ok()
+        } else {
+            None
+        };
+
+        // Create layer with or without style
+        let layer = if let Some(style_model) = style_model {
+            // Convert style JSON to StyleItem vector
+            let style_items = crate::routes::styles::models::StyleItem::from_json(
+                &style_model.clone().unwrap().style.unwrap_or_default(),
+                layer_model.min_value.unwrap_or_default(),
+                layer_model.max_value.unwrap_or_default(),
+                10,
+            );
+
+            let style: Vec<Style> = vec![style_model.unwrap().into()];
+
+            // Manually construct layer with style
+            Layer {
+                id: layer_model.id,
+                layer_name: layer_model.layer_name,
+                crop: layer_model.crop,
+                water_model: layer_model.water_model,
+                climate_model: layer_model.climate_model,
+                scenario: layer_model.scenario,
+                variable: layer_model.variable,
+                year: layer_model.year,
+                enabled: layer_model.enabled,
+                uploaded_at: layer_model.uploaded_at,
+                last_updated: layer_model.last_updated,
+                global_average: layer_model.global_average,
+                filename: layer_model.filename,
+                min_value: layer_model.min_value,
+                max_value: layer_model.max_value,
+                style_id: layer_model.style_id,
+                is_crop_specific: layer_model.is_crop_specific,
+                style,
+                rendered_style: style_items,
+            }
+        } else {
+            // Create default style
+            let style_items = crate::routes::styles::models::StyleItem::from_json(
+                &serde_json::Value::Null,
+                layer_model.min_value.unwrap_or_default(),
+                layer_model.max_value.unwrap_or_default(),
+                10,
+            );
+
+            // Manually construct layer with default style
+            Layer {
+                id: layer_model.id,
+                layer_name: layer_model.layer_name,
+                crop: layer_model.crop,
+                water_model: layer_model.water_model,
+                climate_model: layer_model.climate_model,
+                scenario: layer_model.scenario,
+                variable: layer_model.variable,
+                year: layer_model.year,
+                enabled: layer_model.enabled,
+                uploaded_at: layer_model.uploaded_at,
+                last_updated: layer_model.last_updated,
+                global_average: layer_model.global_average,
+                filename: layer_model.filename,
+                min_value: layer_model.min_value,
+                max_value: layer_model.max_value,
+                style_id: layer_model.style_id,
+                is_crop_specific: layer_model.is_crop_specific,
+                style: vec![],
+                rendered_style: style_items,
+            }
+        };
+
+        response.push(layer);
+    }
+
+    println!("[get_all_map_layers] returning {} layers", response.len());
     Ok(Json(response))
 }
 
@@ -408,7 +463,10 @@ pub async fn upload_file(
                 }
                 Err(e) => {
                     println!("[upload_file] Error reading file bytes: {:?}", e);
-                    println!("[upload_file] Error type: {}", std::any::type_name::<std::option::IntoIter<&()>>());
+                    println!(
+                        "[upload_file] Error type: {}",
+                        std::any::type_name::<std::option::IntoIter<&()>>()
+                    );
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
@@ -457,9 +515,7 @@ pub async fn upload_file(
                 }
             };
 
-            println!("[upload_file] Executing duplicate query...");
             let existing_layer = duplicate_query.one(&db).await.map_err(|e| {
-                println!("[upload_file] Database error in duplicate query: {}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -468,17 +524,13 @@ pub async fn upload_file(
                     })),
                 )
             })?;
-            println!("[upload_file] Duplicate query completed, existing_layer: {:?}", existing_layer.is_some());
 
             if let Some(existing) = existing_layer {
-                println!("[upload_file] Found existing layer, handling overwrite...");
                 if overwrite_duplicates {
-                    println!("[upload_file] Overwriting duplicates, deleting from S3...");
                     // Delete existing layer from S3 and database
                     if let Some(ref filename) = existing.filename {
                         let s3_key = storage::get_s3_key(filename);
                         storage::delete_object(&s3_key).await.map_err(|e| {
-                            println!("[upload_file] Error deleting from S3: {}", e);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(serde_json::json!({
@@ -488,14 +540,12 @@ pub async fn upload_file(
                             )
                         })?;
                     }
-                    println!("[upload_file] Deleted from S3, now deleting from database...");
 
                     use crate::routes::layers::db::Entity as LayerEntity;
                     LayerEntity::delete_by_id(existing.id)
                         .exec(&db)
                         .await
                         .map_err(|e| {
-                            println!("[upload_file] Error deleting from database: {}", e);
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(serde_json::json!({
@@ -504,7 +554,6 @@ pub async fn upload_file(
                                 })),
                             )
                         })?;
-                    println!("[upload_file] Successfully deleted from database");
 
                     println!(
                         "Deleted existing layer: {}",
@@ -532,7 +581,10 @@ pub async fn upload_file(
                     })),
                 )
             })?;
-            println!("[upload_file] Successfully converted to COG, size: {} bytes", cog_bytes.len());
+            println!(
+                "[upload_file] Successfully converted to COG, size: {} bytes",
+                cog_bytes.len()
+            );
 
             // Calculate min/max values
             let (min_val, max_val) = get_min_max_of_raster(&cog_bytes).map_err(|e| {
@@ -558,12 +610,10 @@ pub async fn upload_file(
             }
 
             // Upload to S3
-            println!("[upload_file] Uploading to S3...");
             let s3_key = storage::get_s3_key(&filename);
             storage::upload_object(&s3_key, &cog_bytes)
                 .await
                 .map_err(|e| {
-                    println!("[upload_file] Error uploading to S3: {}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
@@ -572,7 +622,6 @@ pub async fn upload_file(
                         })),
                     )
                 })?;
-            println!("[upload_file] Successfully uploaded to S3");
 
             // Create layer record in database
             let layer_name = filename.strip_suffix(".tif").unwrap_or(&filename);
@@ -580,7 +629,7 @@ pub async fn upload_file(
                 LayerInfo::Climate(info) => {
                     use crate::routes::layers::db::ActiveModel as LayerActiveModel;
                     LayerActiveModel {
-                        id: Set(uuid::Uuid::new_v4()), // Generate a new UUID for the id
+                        id: Set(Uuid::new_v4()),
                         filename: Set(Some(filename.clone())),
                         layer_name: Set(Some(layer_name.to_string())),
                         crop: Set(Some(info.crop)),
@@ -599,7 +648,7 @@ pub async fn upload_file(
                 LayerInfo::Crop(info) => {
                     use crate::routes::layers::db::ActiveModel as LayerActiveModel;
                     LayerActiveModel {
-                        id: Set(uuid::Uuid::new_v4()), // Generate a new UUID for the id
+                        id: Set(Uuid::new_v4()),
                         filename: Set(Some(filename.clone())),
                         layer_name: Set(Some(layer_name.to_string())),
                         crop: Set(Some(info.crop)),

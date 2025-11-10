@@ -67,29 +67,30 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
 
     let app_state: AppState = AppState::new(db.clone(), config.clone(), keycloak_instance);
 
+    // Build rate-limited middleware stack
+    // Middleware order (outer to inner):
+    //   1. RealIpLayer - Extracts client IP and stores in request extensions
+    //   2. log_request_ip - Logs IP, method, and URI for each request
+    //   3. GovernorLayer - Applies rate limiting based on IP
+    let rate_limit_stack = ServiceBuilder::new()
+        .layer(RealIpLayer::default())
+        .layer(middleware::from_fn(log_request_ip))
+        .layer(GovernorLayer::default());
+
     // Build the router with routes from the plots module
+    // Apply rate limiting to API routes, but NOT to health check endpoints
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .merge(crate::common::views::router(db)) // Root routes
         .nest("/api/tiles", tiles::views::router(db))
         .nest("/api/countries", countries::views::router(&app_state))
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
+        .layer(rate_limit_stack.clone()) // Apply rate limiting to API routes
         .split_for_parts();
 
-    // Merge STAC router (regular Router, not OpenApiRouter) and docs
-    // Apply rate limiting middleware to all public endpoints
-    // Middleware order (outer to inner):
-    //   1. RealIpLayer - Extracts client IP and stores in request extensions
-    //   2. log_request_ip - Logs IP, method, and URI for each request
-    //   3. GovernorLayer - Applies rate limiting based on IP
+    // Merge health check routes (NO rate limiting), STAC router (with rate limiting), and docs
     router
-        .nest("/api/stac", tiles::stac_router::router(db))
-        .layer(
-            ServiceBuilder::new()
-                .layer(RealIpLayer::default())
-                .layer(middleware::from_fn(log_request_ip))
-                .layer(GovernorLayer::default())
-        )
+        .merge(crate::common::views::router(db)) // Health check routes - no rate limiting
+        .nest("/api/stac", tiles::stac_router::router(db).layer(rate_limit_stack)) // STAC with rate limiting
         .merge(Scalar::with_url("/api/docs", api))
 }

@@ -131,6 +131,7 @@ pub async fn get_groups(
         let values: Vec<JsonValue> = res
             .into_iter()
             .filter_map(|mut json| json.as_object_mut()?.remove(*variable))
+            .filter(|value| !value.is_null())
             .collect();
 
         groups.insert(variable.to_string(), values);

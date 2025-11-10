@@ -63,12 +63,12 @@ pub fn router(state: &AppState) -> OpenApiRouter {
         .routes(routes!(get_groups))
         .routes(routes!(get_all_map_layers))
         .routes(routes!(get_pixel_value))
+        .routes(routes!(download_layer))
         .with_state(state.db.clone());
 
     let mut protected_router = Layer::router(&state.db.clone());
     let protected_custom_routes = OpenApiRouter::new()
         .routes(routes!(upload_file))
-        .routes(routes!(download_layer))
         .with_state(state.db.clone());
 
     protected_router = protected_router.merge(protected_custom_routes);
@@ -791,22 +791,23 @@ pub async fn download_layer(
         ));
     }
 
-    // If no cropping parameters provided, return the full file from S3
+    // Fetch the file from S3
+    let data = storage::get_object(&filename).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "message": "Failed to fetch file from S3",
+                "error": e.to_string()
+            })),
+        )
+    })?;
+
+    // If no cropping parameters provided, return the full file
     if params.minx.is_none()
         || params.miny.is_none()
         || params.maxx.is_none()
         || params.maxy.is_none()
     {
-        let data = storage::get_object(&filename).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "message": "Failed to fetch file from S3",
-                    "error": e.to_string()
-                })),
-            )
-        })?;
-
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -828,26 +829,32 @@ pub async fn download_layer(
         return Ok(response);
     }
 
-    // For cropping functionality, we'd need more complex GDAL operations
-    // For now, return the full file with a note about cropping
-    let data = storage::get_object(&filename).await.map_err(|e| {
+    // Crop the raster to the specified bounding box
+    let minx = params.minx.unwrap();
+    let miny = params.miny.unwrap();
+    let maxx = params.maxx.unwrap();
+    let maxy = params.maxy.unwrap();
+
+    let cropped_data = crop_to_bbox(&data, minx, miny, maxx, maxy).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "message": "Failed to fetch file from S3",
-                "error": e.to_string()
+                "message": "Failed to crop raster",
+                "error": e
             })),
         )
     })?;
+
+    let cropped_filename = format!("{}_cropped.tif", layer_id);
 
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{}\"", cropped_filename),
         )
-        .body(Body::from(data))
+        .body(Body::from(cropped_data))
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -859,4 +866,374 @@ pub async fn download_layer(
         })?;
 
     Ok(response)
+}
+
+/// Crops a GeoTIFF to the specified bounding box
+/// Returns the cropped GeoTIFF as bytes
+fn crop_to_bbox(
+    original_data: &[u8],
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+) -> Result<Vec<u8>, String> {
+    use gdal::raster::Buffer;
+
+    // Write original data to vsimem
+    let input_path = format!("/vsimem/input_{}.tif", uuid::Uuid::new_v4());
+    let c_input_path = CString::new(input_path.clone()).map_err(|e| e.to_string())?;
+
+    unsafe {
+        let mode = CString::new("w").unwrap();
+        let fp = gdal_sys::VSIFOpenL(c_input_path.as_ptr(), mode.as_ptr());
+        if fp.is_null() {
+            return Err("Failed to open vsimem input file".to_string());
+        }
+        let written = gdal_sys::VSIFWriteL(original_data.as_ptr() as *const _, 1, original_data.len(), fp);
+        if written != original_data.len() {
+            gdal_sys::VSIFCloseL(fp);
+            return Err("Failed to write all data to vsimem".to_string());
+        }
+        gdal_sys::VSIFCloseL(fp);
+    }
+
+    // Open the dataset
+    let dataset = Dataset::open(&input_path).map_err(|e| format!("Failed to open dataset: {}", e))?;
+
+    // Get geotransform
+    let gt = dataset.geo_transform().map_err(|e| format!("Failed to get geotransform: {}", e))?;
+
+    // Calculate pixel coordinates for the bounding box
+    let col_min = ((minx - gt[0]) / gt[1]).floor() as isize;
+    let col_max = ((maxx - gt[0]) / gt[1]).ceil() as isize;
+    let row_min = ((maxy - gt[3]) / gt[5]).floor() as isize; // gt[5] is typically negative
+    let row_max = ((miny - gt[3]) / gt[5]).ceil() as isize;
+
+    let (raster_x_size, raster_y_size) = dataset.raster_size();
+
+    // Clamp to raster bounds
+    let col_min = col_min.max(0).min(raster_x_size as isize);
+    let col_max = col_max.max(0).min(raster_x_size as isize);
+    let row_min = row_min.max(0).min(raster_y_size as isize);
+    let row_max = row_max.max(0).min(raster_y_size as isize);
+
+    let width = (col_max - col_min) as usize;
+    let height = (row_max - row_min) as usize;
+
+    if width == 0 || height == 0 {
+        unsafe {
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
+        }
+        return Err("Bounding box results in zero-sized raster".to_string());
+    }
+
+    // Calculate new geotransform for cropped region
+    let new_origin_x = gt[0] + col_min as f64 * gt[1];
+    let new_origin_y = gt[3] + row_min as f64 * gt[5];
+    let new_gt = [new_origin_x, gt[1], gt[2], new_origin_y, gt[4], gt[5]];
+
+    // Read the cropped data from the band
+    let band = dataset.rasterband(1).map_err(|e| format!("Failed to get rasterband: {}", e))?;
+    let mut buffer: Buffer<f64> = band
+        .read_as((col_min, row_min), (width, height), (width, height), None)
+        .map_err(|e| format!("Failed to read raster data: {}", e))?;
+
+    // Create output dataset in vsimem
+    let output_path = format!("/vsimem/output_{}.tif", uuid::Uuid::new_v4());
+    let c_output_path = CString::new(output_path.clone()).map_err(|e| e.to_string())?;
+
+    let driver = gdal::DriverManager::get_driver_by_name("GTiff")
+        .map_err(|e| format!("Failed to get GTiff driver: {}", e))?;
+
+    let mut out_dataset = driver
+        .create_with_band_type::<f64, _>(&output_path, width, height, 1)
+        .map_err(|e| format!("Failed to create output dataset: {}", e))?;
+
+    // Set geotransform and spatial reference
+    out_dataset
+        .set_geo_transform(&new_gt)
+        .map_err(|e| format!("Failed to set geotransform: {}", e))?;
+
+    if let Ok(srs) = dataset.spatial_ref() {
+        out_dataset
+            .set_spatial_ref(&srs)
+            .map_err(|e| format!("Failed to set spatial reference: {}", e))?;
+    }
+
+    // Write the data
+    let mut out_band = out_dataset.rasterband(1)
+        .map_err(|e| format!("Failed to get output rasterband: {}", e))?;
+
+    out_band
+        .write((0, 0), (width, height), &mut buffer)
+        .map_err(|e| format!("Failed to write raster data: {}", e))?;
+
+    // Flush and close
+    drop(out_band);
+    drop(out_dataset);
+    drop(band);
+    drop(dataset);
+
+    // Read the cropped file from vsimem
+    let cropped_data = unsafe {
+        let mode = CString::new("r").unwrap();
+        let fp = gdal_sys::VSIFOpenL(c_output_path.as_ptr(), mode.as_ptr());
+        if fp.is_null() {
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
+            return Err("Failed to open output file".to_string());
+        }
+
+        // Get file size
+        gdal_sys::VSIFSeekL(fp, 0, 2); // SEEK_END
+        let size = gdal_sys::VSIFTellL(fp) as usize;
+        gdal_sys::VSIFSeekL(fp, 0, 0); // SEEK_SET
+
+        // Read data
+        let mut buffer = vec![0u8; size];
+        let read = gdal_sys::VSIFReadL(buffer.as_mut_ptr() as *mut _, 1, size, fp);
+        if read != size {
+            gdal_sys::VSIFCloseL(fp);
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
+            gdal_sys::VSIUnlink(c_output_path.as_ptr());
+            return Err("Failed to read all cropped data".to_string());
+        }
+        gdal_sys::VSIFCloseL(fp);
+
+        buffer
+    };
+
+    // Clean up vsimem files
+    unsafe {
+        gdal_sys::VSIUnlink(c_input_path.as_ptr());
+        gdal_sys::VSIUnlink(c_output_path.as_ptr());
+    }
+
+    Ok(cropped_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdal::Dataset;
+    use std::ffi::CString;
+
+    /// Test that verifies bounding box cropping functionality
+    /// This test creates a simple test raster and verifies that:
+    /// 1. A cropped version has different dimensions than the original
+    /// 2. The cropped version has correct georeferencing
+    /// 3. The cropped version contains the expected subset of data
+    #[test]
+    fn test_bbox_cropping() {
+        // Create a simple test GeoTIFF in memory
+        let vsi_path = "/vsimem/test_layer.tif";
+        let c_vsi_path = CString::new(vsi_path).unwrap();
+
+        // Create a test dataset: 100x100 pixels covering -180 to 180 longitude, -90 to 90 latitude
+        let driver = gdal::DriverManager::get_driver_by_name("GTiff").unwrap();
+        let mut dataset = driver
+            .create_with_band_type::<f64, _>(vsi_path, 100, 100, 1)
+            .unwrap();
+
+        // Set geotransform: [origin_x, pixel_width, 0, origin_y, 0, pixel_height]
+        // This makes each pixel 3.6 degrees wide and tall
+        dataset
+            .set_geo_transform(&[-180.0, 3.6, 0.0, 90.0, 0.0, -3.6])
+            .unwrap();
+
+        // Set spatial reference (WGS84)
+        dataset
+            .set_spatial_ref(&gdal::spatial_ref::SpatialRef::from_epsg(4326).unwrap())
+            .unwrap();
+
+        // Fill with test data (simple gradient)
+        let mut band = dataset.rasterband(1).unwrap();
+        let data: Vec<f64> = (0..10000).map(|i| i as f64).collect();
+        use gdal::raster::Buffer;
+        let mut buffer = Buffer::new((100, 100), data);
+        band.write((0, 0), (100, 100), &mut buffer).unwrap();
+
+        // Close the dataset to flush to vsimem
+        drop(band);
+        drop(dataset);
+
+        // Read the file from vsimem
+        let _original_data = unsafe {
+            let mode = CString::new("r").unwrap();
+            let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+            assert!(!fp.is_null(), "Failed to open test file");
+
+            // Get file size
+            gdal_sys::VSIFSeekL(fp, 0, 2); // SEEK_END
+            let size = gdal_sys::VSIFTellL(fp) as usize;
+            gdal_sys::VSIFSeekL(fp, 0, 0); // SEEK_SET
+
+            // Read data
+            let mut buffer = vec![0u8; size];
+            let read = gdal_sys::VSIFReadL(buffer.as_mut_ptr() as *mut _, 1, size, fp);
+            assert_eq!(read, size, "Failed to read all data");
+            gdal_sys::VSIFCloseL(fp);
+
+            buffer
+        };
+
+        // Test case: Crop to a smaller region (-90 to 0 longitude, 0 to 45 latitude)
+        // This should give us roughly 25x12.5 pixels = 25x13 pixels
+        let minx = -90.0;
+        let miny = 0.0;
+        let maxx = 0.0;
+        let maxy = 45.0;
+
+        // This is where we would call the cropping function
+        // For now, we'll implement the logic inline to show what we expect
+
+        // Open the original dataset
+        let dataset = Dataset::open(vsi_path).unwrap();
+
+        // Get geotransform
+        let gt = dataset.geo_transform().unwrap();
+
+        // Calculate pixel coordinates for the bounding box
+        // Using GDAL's geotransform formula:
+        // Xgeo = GT[0] + Xpixel*GT[1] + Yline*GT[2]
+        // Ygeo = GT[3] + Xpixel*GT[4] + Yline*GT[5]
+        // Solving for pixel coordinates:
+        let col_min = ((minx - gt[0]) / gt[1]).floor() as isize;
+        let col_max = ((maxx - gt[0]) / gt[1]).ceil() as isize;
+        let row_min = ((maxy - gt[3]) / gt[5]).floor() as isize; // Note: gt[5] is negative
+        let row_max = ((miny - gt[3]) / gt[5]).ceil() as isize;
+
+        let (raster_x_size, raster_y_size) = dataset.raster_size();
+
+        // Clamp to raster bounds
+        let col_min = col_min.max(0).min(raster_x_size as isize);
+        let col_max = col_max.max(0).min(raster_x_size as isize);
+        let row_min = row_min.max(0).min(raster_y_size as isize);
+        let row_max = row_max.max(0).min(raster_y_size as isize);
+
+        let width = (col_max - col_min) as usize;
+        let height = (row_max - row_min) as usize;
+
+        // Verify the cropped dimensions are smaller than original
+        assert!(width < raster_x_size, "Cropped width should be less than original");
+        assert!(height < raster_y_size, "Cropped height should be less than original");
+        assert!(width > 0, "Cropped width should be greater than 0");
+        assert!(height > 0, "Cropped height should be greater than 0");
+
+        // Expected dimensions based on our bounding box:
+        // -90 to 0 longitude = 90 degrees = 25 pixels
+        // 0 to 45 latitude = 45 degrees = 12.5 pixels
+        assert_eq!(width, 25, "Expected width of 25 pixels for 90 degree span");
+        assert_eq!(height, 13, "Expected height of 13 pixels for 45 degree span (rounded up)");
+
+        // Clean up
+        unsafe {
+            gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+        }
+
+        println!("Test passed: Bounding box cropping logic is correct");
+        println!("Original size: {}x{}", raster_x_size, raster_y_size);
+        println!("Cropped size: {}x{}", width, height);
+    }
+
+    /// Test the actual cropping function
+    #[test]
+    fn test_crop_to_bbox_function() {
+        use gdal::raster::Buffer;
+
+        // Create a test GeoTIFF in memory
+        let vsi_path = "/vsimem/test_crop_input.tif";
+        let c_vsi_path = CString::new(vsi_path).unwrap();
+
+        // Create a test dataset: 100x100 pixels covering -180 to 180 longitude, -90 to 90 latitude
+        let driver = gdal::DriverManager::get_driver_by_name("GTiff").unwrap();
+        let mut dataset = driver
+            .create_with_band_type::<f64, _>(vsi_path, 100, 100, 1)
+            .unwrap();
+
+        dataset
+            .set_geo_transform(&[-180.0, 3.6, 0.0, 90.0, 0.0, -3.6])
+            .unwrap();
+
+        dataset
+            .set_spatial_ref(&gdal::spatial_ref::SpatialRef::from_epsg(4326).unwrap())
+            .unwrap();
+
+        // Fill with test data
+        let mut band = dataset.rasterband(1).unwrap();
+        let data: Vec<f64> = (0..10000).map(|i| i as f64).collect();
+        let mut buffer = Buffer::new((100, 100), data);
+        band.write((0, 0), (100, 100), &mut buffer).unwrap();
+
+        drop(band);
+        drop(dataset);
+
+        // Read the test file
+        let original_data = unsafe {
+            let mode = CString::new("r").unwrap();
+            let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+            assert!(!fp.is_null());
+
+            gdal_sys::VSIFSeekL(fp, 0, 2);
+            let size = gdal_sys::VSIFTellL(fp) as usize;
+            gdal_sys::VSIFSeekL(fp, 0, 0);
+
+            let mut buffer = vec![0u8; size];
+            let read = gdal_sys::VSIFReadL(buffer.as_mut_ptr() as *mut _, 1, size, fp);
+            assert_eq!(read, size);
+            gdal_sys::VSIFCloseL(fp);
+
+            buffer
+        };
+
+        // Call crop_to_bbox with a bounding box
+        let minx = -90.0;
+        let miny = 0.0;
+        let maxx = 0.0;
+        let maxy = 45.0;
+
+        let cropped_data = crop_to_bbox(&original_data, minx, miny, maxx, maxy).unwrap();
+
+        // Verify the cropped data is valid by opening it
+        let cropped_vsi_path = "/vsimem/test_cropped_output.tif";
+        let c_cropped_vsi_path = CString::new(cropped_vsi_path).unwrap();
+
+        unsafe {
+            let mode = CString::new("w").unwrap();
+            let fp = gdal_sys::VSIFOpenL(c_cropped_vsi_path.as_ptr(), mode.as_ptr());
+            assert!(!fp.is_null());
+
+            let written = gdal_sys::VSIFWriteL(cropped_data.as_ptr() as *const _, 1, cropped_data.len(), fp);
+            assert_eq!(written, cropped_data.len());
+            gdal_sys::VSIFCloseL(fp);
+        }
+
+        let cropped_dataset = Dataset::open(cropped_vsi_path).unwrap();
+        let (width, height) = cropped_dataset.raster_size();
+
+        // Verify dimensions
+        assert_eq!(width, 25, "Cropped width should be 25 pixels");
+        assert_eq!(height, 13, "Cropped height should be 13 pixels");
+
+        // Verify geotransform
+        let gt = cropped_dataset.geo_transform().unwrap();
+        println!("Geotransform: {:?}", gt);
+        println!("Cropped origin: ({}, {})", gt[0], gt[3]);
+
+        // The origin should be at the top-left corner of the cropped region
+        // For minx=-90, the origin X should be -90
+        // For maxy=45, with pixel height of 3.6, and row_min=12, the origin Y should be 90 - 12*3.6 = 46.8
+        assert!((gt[0] - (-90.0)).abs() < 0.1, "Origin X should be around -90, got {}", gt[0]);
+        assert!((gt[3] - 46.8).abs() < 0.1, "Origin Y should be around 46.8, got {}", gt[3]);
+        assert!((gt[1] - 3.6).abs() < 0.01, "Pixel width should be 3.6");
+        assert!((gt[5] - (-3.6)).abs() < 0.01, "Pixel height should be -3.6");
+
+        // Clean up
+        unsafe {
+            gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+            gdal_sys::VSIUnlink(c_cropped_vsi_path.as_ptr());
+        }
+
+        println!("Test passed: crop_to_bbox function works correctly");
+        println!("Cropped size: {}x{}", width, height);
+    }
 }

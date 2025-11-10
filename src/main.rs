@@ -4,9 +4,21 @@ pub mod routes;
 
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::prelude::*;
+use lazy_limit::{init_rate_limiter, Duration, RuleConfig};
 
 #[tokio::main]
 async fn main() {
+    // Initialize rate limiter with sensible defaults
+    // 100 requests per second for general endpoints
+    // 30 requests per second for download endpoint (more resource intensive)
+    init_rate_limiter!(
+        default: RuleConfig::new(Duration::seconds(1), 100),
+        routes: [
+            ("/api/layers/download", RuleConfig::new(Duration::seconds(1), 30)),
+        ]
+    )
+    .await;
+
     // Load config to validate runtime environment used later in app
     let config = config::Config::from_env();
     // let app = Router::new().route("/tiles/{z}/{x}/{y}", get(views::tile_handler));

@@ -4,13 +4,26 @@ mod styles;
 mod tiles;
 
 use crate::{common::state::AppState, config::Config};
-use axum::{Router, extract::DefaultBodyLimit};
+use axum::{Router, extract::DefaultBodyLimit, extract::Request, middleware::{self, Next}, response::Response};
 use axum_keycloak_auth::{Url, instance::KeycloakAuthInstance, instance::KeycloakConfig};
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_scalar::{Scalar, Servable};
+use axum_governor::GovernorLayer;
+use real::{RealIpLayer, RealIp};
+use tower::ServiceBuilder;
+
+async fn log_request_ip(request: Request, next: Next) -> Response {
+    // Extract the real IP from the request extensions (set by RealIpLayer)
+    if let Some(real_ip) = request.extensions().get::<RealIp>() {
+        println!("[{}] {} {}", real_ip.ip(), request.method(), request.uri());
+    } else {
+        println!("[unknown IP] {} {}", request.method(), request.uri());
+    }
+    next.run(request).await
+}
 
 pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     #[derive(OpenApi)]
@@ -64,5 +77,19 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
         .split_for_parts();
 
-    router.merge(Scalar::with_url("/api/docs", api))
+    // Merge STAC router (regular Router, not OpenApiRouter) and docs
+    // Apply rate limiting middleware to all public endpoints
+    // Middleware order (outer to inner):
+    //   1. RealIpLayer - Extracts client IP and stores in request extensions
+    //   2. log_request_ip - Logs IP, method, and URI for each request
+    //   3. GovernorLayer - Applies rate limiting based on IP
+    router
+        .nest("/api/stac", tiles::stac_router::router(db))
+        .layer(
+            ServiceBuilder::new()
+                .layer(RealIpLayer::default())
+                .layer(middleware::from_fn(log_request_ip))
+                .layer(GovernorLayer::default())
+        )
+        .merge(Scalar::with_url("/api/docs", api))
 }

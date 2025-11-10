@@ -351,7 +351,7 @@ impl MigrationTrait for Migration {
             let geojson_path =
                 std::path::Path::new("migration/resources/ne_50m_admin_0_countries.geojson");
             if geojson_path.exists() {
-                match std::fs::read_to_string(&geojson_path) {
+                match std::fs::read_to_string(geojson_path) {
                     Ok(json_content) => {
                         match serde_json::from_str::<Value>(&json_content) {
                             Ok(geojson_data) => {
@@ -495,6 +495,7 @@ pub enum Style {
     Name,
     LastUpdated,
     Iterator,
+    #[allow(clippy::enum_variant_names)]
     Style,
 }
 
@@ -514,6 +515,7 @@ pub enum Country {
 pub enum Layer {
     Table,
     Id,
+    #[allow(clippy::enum_variant_names)]
     LayerName,
     Crop,
     WaterModel,

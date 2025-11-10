@@ -46,9 +46,6 @@ pub struct Model {
     pub style_id: Option<Uuid>,
     #[crudcrate(filterable)]
     pub is_crop_specific: bool,
-    #[sea_orm(ignore)]
-    #[crudcrate(non_db_attr, join(one, all, depth = 1))]
-    pub style: Vec<crate::routes::styles::db::Style>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

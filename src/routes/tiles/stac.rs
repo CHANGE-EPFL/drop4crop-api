@@ -203,8 +203,9 @@ async fn search_items(
 ) -> Result<Json<Value>, StatusCode> {
     let base_url = get_base_url(&headers);
 
-    // Build query with filters
+    // Build query with filters - join with style table
     let mut query = layer::Entity::find()
+        .find_also_related(crate::routes::styles::db::Entity)
         .filter(layer::Column::Enabled.eq(true));
 
     if let Some(crop) = &params.crop {
@@ -224,11 +225,10 @@ async fn search_items(
     }
     if let Some(datetime) = &params.datetime {
         // Extract year from datetime string (e.g., "2010-01-01" -> 2010)
-        if let Some(year_str) = datetime.split('-').next() {
-            if let Ok(year) = year_str.parse::<i32>() {
+        if let Some(year_str) = datetime.split('-').next()
+            && let Ok(year) = year_str.parse::<i32>() {
                 query = query.filter(layer::Column::Year.eq(year));
             }
-        }
     }
 
     query = query.order_by_asc(layer::Column::LayerName);
@@ -245,10 +245,15 @@ async fn search_items(
     // Convert layers to STAC items
     let features: Vec<Value> = layers
         .iter()
-        .map(|layer_record| {
+        .map(|(layer_record, style_opt)| {
             let unknown = "unknown".to_string();
             let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
             let year = layer_record.year.unwrap_or(2010);
+
+            // Convert style to JSON if present
+            let style_json = style_opt.as_ref().and_then(|style| {
+                style.style.as_ref()
+            });
 
             json!({
                 "stac_version": "1.0.0",
@@ -293,7 +298,9 @@ async fn search_items(
                     "year": year,
                     "global_average": layer_record.global_average,
                     "min_value": layer_record.min_value,
-                    "max_value": layer_record.max_value
+                    "max_value": layer_record.max_value,
+                    "style": style_json,
+                    "country_values": null  // Not yet implemented in database
                 },
                 "links": [
                     {

@@ -10,7 +10,6 @@ use axum::{
     extract::Multipart,
     http::header,
     response::{IntoResponse, Response},
-    routing::{get, post},
 };
 use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
 use chrono::Utc;
@@ -18,7 +17,7 @@ use crudcrate::CRUDResource;
 use gdal::Dataset;
 use hyper::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, LoaderTrait, QueryFilter,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,  QueryFilter,
     QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
@@ -61,7 +60,6 @@ pub struct UploadQueryParams {
 pub fn router(state: &AppState) -> OpenApiRouter {
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_groups))
-        .routes(routes!(get_all_map_layers))
         .routes(routes!(get_pixel_value))
         .routes(routes!(download_layer))
         .with_state(state.db.clone());
@@ -150,130 +148,8 @@ pub struct LayerQueryParams {
     year: Option<i32>,
 }
 
-#[utoipa::path(
-    get,
-    path = "/map",
-    params(LayerQueryParams),
-    responses(
-        (status = 200, description = "Layer list", body = [MapLayerResponse]),
-        (status = 500, description = "Internal server error")
-    ),
-    summary = "Get all enabled layers for map",
-    description = "Fetches enabled layers with filtering for use in Drop4Crop map"
-)]
-pub async fn get_all_map_layers(
-    State(db): State<DatabaseConnection>,
-    Query(params): Query<LayerQueryParams>,
-) -> Result<Json<Vec<MapLayerResponse>>, (StatusCode, Json<String>)> {
-    use crate::routes::layers::db::{Column, Entity as LayerEntity};
-    use crate::routes::styles::db::Entity as StyleEntity;
-    println!("[get_all_map_layers] params: {:?}", params);
-    let mut query = LayerEntity::find().filter(Column::Enabled.eq(true));
-
-    query = query.filter(Column::Crop.eq(params.crop));
-    query = query.filter(Column::Variable.eq(params.variable));
-
-    if let Some(water_model) = params.water_model {
-        query = query.filter(Column::WaterModel.eq(water_model));
-    }
-    if let Some(climate_model) = params.climate_model {
-        query = query.filter(Column::ClimateModel.eq(climate_model));
-    }
-    if let Some(scenario) = params.scenario {
-        query = query.filter(Column::Scenario.eq(scenario));
-    }
-    if let Some(year) = params.year {
-        query = query.filter(Column::Year.eq(year));
-    }
-
-    let layer_models = query.all(&db).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(format!("DB error: {}", e)),
-        )
-    })?;
-
-    let mut response: Vec<MapLayerResponse> = vec![];
-
-    for layer_model in layer_models {
-        // Try to find associated style for this layer
-        let style_model = if let Some(style_id) = layer_model.style_id {
-            StyleEntity::find_by_id(style_id).one(&db).await.ok()
-        } else {
-            None
-        };
-
-        // Create layer with or without style
-        let layer = if let Some(style_model) = style_model {
-            // Convert style JSON to StyleItem vector
-            let style_items = crate::routes::styles::models::StyleItem::from_json(
-                &style_model.clone().unwrap().style.unwrap_or_default(),
-                layer_model.min_value.unwrap_or_default(),
-                layer_model.max_value.unwrap_or_default(),
-                10,
-            );
-
-            // Construct MapLayerResponse with properly formatted style for legend
-            MapLayerResponse {
-                id: layer_model.id,
-                layer_name: layer_model.layer_name,
-                crop: layer_model.crop,
-                water_model: layer_model.water_model,
-                climate_model: layer_model.climate_model,
-                scenario: layer_model.scenario,
-                variable: layer_model.variable,
-                year: layer_model.year,
-                enabled: layer_model.enabled,
-                uploaded_at: layer_model.uploaded_at,
-                last_updated: layer_model.last_updated,
-                global_average: layer_model.global_average,
-                filename: layer_model.filename,
-                min_value: layer_model.min_value,
-                max_value: layer_model.max_value,
-                style_id: layer_model.style_id,
-                is_crop_specific: layer_model.is_crop_specific,
-                style: Some(style_items), // Set style to the StyleItem array for legend
-                country_values: None,     // TODO: Calculate country values if needed
-            }
-        } else {
-            // Create default style
-            let style_items = crate::routes::styles::models::StyleItem::from_json(
-                &serde_json::Value::Null,
-                layer_model.min_value.unwrap_or_default(),
-                layer_model.max_value.unwrap_or_default(),
-                10,
-            );
-
-            // Construct MapLayerResponse with default style for legend
-            MapLayerResponse {
-                id: layer_model.id,
-                layer_name: layer_model.layer_name,
-                crop: layer_model.crop,
-                water_model: layer_model.water_model,
-                climate_model: layer_model.climate_model,
-                scenario: layer_model.scenario,
-                variable: layer_model.variable,
-                year: layer_model.year,
-                enabled: layer_model.enabled,
-                uploaded_at: layer_model.uploaded_at,
-                last_updated: layer_model.last_updated,
-                global_average: layer_model.global_average,
-                filename: layer_model.filename,
-                min_value: layer_model.min_value,
-                max_value: layer_model.max_value,
-                style_id: layer_model.style_id,
-                is_crop_specific: layer_model.is_crop_specific,
-                style: Some(style_items), // Set style to the StyleItem array for legend
-                country_values: None,     // TODO: Calculate country values if needed
-            }
-        };
-
-        response.push(layer);
-    }
-
-    println!("[get_all_map_layers] returning {} layers", response.len());
-    Ok(Json(response))
-}
+// Removed: get_all_map_layers endpoint - replaced by STAC API (/api/stac/search)
+// The STAC search endpoint provides the same functionality in a standards-compliant way
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct GetPixelValueParams {
@@ -969,9 +845,7 @@ fn crop_to_bbox(
         .map_err(|e| format!("Failed to write raster data: {}", e))?;
 
     // Flush and close
-    drop(out_band);
     drop(out_dataset);
-    drop(band);
     drop(dataset);
 
     // Read the cropped file from vsimem
@@ -1053,7 +927,6 @@ mod tests {
         band.write((0, 0), (100, 100), &mut buffer).unwrap();
 
         // Close the dataset to flush to vsimem
-        drop(band);
         drop(dataset);
 
         // Read the file from vsimem
@@ -1164,7 +1037,6 @@ mod tests {
         let mut buffer = Buffer::new((100, 100), data);
         band.write((0, 0), (100, 100), &mut buffer).unwrap();
 
-        drop(band);
         drop(dataset);
 
         // Read the test file

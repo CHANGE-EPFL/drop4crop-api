@@ -120,7 +120,7 @@ async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()
     let config = crate::config::Config::from_env();
 
     // Extract the filename from cache_key (remove app-deployment prefix)
-    let filename = cache_key.split('/').last().unwrap_or(cache_key);
+    let filename = cache_key.split('/').next_back().unwrap_or(cache_key);
 
     // Use the same S3 key format as uploads/deletes for consistency
     let s3_key = get_s3_key(filename);

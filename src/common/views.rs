@@ -33,7 +33,13 @@ pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
     )
 )]
 pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<HealthCheck>) {
+    let now = chrono::Utc::now();
     if db.ping().await.is_err() {
+        println!(
+            "[{} | {:15} | healthz | 500] Database connection FAILED",
+            now.format("%Y-%m-%d %H:%M:%S"),
+            "system"
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HealthCheck {
@@ -42,8 +48,9 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
         );
     }
     println!(
-        "[healthz {}] Database connection is healthy",
-        chrono::Utc::now()
+        "[{} | {:15} | healthz | 200] Database connection is healthy",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        "system"
     );
     (
         StatusCode::OK,

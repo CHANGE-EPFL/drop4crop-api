@@ -7,22 +7,154 @@ use crate::{common::state::AppState, config::Config};
 use axum::{Router, extract::DefaultBodyLimit, extract::Request, middleware::{self, Next}, response::Response};
 use axum_keycloak_auth::{Url, instance::KeycloakAuthInstance, instance::KeycloakConfig};
 use sea_orm::DatabaseConnection;
-use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_scalar::{Scalar, Servable};
 use axum_governor::GovernorLayer;
 use real::{RealIpLayer, RealIp};
 use tower::ServiceBuilder;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::net::IpAddr;
+use chrono::{DateTime, Utc, Duration};
 
-async fn log_request_ip(request: Request, next: Next) -> Response {
-    // Extract the real IP from the request extensions (set by RealIpLayer)
-    if let Some(real_ip) = request.extensions().get::<RealIp>() {
-        println!("[{}] {} {}", real_ip.ip(), request.method(), request.uri());
-    } else {
-        println!("[unknown IP] {} {}", request.method(), request.uri());
+#[derive(Clone)]
+struct RateLimitConfig {
+    per_ip: u32,
+    global: u32,
+}
+
+struct RateLimitTracker {
+    global_count: u64,
+    per_ip_counts: HashMap<IpAddr, IpRateInfo>,
+    last_reset: DateTime<Utc>,
+}
+
+struct IpRateInfo {
+    count: u64,
+    last_reset: DateTime<Utc>,
+}
+
+impl RateLimitTracker {
+    fn new() -> Self {
+        Self {
+            global_count: 0,
+            per_ip_counts: HashMap::new(),
+            last_reset: Utc::now(),
+        }
     }
-    next.run(request).await
+
+    fn record_request(&mut self, ip: IpAddr) -> (u64, u64) {
+        let now = Utc::now();
+
+        // Reset global counter every second
+        if now.signed_duration_since(self.last_reset) >= Duration::seconds(1) {
+            self.global_count = 0;
+            self.last_reset = now;
+        }
+
+        self.global_count += 1;
+
+        // Reset or update per-IP counter
+        let ip_info = self.per_ip_counts.entry(ip).or_insert(IpRateInfo {
+            count: 0,
+            last_reset: now,
+        });
+
+        if now.signed_duration_since(ip_info.last_reset) >= Duration::seconds(1) {
+            ip_info.count = 0;
+            ip_info.last_reset = now;
+        }
+
+        ip_info.count += 1;
+
+        (self.global_count, ip_info.count)
+    }
+
+    fn cleanup_old_entries(&mut self) {
+        let now = Utc::now();
+        self.per_ip_counts.retain(|_, info| {
+            now.signed_duration_since(info.last_reset) < Duration::seconds(5)
+        });
+    }
+}
+
+async fn log_request_ip(
+    axum::extract::State(tracker): axum::extract::State<Arc<Mutex<RateLimitTracker>>>,
+    axum::extract::State(config): axum::extract::State<RateLimitConfig>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let start_time = Utc::now();
+    let method = request.method().clone();
+    let uri_path = request.uri().path().to_string();
+
+    // Extract the real IP from the request extensions (set by RealIpLayer)
+    let ip_opt = request.extensions().get::<RealIp>().map(|r| r.ip());
+
+    // Use single rate limit for all endpoints
+    let per_ip_limit = config.per_ip;
+    let global_limit = config.global;
+
+    // Record request and get counts
+    let (global_count, ip_count) = if let Some(ip) = ip_opt {
+        let mut tracker = tracker.lock().unwrap();
+        tracker.cleanup_old_entries();
+        tracker.record_request(ip)
+    } else {
+        (0, 0)
+    };
+
+    // Execute the request
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+
+    if let Some(ip) = ip_opt {
+        // Check if over limit (0 means infinite)
+        // Show "X" only if over limit, otherwise blank
+        let global_status = if global_limit != 0 && global_count > global_limit.into() {
+            "X"
+        } else {
+            " "
+        };
+
+        let ip_status = if per_ip_limit != 0 && ip_count > per_ip_limit.into() {
+            "X"
+        } else {
+            " "
+        };
+
+        // Format limits (0 = ∞)
+        let global_limit_str = if global_limit == 0 { "∞   ".to_string() } else { format!("{:4}", global_limit) };
+        let ip_limit_str = if per_ip_limit == 0 { "∞  ".to_string() } else { format!("{:3}", per_ip_limit) };
+
+        // Format: [YYYY-MM-DD HH:MM:SS | IP_ADDRESS | G:COUNT/LIMIT X | IP:COUNT/LIMIT X | CODE]
+        println!(
+            "[{} | {:15} | G:{:4}/{}{} | IP:{:3}/{}{} | {}] {} {}",
+            start_time.format("%Y-%m-%d %H:%M:%S"),
+            format!("{}", ip),
+            global_count,
+            global_limit_str,
+            global_status,
+            ip_count,
+            ip_limit_str,
+            ip_status,
+            status,
+            method,
+            uri_path
+        );
+    } else {
+        println!(
+            "[{} | {:15} | Unknown IP                           | {}] {} {}",
+            start_time.format("%Y-%m-%d %H:%M:%S"),
+            "unknown",
+            status,
+            method,
+            uri_path
+        );
+    }
+
+    response
 }
 
 pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
@@ -67,6 +199,13 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
 
     let app_state: AppState = AppState::new(db.clone(), config.clone(), keycloak_instance);
 
+    // Create rate limit tracking state from config
+    let rate_limit_config = RateLimitConfig {
+        per_ip: config.rate_limit_per_ip,
+        global: config.rate_limit_global,
+    };
+    let rate_limit_tracker = Arc::new(Mutex::new(RateLimitTracker::new()));
+
     // Build rate-limited middleware stack
     // Middleware order (outer to inner):
     //   1. RealIpLayer - Extracts client IP and stores in request extensions
@@ -74,7 +213,18 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     //   3. GovernorLayer - Applies rate limiting based on IP
     let rate_limit_stack = ServiceBuilder::new()
         .layer(RealIpLayer::default())
-        .layer(middleware::from_fn(log_request_ip))
+        .layer(middleware::from_fn_with_state((rate_limit_tracker.clone(), rate_limit_config.clone()),
+            |axum::extract::State((tracker, config)): axum::extract::State<(Arc<Mutex<RateLimitTracker>>, RateLimitConfig)>,
+             request: Request,
+             next: Next| async move {
+                log_request_ip(
+                    axum::extract::State(tracker),
+                    axum::extract::State(config),
+                    request,
+                    next
+                ).await
+            }
+        ))
         .layer(GovernorLayer::default());
 
     // Build the router with routes from the plots module

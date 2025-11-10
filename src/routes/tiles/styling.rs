@@ -18,16 +18,14 @@ pub struct ColorStop {
 /// Returns an interpolated color based on a value and a set of color stops.
 /// If the value is outside the range of the color stops, returns a transparent color.
 pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
-    if let Some(&(min_val, _)) = color_stops.first() {
-        if value < min_val {
+    if let Some(&(min_val, _)) = color_stops.first()
+        && value < min_val {
             return Rgba([0, 0, 0, 0]);
         }
-    }
-    if let Some(&(max_val, _)) = color_stops.last() {
-        if value > max_val {
+    if let Some(&(max_val, _)) = color_stops.last()
+        && value > max_val {
             return Rgba([0, 0, 0, 0]);
         }
-    }
     for window in color_stops.windows(2) {
         let (v1, c1) = window[0];
         let (v2, c2) = window[1];

@@ -21,6 +21,9 @@ pub struct Config {
     pub overwrite_duplicate_layers: bool,
     pub crop_variables: Vec<String>,
     pub tests_running: bool, // Flag to indicate if tests are running
+    // Rate limiting configuration
+    pub rate_limit_per_ip: u32, // Rate limit per second per IP (0 = infinite)
+    pub rate_limit_global: u32, // Global rate limit per second (all IPs combined, 0 = infinite)
 }
 
 impl Config {
@@ -78,6 +81,15 @@ impl Config {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect(),
+            // Rate limiting defaults (0 = infinite)
+            rate_limit_per_ip: env::var("RATE_LIMIT_PER_IP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(250),
+            rate_limit_global: env::var("RATE_LIMIT_GLOBAL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
         }
     }
 
@@ -128,6 +140,8 @@ impl Config {
                 "yield".to_string(),
                 "production".to_string(),
             ],
+            rate_limit_per_ip: 100,
+            rate_limit_global: 1000,
         }
     }
 }

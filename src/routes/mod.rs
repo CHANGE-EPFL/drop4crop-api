@@ -1,7 +1,9 @@
+mod admin;
 mod countries;
 mod layers;
 mod styles;
 mod tiles;
+pub mod stats_sync;
 
 use crate::{common::state::AppState, config::Config};
 use axum::{Router, extract::DefaultBodyLimit, extract::Request, middleware::{self, Next}, response::Response};
@@ -79,6 +81,69 @@ impl RateLimitTracker {
     }
 }
 
+/// Tracks layer access statistics based on the request path and query string.
+/// Extracts layer name and determines the access type (xyz, cog, pixel, stac, other).
+fn track_layer_statistics(uri_path: &str, query_string: &str) {
+    // Skip non-layer requests
+    if !uri_path.starts_with("/api/layers") && !uri_path.starts_with("/api/stac") {
+        return;
+    }
+
+    let (layer_name, stat_type) = if uri_path.starts_with("/api/layers/xyz/") {
+        // XYZ tile request: /api/layers/xyz/{z}/{x}/{y}?layer={name}
+        let layer = query_string
+            .split('&')
+            .find(|p| p.starts_with("layer="))
+            .and_then(|p| p.strip_prefix("layer="));
+        (layer, "xyz")
+    } else if uri_path.starts_with("/api/layers/cog/") {
+        // COG download: /api/layers/cog/{filename}.tif
+        let filename = uri_path.strip_prefix("/api/layers/cog/").unwrap_or("");
+        let layer = filename.strip_suffix(".tif");
+        (layer, "cog")
+    } else if uri_path.contains("/value") {
+        // Pixel value query: /api/layers/{id}/value?lat={}&lon={}
+        let parts: Vec<&str> = uri_path.split('/').collect();
+        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers" {
+            Some(parts[3])
+        } else {
+            None
+        };
+        (layer, "pixel")
+    } else if uri_path.starts_with("/api/stac") {
+        // STAC requests: /api/stac/collections/{name} or /api/stac/search
+        if uri_path.contains("/collections/") {
+            let layer = uri_path
+                .strip_prefix("/api/stac/collections/")
+                .and_then(|s| s.split('/').next());
+            (layer, "stac")
+        } else {
+            // STAC search or catalog - skip individual tracking
+            return;
+        }
+    } else if uri_path.starts_with("/api/layers/") && !uri_path.ends_with("/uploads") {
+        // Other layer requests (e.g., GET /api/layers/{id})
+        let parts: Vec<&str> = uri_path.split('/').collect();
+        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers" {
+            Some(parts[3])
+        } else {
+            None
+        };
+        (layer, "other")
+    } else {
+        return;
+    };
+
+    if let Some(layer_id) = layer_name {
+        // Fire-and-forget statistics increment
+        let layer_id = layer_id.to_string();
+        let stat_type = stat_type.to_string();
+        tokio::spawn(async move {
+            tiles::cache::increment_stats(&layer_id, &stat_type).await;
+        });
+    }
+}
+
 async fn log_request_ip(
     axum::extract::State(tracker): axum::extract::State<Arc<Mutex<RateLimitTracker>>>,
     axum::extract::State(config): axum::extract::State<RateLimitConfig>,
@@ -88,6 +153,7 @@ async fn log_request_ip(
     let start_time = Utc::now();
     let method = request.method().clone();
     let uri_path = request.uri().path().to_string();
+    let query_string = request.uri().query().unwrap_or("");
 
     // Extract the real IP from the request extensions (set by RealIpLayer)
     let ip_opt = request.extensions().get::<RealIp>().map(|r| r.ip());
@@ -104,6 +170,9 @@ async fn log_request_ip(
     } else {
         (0, 0)
     };
+
+    // Track statistics for layer access
+    track_layer_statistics(&uri_path, query_string);
 
     // Execute the request
     let response = next.run(request).await;
@@ -230,6 +299,8 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     // Build the router with routes from the plots module
     // Apply rate limiting to API routes, but NOT to health check endpoints
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .nest("/api/statistics", admin::views::stats_router(&app_state))
+        .nest("/api/cache", admin::views::cache_router(&app_state))
         .nest("/api/countries", countries::views::router(&app_state))
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/layers/xyz", tiles::views::xyz_router(db)) // XYZ tiles

@@ -39,6 +39,10 @@ async fn main() {
         panic!("Failed to connect to database");
     }
 
+    // Spawn background task for syncing statistics from Redis to PostgreSQL
+    println!("Starting statistics sync background task (every 5 minutes)...");
+    routes::stats_sync::spawn_stats_sync_task(db.clone());
+
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
     println!("Listening on {}", addr);
 

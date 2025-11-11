@@ -52,3 +52,36 @@ pub async fn redis_get(
     let result: Option<Vec<u8>> = redis::cmd("GET").arg(key).query_async(con).await?;
     Ok(result)
 }
+
+/// Builds a statistics key for tracking layer access by type.
+/// Format: {app}-{deploy}/stats:{YYYY-MM-DD}:{layer_id}:{type}
+pub fn build_stats_key(layer_id: &str, stat_type: &str) -> String {
+    let config = crate::config::Config::from_env();
+    let prefix = format!("{}-{}", config.app_name, config.deployment);
+    let today = chrono::Utc::now().format("%Y-%m-%d");
+    format!("{}/stats:{}:{}:{}", prefix, today, layer_id, stat_type)
+}
+
+/// Increments a statistics counter in Redis asynchronously.
+/// This is a fire-and-forget operation to avoid blocking the request.
+pub async fn increment_stats(layer_id: &str, stat_type: &str) {
+    let key = build_stats_key(layer_id, stat_type);
+
+    // Spawn a task to avoid blocking the request
+    tokio::spawn(async move {
+        match async {
+            let client = get_redis_client();
+            let mut con = client.get_multiplexed_async_connection().await?;
+            let _: i64 = redis::cmd("INCR")
+                .arg(&key)
+                .query_async(&mut con)
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        }.await {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("[Stats] Failed to increment stats for {}: {}", key, e);
+            }
+        }
+    });
+}

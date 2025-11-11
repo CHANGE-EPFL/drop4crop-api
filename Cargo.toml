@@ -1,6 +1,6 @@
 [package]
 name = "drop4crop-api"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [workspace]
@@ -57,3 +57,5 @@ migration = { path = "migration" }
 multipart = "0.18.0"
 reqwest = { version = "0.12.24", features = ["json"] }
 tempfile = "3.23.0"
+stac = "0.13.0"
+stac-api = "0.8.1"

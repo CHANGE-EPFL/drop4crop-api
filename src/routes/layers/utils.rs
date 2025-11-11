@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Result};
+use gdal::cpl::CslStringList;
+use gdal::raster::RasterBand;
+use gdal::{Dataset, DriverManager};
 use serde::{Deserialize, Serialize};
+use std::fs;
 
 use crate::config::Config;
 
@@ -99,21 +103,114 @@ pub fn parse_filename(filename: &str) -> Result<LayerInfo> {
 
 /// Converts a GeoTIFF to Cloud Optimized GeoTIFF format in memory
 pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
-    println!("Converting to COG (simplified implementation)");
+    println!("Converting to COG format using GDAL");
 
-    // For now, return the input bytes as-is since we need to fix the GDAL dependencies
-    // The COG conversion would require additional GDAL setup that may need system dependencies
-    println!("COG conversion placeholder - returning original bytes");
-    Ok(input_bytes.to_vec())
+    // Use temporary files since GDAL Rust bindings don't expose VSI write/read functions
+    let temp_dir = std::env::temp_dir();
+    let input_path = temp_dir.join(format!("input_{}.tif", std::process::id()));
+    let output_path = temp_dir.join(format!("output_{}.tif", std::process::id()));
+
+    // Write input bytes to temporary file
+    fs::write(&input_path, input_bytes)?;
+
+    // Open input dataset
+    let dataset = Dataset::open(&input_path)?;
+
+    // Get GeoTIFF driver
+    let driver = DriverManager::get_driver_by_name("GTiff")?;
+
+    // COG creation options
+    let mut creation_options = CslStringList::new();
+    creation_options.add_string("TILED=YES")?;
+    creation_options.add_string("COPY_SRC_OVERVIEWS=YES")?;
+    creation_options.add_string("COMPRESS=LZW")?;
+    creation_options.add_string("PREDICTOR=2")?;
+    creation_options.add_string("BLOCKXSIZE=512")?;
+    creation_options.add_string("BLOCKYSIZE=512")?;
+
+    // Create COG with proper options
+    let mut cog_dataset = dataset.create_copy(&driver, output_path.to_str().unwrap(), &creation_options)?;
+
+    // Build overviews for the COG
+    let overview_list = &[2, 4, 8, 16];
+    cog_dataset.build_overviews("NEAREST", overview_list, &[])?;
+
+    // Close datasets to flush to disk
+    drop(cog_dataset);
+    drop(dataset);
+
+    // Read output from file
+    let output_bytes = fs::read(&output_path)?;
+
+    // Clean up temporary files
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&output_path);
+
+    println!("COG conversion completed successfully");
+    Ok(output_bytes)
 }
 
 /// Calculates min and max values of a raster using GDAL
-pub fn get_min_max_of_raster(_input_bytes: &[u8]) -> Result<(f64, f64)> {
-    println!("Min/max calculation placeholder - returning default values");
+pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
+    println!("Calculating raster min/max values using GDAL");
 
-    // For now, return default values since we need to fix the GDAL dependencies
-    // This would need proper GDAL setup to read from virtual file system
-    Ok((0.0, 1.0))
+    // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
+    let temp_dir = std::env::temp_dir();
+    let input_path = temp_dir.join(format!("minmax_{}.tif", std::process::id()));
+
+    // Write input bytes to temporary file
+    fs::write(&input_path, input_bytes)?;
+
+    // Open dataset
+    let dataset = Dataset::open(&input_path)?;
+
+    // Get the first raster band (band index 1)
+    let rasterband: RasterBand = dataset.rasterband(1)?;
+
+    // Compute statistics (this calculates min, max, mean, stddev)
+    let stats = rasterband.compute_raster_min_max(true)?;
+
+    // Clean up temporary file
+    let _ = fs::remove_file(&input_path);
+
+    println!(
+        "Min/max calculation completed: min={}, max={}",
+        stats.min, stats.max
+    );
+
+    Ok((stats.min, stats.max))
+}
+
+/// Calculates the global average (mean) value of a raster using GDAL
+pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
+    println!("Calculating raster global average using GDAL");
+
+    // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
+    let temp_dir = std::env::temp_dir();
+    let input_path = temp_dir.join(format!("avg_{}.tif", std::process::id()));
+
+    // Write input bytes to temporary file
+    fs::write(&input_path, input_bytes)?;
+
+    // Open dataset
+    let dataset = Dataset::open(&input_path)?;
+
+    // Get the first raster band (band index 1)
+    let rasterband: RasterBand = dataset.rasterband(1)?;
+
+    // Get raster statistics which includes mean
+    // force=true means it will compute if not already cached, approx=false means exact calculation
+    let stats = rasterband.get_statistics(true, false)?.ok_or_else(|| {
+        anyhow!("Failed to compute raster statistics")
+    })?;
+    let mean = stats.mean;
+
+    // Clean up temporary file
+    let _ = fs::remove_file(&input_path);
+
+    println!("Global average calculation completed: mean={}", mean);
+
+    Ok(mean)
 }
 
 #[cfg(test)]

@@ -112,6 +112,26 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     }
 }
 
+/// Fetches a specific byte range of an object from S3 (for HTTP Range requests / COG streaming)
+/// Does NOT use caching since range requests are typically for different byte ranges each time
+pub async fn get_object_range(object_id: &str, range_header: &str) -> Result<Vec<u8>> {
+    let client = get_s3_client().await?;
+    let config = crate::config::Config::from_env();
+    let s3_key = get_s3_key(object_id);
+
+    // S3 GetObject supports the Range header directly
+    let response = client
+        .get_object()
+        .bucket(&config.s3_bucket_id)
+        .key(&s3_key)
+        .range(range_header)
+        .send()
+        .await?;
+
+    let data = response.body.collect().await?.into_bytes().to_vec();
+    Ok(data)
+}
+
 /// Downloads the object from S3 and pushes it to the cache. On completion (or error), it removes
 /// the downloading flag so that waiting threads can act accordingly.
 async fn download_and_cache(cache_key: &str, downloading_key: &str) -> Result<()> {
@@ -217,12 +237,7 @@ pub async fn delete_object(key: &str) -> Result<()> {
 /// Gets the S3 key for a given filename based on configuration.
 pub fn get_s3_key(filename: &str) -> String {
     let config = crate::config::Config::from_env();
-    let key = format!("{}/{}", config.s3_prefix, filename);
-    println!(
-        "[get_s3_key] filename: {}, prefix: {}, final key: {}",
-        filename, config.s3_prefix, key
-    );
-    key
+    format!("{}/{}", config.s3_prefix, filename)
 }
 
 pub async fn delete_s3_object_by_db_id(db: &sea_orm::DatabaseConnection, id: &Uuid) -> Result<()> {

@@ -230,10 +230,9 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     // Build the router with routes from the plots module
     // Apply rate limiting to API routes, but NOT to health check endpoints
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .nest("/api/tiles", tiles::views::router(db)) // Legacy endpoint for backward compatibility
         .nest("/api/countries", countries::views::router(&app_state))
         .nest("/api/layers", layers::views::router(&app_state))
-        .nest("/api/layers/xyz", tiles::views::xyz_router(db)) // XYZ tiles under /layers
+        .nest("/api/layers/xyz", tiles::views::xyz_router(db)) // XYZ tiles
         .nest("/api/layers/cog", layers::views::cog_router(db)) // S3-compatible COG endpoint
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration

@@ -20,12 +20,6 @@ pub struct Params {
     layer: String,
 }
 
-pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
-    OpenApiRouter::new()
-        .routes(routes!(tile_handler))
-        .with_state(db.clone())
-}
-
 /// XYZ tiles router (for /xyz endpoint under /layers)
 pub fn xyz_router(db: &DatabaseConnection) -> OpenApiRouter {
     OpenApiRouter::new()

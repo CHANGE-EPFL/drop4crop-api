@@ -6,6 +6,7 @@ use std::env;
 pub struct Config {
     pub db_uri: Option<String>,
     pub tile_cache_uri: String,
+    pub tile_cache_ttl: u64, // Cache TTL in seconds
     pub keycloak_client_id: String,
     pub keycloak_url: String,
     pub keycloak_realm: String,
@@ -54,6 +55,10 @@ impl Config {
         Config {
             db_uri,
             tile_cache_uri,
+            tile_cache_ttl: env::var("TILE_CACHE_TTL")
+                .unwrap_or_else(|_| "86400".to_string()) // Default: 24 hours = 86400 seconds
+                .parse()
+                .unwrap_or(86400),
             app_name: env::var("APP_NAME").expect("APP_NAME must be set"),
             s3_bucket_id: env::var("S3_BUCKET_ID").expect("S3_BUCKET_ID must be set"),
             s3_access_key: env::var("S3_ACCESS_KEY").expect("S3_ACCESS_KEY must be set"),
@@ -130,6 +135,7 @@ impl Config {
             tests_running: true, // Set to true for test configurations
             db_uri,
             tile_cache_uri,
+            tile_cache_ttl: 86400, // 24 hours for tests too
             s3_region: "us-east-1".to_string(),
             s3_prefix: "local".to_string(),
             overwrite_duplicate_layers: true,

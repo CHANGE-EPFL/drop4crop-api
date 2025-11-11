@@ -60,7 +60,6 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_groups))
         .routes(routes!(get_pixel_value))
-        .routes(routes!(download_layer))
         .with_state(state.db.clone());
 
     let mut protected_router = Layer::router(&state.db.clone());
@@ -625,31 +624,6 @@ pub struct DownloadQueryParams {
     miny: Option<f64>,
     maxx: Option<f64>,
     maxy: Option<f64>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/{layer_id}/download",
-    params(
-        ("layer_id" = String, Path, description = "Layer ID/filename"),
-        DownloadQueryParams
-    ),
-    responses(
-        (status = 200, description = "TIFF file download", content_type = "application/octet-stream"),
-        (status = 404, description = "Layer not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    summary = "Download layer as TIFF file (legacy endpoint)",
-    description = "Downloads the full TIFF file or a cropped region if bounds are provided. For COG streaming, use /api/layers/cog/{filename}.tif instead."
-)]
-pub async fn download_layer(
-    State(db): State<DatabaseConnection>,
-    Path(layer_id): Path<String>,
-    Query(params): Query<DownloadQueryParams>,
-    headers: HeaderMap,
-) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    let filename = format!("{}.tif", layer_id);
-    get_layer_data(db, filename, params, headers).await
 }
 
 /// S3-compatible COG endpoint - serves GeoTIFF files with HTTP Range support

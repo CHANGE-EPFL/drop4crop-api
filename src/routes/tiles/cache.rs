@@ -20,13 +20,17 @@ pub fn get_redis_client() -> redis::Client {
     redis::Client::open(config.tile_cache_uri).unwrap()
 }
 
-/// Pushes the data to Redis using the provided key.
+/// Pushes the data to Redis using the provided key with TTL from config.
 pub async fn push_cache_raw(key: &str, data: &[u8]) -> Result<()> {
     let client = get_redis_client();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let config = crate::config::Config::from_env();
+
     let _: () = redis::cmd("SET")
         .arg(key)
         .arg(data)
+        .arg("EX")
+        .arg(config.tile_cache_ttl) // Apply TTL from config (default: 24 hours)
         .query_async(&mut con)
         .await?;
     Ok(())

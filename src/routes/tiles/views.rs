@@ -57,11 +57,8 @@ pub async fn tile_handler(
     State(db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let max_tiles = 1 << z;
-    if x >= max_tiles {
-        println!(
-            "[tile_handler] x coordinate out-of-range: {} for zoom {}",
-            x, z
-        );
+    if x >= max_tiles || y >= max_tiles {
+        // Invalid tile coordinate - this is expected for out-of-bounds requests
         return Err(StatusCode::NOT_FOUND);
     }
     let xyz_tile = XYZTile { x, y, z };
@@ -69,14 +66,16 @@ pub async fn tile_handler(
     let img: ImageBuffer<image::Luma<u16>, Vec<u16>> = RetryIf::spawn(
         retry_strategy,
         || xyz_tile.get_one(&params.layer),
-        |_: &anyhow::Error| {
-            println!("[tile_handler] Error: x: {}, y: {}, z: {}", x, y, z);
+        |e: &anyhow::Error| {
+            eprintln!("[tile_handler] Tile generation failed for layer '{}' at z={}, x={}, y={}: {}",
+                params.layer, z, x, y, e);
             true
         },
     )
     .await
     .map_err(|e| {
-        println!("[tile_handler] Failed after 5 attempts: {:?}", e);
+        eprintln!("[tile_handler] Failed to generate tile for layer '{}' at z={}, x={}, y={} after 5 retries: {:#}",
+            params.layer, z, x, y, e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

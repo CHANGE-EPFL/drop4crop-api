@@ -58,13 +58,20 @@ impl XYZTile {
 
         // Offload the heavy reprojection to a blocking task.
         let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
-            // println!("Generating tile for x: {}, y: {}, z: {}", x, y, z);
+            // Note: GDAL error handler disabled temporarily for debugging
+            // Suppress GDAL warnings (but keep errors) to reduce log noise
+            // Common harmless warnings: "TIFFFetchNormalTag: IO error during reading of 'Software'"
+            // unsafe {
+            //     gdal_sys::CPLPushErrorHandler(Some(gdal_sys::CPLQuietErrorHandler));
+            // }
 
             // Compute the expected Web Mercator bounds for this tile.
             let bounds = compute_web_mercator_bounds(&tile);
 
-            // Write the in-memory TIFF to GDAL’s /vsimem virtual filesystem.
-            let vsi_path = format!("/vsimem/{}", filename);
+            // Write the in-memory TIFF to GDAL's /vsimem virtual filesystem.
+            // Use a unique path to avoid conflicts with concurrent tile requests
+            let vsi_path = format!("/vsimem/{}_{}_{}_{}",
+                filename.trim_end_matches(".tif"), x, y, z);
             let vsi_path = vsi_path.as_str();
             {
                 let c_vsi_path = CString::new(vsi_path).unwrap();
@@ -84,8 +91,18 @@ impl XYZTile {
                 }
             }
 
-            // Open the dataset from /vsimem and clean up the virtual file.
-            let src_ds = Dataset::open(vsi_path).context("Opening dataset from /vsimem")?;
+            // Open the dataset from /vsimem
+            let src_ds = Dataset::open(vsi_path).map_err(|e| {
+                // Clean up the /vsimem file before returning error
+                let c_vsi_path = CString::new(vsi_path).unwrap();
+                unsafe {
+                    gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+                }
+                anyhow::anyhow!("Failed to open GeoTIFF from /vsimem ({}): {}. File size: {} bytes",
+                    vsi_path, e, object.len())
+            })?;
+
+            // Clean up the virtual file after successful open
             {
                 let c_vsi_path = CString::new(vsi_path).unwrap();
                 unsafe {

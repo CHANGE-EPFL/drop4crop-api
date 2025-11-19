@@ -736,8 +736,13 @@ async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
 /// DELETE /api/admin/cache/layers/:layer_name - Clear specific layer cache
 async fn clear_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
     let config = crate::config::Config::from_env();
-    // Accept layer_name as-is (should already include .tif if applicable)
-    let cache_key = crate::routes::tiles::cache::build_cache_key(&config, &layer_name);
+    // Add .tif extension if not present (cache keys use filename format)
+    let filename = if layer_name.ends_with(".tif") {
+        layer_name.clone()
+    } else {
+        format!("{}.tif", layer_name)
+    };
+    let cache_key = crate::routes::tiles::cache::build_cache_key(&config, &filename);
     let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     let mut con = redis_client

@@ -5,9 +5,20 @@ pub mod routes;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::prelude::*;
 use lazy_limit::{init_rate_limiter, Duration, RuleConfig};
+use tracing::{info, error};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing subscriber
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,drop4crop_api=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     // Load config to validate runtime environment used later in app
     let config = config::Config::from_env();
 
@@ -23,28 +34,28 @@ async fn main() {
         .unwrap();
 
     if db.ping().await.is_ok() {
-        println!("Connected to the database");
+        info!("Connected to the database");
 
         // Run database migrations
-        println!("Running database migrations...");
+        info!("Running database migrations...");
         match migration::Migrator::up(&db, None).await {
-            Ok(_) => println!("Migrations completed successfully"),
+            Ok(_) => info!("Migrations completed successfully"),
             Err(e) => {
-                eprintln!("Migration failed: {:?}", e);
+                error!("Migration failed: {:?}", e);
                 panic!("Failed to run database migrations");
             }
         }
     } else {
-        println!("Could not connect to the database");
+        error!("Could not connect to the database");
         panic!("Failed to connect to database");
     }
 
     // Spawn background task for syncing statistics from Redis to PostgreSQL
-    println!("Starting statistics sync background task (every 5 minutes)...");
+    info!("Starting statistics sync background task (every 5 minutes)...");
     routes::stats_sync::spawn_stats_sync_task(db.clone());
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
-    println!("Listening on {}", addr);
+    info!("Server listening on {}", addr);
 
     let router = routes::build_router(&db, &config);
     axum::serve(

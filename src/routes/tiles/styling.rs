@@ -4,6 +4,7 @@ use sea_orm::{FromQueryResult, JsonValue};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use utoipa::ToSchema;
+use tracing::{debug, warn};
 
 // Representation of the JSON style.
 #[derive(Deserialize, Clone, ToSchema, Serialize, FromQueryResult, Debug)]
@@ -60,16 +61,16 @@ pub fn style_layer(
     let stops: Vec<ColorStop> = match style {
         Some(JsonValue::Array(arr)) => serde_json::from_value(JsonValue::Array(arr.clone()))
             .unwrap_or_else(|e| {
-                println!("[tile_handler] Failed to deserialize style array: {:?}", e);
+                warn!(error = %e, "Failed to deserialize style array");
                 vec![]
             }),
         Some(JsonValue::String(ref s)) if !s.trim().is_empty() => serde_json::from_str(s)
             .unwrap_or_else(|e| {
-                println!("[tile_handler] Failed to parse JSON style string: {:?}", e);
+                warn!(error = %e, "Failed to parse JSON style string");
                 vec![]
             }),
         _ => {
-            println!("[tile_handler] No valid style found, using default grayscale.");
+            debug!("No valid style found, using default grayscale");
             vec![]
         }
     };

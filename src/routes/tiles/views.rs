@@ -14,6 +14,7 @@ use tokio_retry::{RetryIf, strategy::FixedInterval};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
+use tracing::{debug, error};
 
 #[derive(Deserialize, ToSchema)]
 pub struct Params {
@@ -50,6 +51,7 @@ pub async fn tile_handler(
     Path((z, x, y)): Path<(u32, u32, u32)>,
     State(db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
     let max_tiles = 1 << z;
     if x >= max_tiles || y >= max_tiles {
         // Invalid tile coordinate - this is expected for out-of-bounds requests
@@ -59,17 +61,25 @@ pub async fn tile_handler(
     let retry_strategy = FixedInterval::from_millis(200).take(5);
     let img: ImageBuffer<image::Luma<u16>, Vec<u16>> = RetryIf::spawn(
         retry_strategy,
-        || xyz_tile.get_one(&params.layer),
+        || xyz_tile.get_one(&config, &params.layer),
         |e: &anyhow::Error| {
-            eprintln!("[tile_handler] Tile generation failed for layer '{}' at z={}, x={}, y={}: {}",
-                params.layer, z, x, y, e);
+            error!(
+                layer = %params.layer,
+                z, x, y,
+                error = %e,
+                "Tile generation failed"
+            );
             true
         },
     )
     .await
     .map_err(|e| {
-        eprintln!("[tile_handler] Failed to generate tile for layer '{}' at z={}, x={}, y={} after 5 retries: {:#}",
-            params.layer, z, x, y, e);
+        error!(
+            layer = %params.layer,
+            z, x, y,
+            error = %e,
+            "Failed to generate tile after 5 retries"
+        );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -79,12 +89,12 @@ pub async fn tile_handler(
         .one(&db)
         .await
         .map_err(|e| {
-            println!("[tile_handler] Database query error: {:?}", e);
+            error!(error = %e, "Database query error");
             StatusCode::INTERNAL_SERVER_ERROR
         })? {
         Some(rec) => rec,
         None => {
-            println!("[tile_handler] No layer found for {}", &params.layer);
+            debug!(layer = %params.layer, "No layer found");
             return Err(StatusCode::NOT_FOUND);
         }
     };
@@ -95,7 +105,7 @@ pub async fn tile_handler(
         .all(&db)
         .await
         .map_err(|e| {
-            println!("[tile_handler] Database query error: {:?}", e);
+            error!(error = %e, "Database query error");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -104,7 +114,7 @@ pub async fn tile_handler(
 
     // Apply the style to the image.
     let png_data = super::styling::style_layer(img, dbstyle).map_err(|e| {
-        println!("[tile_handler] Error applying style: {:?}", e);
+        error!(error = %e, "Error applying style");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

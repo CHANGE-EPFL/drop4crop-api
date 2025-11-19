@@ -6,6 +6,7 @@ use image::ImageBuffer;
 use image::Luma;
 use std::ffi::CString;
 use tokio::task;
+use tracing::error;
 
 #[derive(Debug)]
 pub struct XYZTile {
@@ -47,10 +48,10 @@ impl XYZTile {
     /// The function first fetches the GeoTIFF data from S3 (in EPSG:4326), then uses GDAL to
     /// reproject it to Web Mercator (EPSG:3857) for correct alignment with basemaps like OSM.
     /// Heavy GDAL operations run in a blocking thread.
-    pub async fn get_one(&self, layer_id: &str) -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
+    pub async fn get_one(&self, config: &crate::config::Config, layer_id: &str) -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
-        let object = storage::get_object(&filename).await?;
+        let object = storage::get_object(config, &filename).await?;
         let x = self.x;
         let y = self.y;
         let z = self.z;
@@ -162,7 +163,7 @@ impl XYZTile {
             let band = match dest_ds.rasterband(1) {
                 Ok(band) => band,
                 Err(e) => {
-                    println!("Error getting raster band 1: {:?}", e);
+                    error!(error = %e, "Error getting raster band 1");
                     return Err(anyhow::Error::new(e).context("Error getting raster band 1"));
                 }
             };

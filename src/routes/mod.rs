@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::net::IpAddr;
 use chrono::{DateTime, Utc, Duration};
+use tracing::info;
 
 #[derive(Clone)]
 struct RateLimitConfig {
@@ -136,10 +137,11 @@ fn track_layer_statistics(uri_path: &str, query_string: &str) {
 
     if let Some(layer_id) = layer_name {
         // Fire-and-forget statistics increment
+        let config = Config::from_env();
         let layer_id = layer_id.to_string();
         let stat_type = stat_type.to_string();
         tokio::spawn(async move {
-            tiles::cache::increment_stats(&layer_id, &stat_type).await;
+            tiles::cache::increment_stats(config, layer_id, stat_type).await;
         });
     }
 }
@@ -198,28 +200,28 @@ async fn log_request_ip(
         let ip_limit_str = if per_ip_limit == 0 { "∞  ".to_string() } else { format!("{:3}", per_ip_limit) };
 
         // Format: [YYYY-MM-DD HH:MM:SS | IP_ADDRESS | G:COUNT/LIMIT X | IP:COUNT/LIMIT X | CODE]
-        println!(
-            "[{} | {:15} | G:{:4}/{}{} | IP:{:3}/{}{} | {}] {} {}",
-            start_time.format("%Y-%m-%d %H:%M:%S"),
-            format!("{}", ip),
-            global_count,
-            global_limit_str,
-            global_status,
-            ip_count,
-            ip_limit_str,
-            ip_status,
-            status,
-            method,
-            uri_path
+        info!(
+            timestamp = %start_time.format("%Y-%m-%d %H:%M:%S"),
+            ip = %format!("{}", ip),
+            global_count = global_count,
+            global_limit = %global_limit_str,
+            global_status = global_status,
+            ip_count = ip_count,
+            ip_limit = %ip_limit_str,
+            ip_status = ip_status,
+            status = status,
+            method = %method,
+            uri = %uri_path,
+            "HTTP request"
         );
     } else {
-        println!(
-            "[{} | {:15} | Unknown IP                           | {}] {} {}",
-            start_time.format("%Y-%m-%d %H:%M:%S"),
-            "unknown",
-            status,
-            method,
-            uri_path
+        info!(
+            timestamp = %start_time.format("%Y-%m-%d %H:%M:%S"),
+            ip = "unknown",
+            status = status,
+            method = %method,
+            uri = %uri_path,
+            "HTTP request"
         );
     }
 
@@ -255,7 +257,11 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     }
 
     let keycloak_instance: Option<Arc<KeycloakAuthInstance>> = if config.keycloak_url.is_empty() {
-        // Skip Keycloak initialization for tests
+        // Fail-closed: require Keycloak in production deployments
+        if config.deployment == "prod" {
+            panic!("SECURITY ERROR: Keycloak authentication is required in production deployments. Please configure KEYCLOAK_URL, KEYCLOAK_REALM, and KEYCLOAK_CLIENT_ID environment variables.");
+        }
+        // Skip Keycloak initialization for dev/test environments only
         None
     } else {
         Some(Arc::new(KeycloakAuthInstance::new(

@@ -3,6 +3,7 @@ use redis::AsyncCommands;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use tokio::time::{interval, Duration};
+use tracing::{info, error};
 
 /// Spawns a background task that syncs statistics from Redis to PostgreSQL every 5 minutes.
 /// Uses distributed locking to ensure only one instance runs the sync at a time.
@@ -17,11 +18,17 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
             match sync_stats_to_db(&db, &instance_id).await {
                 Ok(synced_count) => {
                     if synced_count > 0 {
-                        println!("[Stats] Synced to PostgreSQL: {} layers updated", synced_count);
+                        info!(
+                            synced_count,
+                            "Synced statistics to PostgreSQL"
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!("[Stats] Sync failed: {}, will retry in 5 minutes", e);
+                    error!(
+                        error = %e,
+                        "Stats sync failed, will retry in 5 minutes"
+                    );
                 }
             }
         }
@@ -31,7 +38,7 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
 /// Attempts to sync statistics from Redis to PostgreSQL with distributed locking.
 async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<usize> {
     let config = crate::config::Config::from_env();
-    let redis_client = super::tiles::cache::get_redis_client();
+    let redis_client = super::tiles::cache::get_redis_client(&config);
     let mut con = redis_client.get_multiplexed_async_connection().await?;
 
     // Try to acquire distributed lock
@@ -175,7 +182,10 @@ async fn write_stats_to_db(
             .await?;
 
         if layer_record.is_none() {
-            eprintln!("[Stats] Layer not found: {}", layer_name);
+            error!(
+                layer_name,
+                "Layer not found during stats sync"
+            );
             continue;
         }
 

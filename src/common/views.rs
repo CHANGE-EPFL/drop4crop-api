@@ -5,6 +5,7 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
+use tracing::{info, error};
 
 #[derive(Serialize, ToSchema)]
 pub struct KeycloakConfig {
@@ -35,10 +36,11 @@ pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
 pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<HealthCheck>) {
     let now = chrono::Utc::now();
     if db.ping().await.is_err() {
-        println!(
-            "[{} | {:15} | healthz | 500] Database connection FAILED",
-            now.format("%Y-%m-%d %H:%M:%S"),
-            "system"
+        error!(
+            timestamp = %now.format("%Y-%m-%d %H:%M:%S"),
+            endpoint = "healthz",
+            status = 500,
+            "Database connection FAILED"
         );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -47,10 +49,11 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
             }),
         );
     }
-    println!(
-        "[{} | {:15} | healthz | 200] Database connection is healthy",
-        now.format("%Y-%m-%d %H:%M:%S"),
-        "system"
+    info!(
+        timestamp = %now.format("%Y-%m-%d %H:%M:%S"),
+        endpoint = "healthz",
+        status = 200,
+        "Database connection is healthy"
     );
     (
         StatusCode::OK,
@@ -73,6 +76,9 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
     )
 )]
 pub async fn get_keycloak_config() -> (StatusCode, Json<KeycloakConfig>) {
+    // Note: This is a public endpoint that needs config for the keycloak info
+    // It's acceptable to call Config::from_env() here since this endpoint is specifically
+    // about returning configuration to the client
     let config = Config::from_env();
     let keycloak_config = KeycloakConfig {
         client_id: config.keycloak_client_id,

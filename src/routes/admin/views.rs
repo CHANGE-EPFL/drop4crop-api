@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use utoipa_axum::router::OpenApiRouter;
+use tracing::{info, debug, warn, error};
 
 /// Builds the statistics router with protected endpoints.
 pub fn stats_router(state: &AppState) -> OpenApiRouter {
@@ -37,7 +38,7 @@ pub fn stats_router(state: &AppState) -> OpenApiRouter {
                 .build(),
         );
     } else if !state.config.tests_running {
-        println!("Warning: Statistics routes are not protected - Keycloak is disabled");
+        warn!("Statistics routes are not protected - Keycloak is disabled");
     }
 
     router
@@ -65,7 +66,7 @@ pub fn cache_router(state: &AppState) -> OpenApiRouter {
                 .build(),
         );
     } else if !state.config.tests_running {
-        println!("Warning: Cache management routes are not protected - Keycloak is disabled");
+        warn!("Cache management routes are not protected - Keycloak is disabled");
     }
 
     router
@@ -157,7 +158,7 @@ async fn get_stats_summary(
 
     // Total requests all time
     let all_stats = layer_statistics::Entity::find().all(&db).await.map_err(|e| {
-        eprintln!("[Admin] Database error: {:?}", e);
+        error!(error = %e, "Database error fetching stats");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -309,7 +310,7 @@ async fn get_layer_stats(
     // Apply layer_name filter
     if let Some(ref f) = filter {
         if let Some(ref layer_name) = f.layer_name {
-            println!("Filtering statistics by layer_name: {}", layer_name);
+            debug!(layer_name, "Filtering statistics by layer_name");
             // Find the layer by name first
             let layer_record = layer::Entity::find()
                 .filter(layer::Column::LayerName.eq(layer_name))
@@ -318,11 +319,11 @@ async fn get_layer_stats(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             if let Some(layer) = layer_record {
-                println!("Found layer with ID: {}, filtering statistics", layer.id);
+                debug!(layer_id = %layer.id, "Found layer, filtering statistics");
                 // Filter statistics by layer_id
                 query = query.filter(layer_statistics::Column::LayerId.eq(layer.id));
             } else {
-                println!("Layer not found: {}, returning empty results", layer_name);
+                debug!(layer_name, "Layer not found, returning empty results");
                 // If layer not found, return empty results
                 let mut headers = HeaderMap::new();
                 headers.insert("Content-Range", "statistics 0-0/0".parse().unwrap());
@@ -344,7 +345,7 @@ async fn get_layer_stats(
             }
         }
     } else {
-        println!("No filter provided");
+        debug!("No filter provided");
     }
 
     // Get total count for Content-Range header
@@ -362,19 +363,28 @@ async fn get_layer_stats(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Fetch layer names
-    let mut results = Vec::new();
-    for stat in stats {
-        let layer_record = layer::Entity::find_by_id(stat.layer_id)
-            .one(&db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Fetch all layer names in a single query to avoid N+1 problem
+    let layer_ids: Vec<uuid::Uuid> = stats.iter().map(|s| s.layer_id).collect();
+    let layers = layer::Entity::find()
+        .filter(layer::Column::Id.is_in(layer_ids))
+        .all(&db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Some(layer) = layer_record {
-            results.push(LayerStatDetail {
+    // Create a map for quick lookup
+    let layer_map: std::collections::HashMap<uuid::Uuid, String> = layers
+        .into_iter()
+        .map(|l| (l.id, l.layer_name.unwrap_or_else(|| l.id.to_string())))
+        .collect();
+
+    // Build results with layer names
+    let results: Vec<LayerStatDetail> = stats
+        .into_iter()
+        .filter_map(|stat| {
+            layer_map.get(&stat.layer_id).map(|layer_name| LayerStatDetail {
                 id: stat.id.to_string(),  // React-Admin requires id field
                 layer_id: stat.layer_id.to_string(),
-                layer_name: layer.layer_name.unwrap_or_else(|| stat.layer_id.to_string()),
+                layer_name: layer_name.clone(),
                 stat_date: stat.stat_date.to_string(),
                 last_accessed_at: stat.last_accessed_at.to_string(),
                 xyz_tile_count: stat.xyz_tile_count,
@@ -387,9 +397,9 @@ async fn get_layer_stats(
                     + stat.pixel_query_count
                     + stat.stac_request_count
                     + stat.other_request_count,
-            });
-        }
-    }
+            })
+        })
+        .collect();
 
     // Build Content-Range header
     let end_index = if results.is_empty() {
@@ -511,7 +521,7 @@ async fn get_layer_timeline(
 /// GET /api/admin/cache/info - Cache statistics
 async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
     let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     match redis_client.get_multiplexed_async_connection().await {
         Ok(mut con) => {
@@ -584,7 +594,7 @@ async fn get_cache_keys(
     State(db): State<DatabaseConnection>,
 ) -> Result<Json<Vec<CachedLayer>>, StatusCode> {
     let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -689,7 +699,7 @@ async fn get_cache_keys(
 /// POST /api/admin/cache/clear - Clear all cache
 async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
     let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -715,7 +725,7 @@ async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    println!("[Admin] Cleared {} cache keys", keys.len());
+    info!(count = keys.len(), "Cleared cache keys");
 
     Ok(Json(json!({
         "message": format!("Cleared {} cached layers", keys.len()),
@@ -725,9 +735,10 @@ async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
 
 /// DELETE /api/admin/cache/layers/:layer_name - Clear specific layer cache
 async fn clear_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
     // Accept layer_name as-is (should already include .tif if applicable)
-    let cache_key = crate::routes::tiles::cache::build_cache_key(&layer_name);
-    let redis_client = crate::routes::tiles::cache::get_redis_client();
+    let cache_key = crate::routes::tiles::cache::build_cache_key(&config, &layer_name);
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -741,11 +752,12 @@ async fn clear_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoRe
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if deleted > 0 {
-        println!("[Admin] Cleared cache for layer: {}", layer_name);
+        info!(layer_name, "Cleared cache for layer");
         Ok(Json(json!({
             "message": format!("Cleared cache for layer: {}", layer_name)
         })))
     } else {
+        debug!(layer_name, "No cache found for layer");
         Ok(Json(json!({
             "message": format!("No cache found for layer: {}", layer_name)
         })))
@@ -781,7 +793,7 @@ async fn get_live_stats(State(db): State<DatabaseConnection>) -> Result<Json<Vec
     use crate::routes::layers::db as layer;
 
     let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()

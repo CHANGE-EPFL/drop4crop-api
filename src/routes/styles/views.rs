@@ -4,6 +4,7 @@ use crate::common::state::AppState;
 use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
 use crudcrate::CRUDResource;
 use utoipa_axum::router::OpenApiRouter;
+use tracing::warn;
 
 pub fn router(state: &AppState) -> OpenApiRouter {
     let mut mutating_router = Style::router(&state.db.clone());
@@ -19,9 +20,9 @@ pub fn router(state: &AppState) -> OpenApiRouter {
                 .build(),
         );
     } else if !state.config.tests_running {
-        println!(
-            "Warning: Mutating routes of {} router are not protected",
-            Style::RESOURCE_NAME_PLURAL
+        warn!(
+            resource = Style::RESOURCE_NAME_PLURAL,
+            "Mutating routes are not protected"
         );
     }
 

@@ -26,6 +26,7 @@ use std::{collections::HashMap, ffi::CString};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
+use tracing::{debug, info, warn, error};
 // // Custom response type for /map endpoint that includes properly formatted style data for legend
 // #[derive(Serialize, ToSchema)]
 // pub struct MapLayerResponse {
@@ -91,9 +92,10 @@ pub fn router(state: &AppState) -> OpenApiRouter {
                 .build(),
         );
     } else if !state.config.tests_running {
-        println!(
-            "Warning: Mutating routes of {} router are not protected",
-            Layer::RESOURCE_NAME_PLURAL
+        warn!(
+            resource = Layer::RESOURCE_NAME_PLURAL,
+            deployment = %state.config.deployment,
+            "Mutating routes are not protected by authentication. This is only allowed in development environments"
         );
     }
 
@@ -211,12 +213,13 @@ pub async fn get_pixel_value(
     Query(params): Query<GetPixelValueParams>,
     State(_db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
     // Build the filename for the TIFF.
     let filename = format!("{}.tif", layer_id);
 
     // Fetch the object using your existing S3 integration (with caching).
-    let object = storage::get_object(&filename).await.map_err(|e| {
-        println!("[get_pixel_value] Error fetching object: {:?}", e);
+    let object = storage::get_object(&config, &filename).await.map_err(|e| {
+        error!(filename, error = %e, "Error fetching object for pixel value");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -228,13 +231,13 @@ pub async fn get_pixel_value(
         unsafe {
             let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
             if fp.is_null() {
-                println!("[get_pixel_value] Failed to open /vsimem file");
+                error!("Failed to open /vsimem file for pixel value query");
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
             let written = gdal_sys::VSIFWriteL(object.as_ptr() as *const _, 1, object.len(), fp);
             if written != object.len() {
                 gdal_sys::VSIFCloseL(fp);
-                println!("[get_pixel_value] Failed to write all data to /vsimem file");
+                error!("Failed to write all data to /vsimem file for pixel value query");
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
             gdal_sys::VSIFCloseL(fp);
@@ -243,7 +246,7 @@ pub async fn get_pixel_value(
 
     // Open the dataset with GDAL.
     let dataset = Dataset::open(&vsi_path).map_err(|e| {
-        println!("[get_pixel_value] Error opening dataset: {:?}", e);
+        error!(error = %e, "Error opening dataset for pixel value query");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -257,7 +260,7 @@ pub async fn get_pixel_value(
 
     // Retrieve the geo-transform.
     let geo_transform = dataset.geo_transform().map_err(|e| {
-        println!("[get_pixel_value] Error getting geo_transform: {:?}", e);
+        error!(error = %e, "Error getting geo_transform for pixel value query");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -275,22 +278,22 @@ pub async fn get_pixel_value(
     // Check that the computed pixel coordinates fall within the dataset bounds.
     let (raster_x_size, raster_y_size) = dataset.raster_size();
     if col < 0 || row < 0 || col >= raster_x_size as isize || row >= raster_y_size as isize {
-        println!(
-            "[get_pixel_value] Coordinates out of bounds: col {}, row {}",
-            col, row
+        debug!(
+            col, row, raster_x_size, raster_y_size,
+            "Pixel value query coordinates out of bounds"
         );
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Read the pixel value from band 1.
     let band = dataset.rasterband(1).map_err(|e| {
-        println!("[get_pixel_value] Error accessing raster band: {:?}", e);
+        error!(error = %e, "Error accessing raster band for pixel value query");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let buf_result = band
         .read_as::<f64>((col, row), (1, 1), (1, 1), None)
         .map_err(|e| {
-            println!("[get_pixel_value] Error reading pixel value: {:?}", e);
+            error!(error = %e, "Error reading pixel value");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let buf = buf_result.data();
@@ -318,15 +321,15 @@ pub async fn upload_file(
     Query(params): Query<UploadQueryParams>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    println!("[upload_file] Starting upload request");
+    debug!("Starting upload request");
     let config = crate::config::Config::from_env();
     let overwrite_duplicates = params
         .overwrite_duplicates
         .unwrap_or(config.overwrite_duplicate_layers);
 
-    println!("[upload_file] About to process multipart data...");
+    debug!("About to process multipart data");
     while let Some(field) = multipart.next_field().await.map_err(|e| {
-        println!("[upload_file] Error reading multipart field: {}", e);
+        error!(error = %e, "Error reading multipart field");
         (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -335,15 +338,15 @@ pub async fn upload_file(
             })),
         )
     })? {
-        println!("[upload_file] Got a field from multipart");
+        debug!("Got a field from multipart");
         let name = field.name().unwrap_or("file");
 
         if name == "file" {
-            println!("[upload_file] Processing file field");
+            debug!("Processing file field");
             let filename = field
                 .file_name()
                 .ok_or_else(|| {
-                    println!("[upload_file] No filename provided");
+                    error!("No filename provided");
                     (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
@@ -353,20 +356,16 @@ pub async fn upload_file(
                 })?
                 .to_lowercase();
 
-            println!("[upload_file] Filename: {}", filename);
-            println!("[upload_file] About to read file bytes...");
+            debug!(filename, "Processing upload file");
+            debug!("About to read file bytes");
 
             let data = match field.bytes().await {
                 Ok(data) => {
-                    println!("[upload_file] Successfully read {} bytes", data.len());
+                    debug!(size = data.len(), "Successfully read file bytes");
                     data
                 }
                 Err(e) => {
-                    println!("[upload_file] Error reading file bytes: {:?}", e);
-                    println!(
-                        "[upload_file] Error type: {}",
-                        std::any::type_name::<std::option::IntoIter<&()>>()
-                    );
+                    error!(error = %e, "Error reading file bytes");
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
@@ -377,12 +376,12 @@ pub async fn upload_file(
                 }
             };
 
-            println!("[upload_file] Successfully read {} bytes", data.len());
+            debug!(size = data.len(), "Successfully read bytes");
 
             // Parse filename to extract layer information
-            println!("[upload_file] Parsing filename...");
-            let layer_info = parse_filename(&filename).map_err(|e| {
-                println!("[upload_file] Error parsing filename: {}", e);
+            debug!("Parsing filename");
+            let layer_info = parse_filename(&config, &filename).map_err(|e| {
+                error!(filename, error = %e, "Error parsing filename");
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -391,10 +390,10 @@ pub async fn upload_file(
                     })),
                 )
             })?;
-            println!("[upload_file] Successfully parsed filename");
+            debug!("Successfully parsed filename");
 
             // Check for duplicate layer
-            println!("[upload_file] Checking for duplicate layers...");
+            debug!("Checking for duplicate layers");
             let duplicate_query = match &layer_info {
                 LayerInfo::Climate(info) => {
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
@@ -429,8 +428,8 @@ pub async fn upload_file(
                 if overwrite_duplicates {
                     // Delete existing layer from S3 and database
                     if let Some(ref filename) = existing.filename {
-                        let s3_key = storage::get_s3_key(filename);
-                        storage::delete_object(&s3_key).await.map_err(|e| {
+                        let s3_key = storage::get_s3_key(&config, filename);
+                        storage::delete_object(&config, &s3_key).await.map_err(|e| {
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 Json(serde_json::json!({
@@ -455,16 +454,13 @@ pub async fn upload_file(
                             )
                         })?;
 
-                    println!(
-                        "Deleted existing layer: {}",
-                        existing.filename.unwrap_or_else(|| "unknown".to_string())
+                    info!(
+                        layer = existing.filename.unwrap_or_else(|| "unknown".to_string()),
+                        "Deleted existing layer"
                     );
-                    println!(
-                        "[upload_file] Continuing with upload of duplicate file: {}",
-                        filename
-                    );
+                    debug!(filename, "Continuing with upload of duplicate file");
                 } else {
-                    println!("[upload_file] Rejecting duplicate file: {}", filename);
+                    warn!(filename, "Rejecting duplicate file");
                     return Err((
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({
@@ -475,9 +471,9 @@ pub async fn upload_file(
             }
 
             // Convert to COG
-            println!("[upload_file] Converting to COG format...");
+            debug!("Converting to COG format");
             let cog_bytes = convert_to_cog_in_memory(&data).map_err(|e| {
-                println!("[upload_file] Error converting to COG: {}", e);
+                error!(error = %e, "Error converting to COG");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -486,10 +482,7 @@ pub async fn upload_file(
                     })),
                 )
             })?;
-            println!(
-                "[upload_file] Successfully converted to COG, size: {} bytes",
-                cog_bytes.len()
-            );
+            info!(size = cog_bytes.len(), "Successfully converted to COG");
 
             // Calculate min/max values
             let (min_val, max_val) = get_min_max_of_raster(&cog_bytes).map_err(|e| {
@@ -515,7 +508,7 @@ pub async fn upload_file(
 
             // Check for invalid values
             if min_val.is_finite() && max_val.is_finite() && global_avg.is_finite() {
-                println!("Raster stats: min={}, max={}, global_average={}", min_val, max_val, global_avg);
+                debug!(min_val, max_val, global_avg, "Raster statistics calculated");
             } else {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -526,8 +519,8 @@ pub async fn upload_file(
             }
 
             // Upload to S3
-            let s3_key = storage::get_s3_key(&filename);
-            storage::upload_object(&s3_key, &cog_bytes)
+            let s3_key = storage::get_s3_key(&config, &filename);
+            storage::upload_object(&config, &s3_key, &cog_bytes)
                 .await
                 .map_err(|e| {
                     (
@@ -541,6 +534,7 @@ pub async fn upload_file(
 
             // Create layer record in database
             let layer_name = filename.strip_suffix(".tif").unwrap_or(&filename);
+            debug!(layer_name, "Creating layer record");
             let layer_record = match layer_info {
                 LayerInfo::Climate(info) => {
                     use crate::routes::layers::db::ActiveModel as LayerActiveModel;
@@ -580,23 +574,14 @@ pub async fn upload_file(
                 }
             };
 
-            println!(
-                "[upload_file] Attempting to save layer to database: {}",
-                filename
-            );
+            debug!(filename, "Attempting to save layer to database");
             let saved_layer = match layer_record.insert(&db).await {
                 Ok(layer) => {
-                    println!(
-                        "[upload_file] Successfully saved layer to database: {}",
-                        filename
-                    );
+                    info!(filename, "Successfully saved layer to database");
                     layer
                 }
                 Err(e) => {
-                    println!(
-                        "[upload_file] ERROR: Failed to save layer to database: {} - Error: {}",
-                        filename, e
-                    );
+                    error!(filename, error = %e, "Failed to save layer to database");
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
@@ -607,26 +592,17 @@ pub async fn upload_file(
                 }
             };
 
-            println!("Successfully uploaded layer: {}", filename);
+            info!(filename, "Successfully uploaded layer");
 
             // Return the saved layer as Layer model
-            println!(
-                "[upload_file] Creating response object for layer: {}",
-                filename
-            );
+            debug!(filename, "Creating response object for layer");
             let layer_response = match std::panic::catch_unwind(|| Layer::from(saved_layer)) {
                 Ok(response) => {
-                    println!(
-                        "[upload_file] Successfully created response object for layer: {}",
-                        filename
-                    );
+                    debug!(filename, "Successfully created response object for layer");
                     response
                 }
                 Err(panic_info) => {
-                    println!(
-                        "[upload_file] PANIC during Layer::from() conversion for layer: {} - {:?}",
-                        filename, panic_info
-                    );
+                    error!(filename, "PANIC during Layer::from() conversion for layer: {:?}", panic_info);
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
@@ -636,16 +612,12 @@ pub async fn upload_file(
                     ));
                 }
             };
-            println!(
-                "[upload_file] Response object created, preparing to send for layer: {}",
-                filename
-            );
-            println!("[upload_file] Sending response for layer: {}", filename);
+            debug!(filename, "Response object created, sending response");
             return Ok((StatusCode::OK, Json(layer_response)));
         }
     }
 
-    println!("[upload_file] No file found in multipart data, returning error");
+    error!("No file found in multipart data");
     Err((
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({
@@ -696,6 +668,7 @@ async fn get_layer_data(
     params: DownloadQueryParams,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let config = crate::config::Config::from_env();
 
     // Verify layer exists in database
     use crate::routes::layers::db::{Column, Entity as LayerEntity};
@@ -728,7 +701,7 @@ async fn get_layer_data(
     // Fetch the file from S3
     let data = if let Some(range) = range_header {
         // Parse range header and fetch only requested bytes from S3
-        storage::get_object_range(&filename, range.to_str().unwrap_or("")).await.map_err(|e| {
+        storage::get_object_range(&config, &filename, range.to_str().unwrap_or("")).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -739,7 +712,7 @@ async fn get_layer_data(
         })?
     } else {
         // Fetch entire file
-        storage::get_object(&filename).await.map_err(|e| {
+        storage::get_object(&config, &filename).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({

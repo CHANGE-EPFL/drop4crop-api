@@ -1,6 +1,7 @@
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::env;
+use tracing::{info, debug};
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
@@ -172,7 +173,7 @@ pub mod test_helpers {
         // Each connection to :memory: creates a separate database instance
         let database_url = "sqlite::memory:";
 
-        println!("Creating new in-memory SQLite database: {database_url}");
+        debug!("Creating new in-memory SQLite database: {database_url}");
 
         let db = Database::connect(database_url)
             .await
@@ -193,7 +194,7 @@ pub mod test_helpers {
             .await
             .expect("Failed to run database migrations");
 
-        println!("SQLite test database ready with all tables created");
+        info!("SQLite test database ready with all tables created");
         db
     }
 

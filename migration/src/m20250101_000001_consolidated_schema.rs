@@ -1,5 +1,6 @@
 use sea_orm_migration::prelude::*;
 use serde_json::Value;
+use tracing::{info, warn, error};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -32,7 +33,7 @@ impl MigrationTrait for Migration {
         };
 
         if alembic_exists {
-            println!("Alembic version table detected. Skipping schema creation and removing alembic_version table...");
+            info!("Alembic version table detected. Skipping schema creation and removing alembic_version table");
 
             // Drop the alembic_version table to complete migration to Sea-ORM
             manager
@@ -44,11 +45,11 @@ impl MigrationTrait for Migration {
                 )
                 .await?;
 
-            println!("Successfully migrated from Alembic to Sea-ORM migrations.");
+            info!("Successfully migrated from Alembic to Sea-ORM migrations");
             return Ok(());
         }
 
-        println!("No Alembic version table found. Running full schema migration...");
+        info!("No Alembic version table found. Running full schema migration");
 
         // Enable PostGIS extensions for PostgreSQL
         if manager.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
@@ -398,7 +399,7 @@ impl MigrationTrait for Migration {
                                                         {
                                                             Ok(_) => country_count += 1,
                                                             Err(e) => {
-                                                                println!("Warning: Failed to insert country {}: {:?}", name, e);
+                                                                warn!(country = %name, error = ?e, "Failed to insert country");
                                                             }
                                                         }
                                                     }
@@ -406,25 +407,25 @@ impl MigrationTrait for Migration {
                                             }
                                         }
                                     }
-                                    println!(
-                                        "Successfully loaded {} countries from GeoJSON",
-                                        country_count
+                                    info!(
+                                        count = country_count,
+                                        "Successfully loaded countries from GeoJSON"
                                     );
                                 } else {
-                                    println!("No features found in GeoJSON file");
+                                    warn!("No features found in GeoJSON file");
                                 }
                             }
                             Err(_) => {
-                                println!("Failed to parse GeoJSON: invalid format");
+                                error!("Failed to parse GeoJSON: invalid format");
                             }
                         }
                     }
                     Err(e) => {
-                        println!("Failed to read GeoJSON file: {:?}", e);
+                        error!(error = ?e, "Failed to read GeoJSON file");
                     }
                 }
             } else {
-                println!("GeoJSON file not found at migration/resources/ne_50m_admin_0_countries.geojson");
+                error!("GeoJSON file not found at migration/resources/ne_50m_admin_0_countries.geojson");
             }
         }
 

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use crudcrate::{CRUDResource, EntityToModels};
 use sea_orm::entity::prelude::*;
+use tracing::debug;
 
 #[derive(Clone, Debug, DeriveEntityModel, EntityToModels)]
 #[sea_orm(table_name = "layer")]
@@ -89,11 +90,12 @@ pub async fn delete_many(
     db: &sea_orm::DatabaseConnection,
     ids: Vec<Uuid>,
 ) -> Result<Vec<Uuid>, sea_orm::DbErr> {
-    println!("Called delete_many with IDs: {:?}", ids);
+    debug!(ids = ?ids, "Called delete_many");
+    let config = crate::config::Config::from_env();
     let mut deleted_ids = Vec::new();
 
     for id in &ids {
-        let _ = crate::routes::tiles::storage::delete_s3_object_by_db_id(db, id).await;
+        let _ = crate::routes::tiles::storage::delete_s3_object_by_db_id(&config, db, id).await;
 
         if Entity::delete_by_id(*id).exec(db).await.is_ok() {
             deleted_ids.push(*id);
@@ -203,12 +205,13 @@ pub async fn get_one_with_metadata(
 async fn fetch_cache_status(layer_name: &str) -> anyhow::Result<CacheStatus> {
     use crate::routes::tiles::cache;
 
-    let redis_client = cache::get_redis_client();
+    let config = crate::config::Config::from_env();
+    let redis_client = cache::get_redis_client(&config);
     let mut con = redis_client.get_multiplexed_async_connection().await?;
 
     // Try to find the cache key - check with and without .tif extension
-    let cache_key = cache::build_cache_key(layer_name);
-    let cache_key_tif = cache::build_cache_key(&format!("{}.tif", layer_name));
+    let cache_key = cache::build_cache_key(&config, layer_name);
+    let cache_key_tif = cache::build_cache_key(&config, &format!("{}.tif", layer_name));
 
     // Try to get TTL for the cache key
     let mut ttl_seconds: i64 = redis::cmd("TTL")

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 
 use crate::config::Config;
+use tracing::{info, debug};
 
 /// Represents the parsed components of a climate layer filename
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +34,7 @@ pub enum LayerInfo {
 }
 
 /// Parses a filename to extract layer information
-pub fn parse_filename(filename: &str) -> Result<LayerInfo> {
+pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
     // Remove file extension and convert to lowercase
     let filename_lower = filename.to_lowercase();
     let name_without_ext = filename_lower
@@ -41,8 +42,6 @@ pub fn parse_filename(filename: &str) -> Result<LayerInfo> {
         .ok_or_else(|| anyhow!("Filename must end with .tif"))?;
 
     let parts: Vec<&str> = name_without_ext.split('_').collect();
-
-    let config = Config::from_env();
 
     match parts.len() {
         6 => {
@@ -103,7 +102,7 @@ pub fn parse_filename(filename: &str) -> Result<LayerInfo> {
 
 /// Converts a GeoTIFF to Cloud Optimized GeoTIFF format in memory
 pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
-    println!("Converting to COG format using GDAL");
+    debug!("Converting to COG format using GDAL");
 
     // Use temporary files since GDAL Rust bindings don't expose VSI write/read functions
     let temp_dir = std::env::temp_dir();
@@ -146,13 +145,13 @@ pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
     let _ = fs::remove_file(&input_path);
     let _ = fs::remove_file(&output_path);
 
-    println!("COG conversion completed successfully");
+    info!("COG conversion completed successfully");
     Ok(output_bytes)
 }
 
 /// Calculates min and max values of a raster using GDAL
 pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
-    println!("Calculating raster min/max values using GDAL");
+    debug!("Calculating raster min/max values using GDAL");
 
     // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
     let temp_dir = std::env::temp_dir();
@@ -173,9 +172,10 @@ pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
     // Clean up temporary file
     let _ = fs::remove_file(&input_path);
 
-    println!(
-        "Min/max calculation completed: min={}, max={}",
-        stats.min, stats.max
+    debug!(
+        min = stats.min,
+        max = stats.max,
+        "Min/max calculation completed"
     );
 
     Ok((stats.min, stats.max))
@@ -183,7 +183,7 @@ pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
 
 /// Calculates the global average (mean) value of a raster using GDAL
 pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
-    println!("Calculating raster global average using GDAL");
+    debug!("Calculating raster global average using GDAL");
 
     // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
     let temp_dir = std::env::temp_dir();
@@ -208,7 +208,7 @@ pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
     // Clean up temporary file
     let _ = fs::remove_file(&input_path);
 
-    println!("Global average calculation completed: mean={}", mean);
+    debug!(mean, "Global average calculation completed");
 
     Ok(mean)
 }
@@ -219,7 +219,8 @@ mod tests {
 
     #[test]
     fn test_parse_climate_filename() {
-        let result = parse_filename("wheat_lpjml_gfdl-esm4_historical_yield_2020.tif").unwrap();
+        let config = Config::for_tests();
+        let result = parse_filename(&config, "wheat_lpjml_gfdl-esm4_historical_yield_2020.tif").unwrap();
 
         match result {
             LayerInfo::Climate(info) => {
@@ -236,7 +237,8 @@ mod tests {
 
     #[test]
     fn test_parse_crop_filename() {
-        let result = parse_filename("soy_mirca_area_total.tif").unwrap();
+        let config = Config::for_tests();
+        let result = parse_filename(&config, "soy_mirca_area_total.tif").unwrap();
 
         match result {
             LayerInfo::Crop(info) => {
@@ -249,7 +251,8 @@ mod tests {
 
     #[test]
     fn test_parse_percentage_filename() {
-        let result = parse_filename("rice_lpjml_gfdl-esm4_historical_yield_perc_2020.tif").unwrap();
+        let config = Config::for_tests();
+        let result = parse_filename(&config, "rice_lpjml_gfdl-esm4_historical_yield_perc_2020.tif").unwrap();
 
         match result {
             LayerInfo::Climate(info) => {
@@ -263,7 +266,8 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_filename() {
-        let result = parse_filename("invalid.txt");
+        let config = Config::for_tests();
+        let result = parse_filename(&config, "invalid.txt");
         assert!(result.is_err());
     }
 }

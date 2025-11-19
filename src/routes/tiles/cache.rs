@@ -53,6 +53,22 @@ pub async fn redis_get(
     Ok(result)
 }
 
+/// Gets a value from Redis and resets its TTL atomically using GETEX.
+/// This ensures frequently accessed layers stay cached longer.
+pub async fn redis_get_and_refresh_ttl(
+    con: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+    ttl_seconds: u64,
+) -> Result<Option<Vec<u8>>> {
+    let result: Option<Vec<u8>> = redis::cmd("GETEX")
+        .arg(key)
+        .arg("EX")
+        .arg(ttl_seconds)
+        .query_async(con)
+        .await?;
+    Ok(result)
+}
+
 /// Builds a statistics key for tracking layer access by type.
 /// Format: {app}-{deploy}/stats:{YYYY-MM-DD}:{layer_id}:{type}
 pub fn build_stats_key(layer_id: &str, stat_type: &str) -> String {

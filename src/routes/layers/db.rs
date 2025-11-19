@@ -102,3 +102,202 @@ pub async fn delete_many(
 
     Ok(deleted_ids)
 }
+
+// Extended layer response with cache and stats metadata
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct LayerWithMetadata {
+    // Layer fields
+    pub id: Uuid,
+    pub layer_name: Option<String>,
+    pub crop: Option<String>,
+    pub water_model: Option<String>,
+    pub climate_model: Option<String>,
+    pub scenario: Option<String>,
+    pub variable: Option<String>,
+    pub year: Option<i32>,
+    pub enabled: bool,
+    pub uploaded_at: DateTime<Utc>,
+    pub last_updated: DateTime<Utc>,
+    pub global_average: Option<f64>,
+    pub filename: Option<String>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    pub style_id: Option<Uuid>,
+    pub is_crop_specific: bool,
+    // Additional metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_status: Option<CacheStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<LayerStats>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CacheStatus {
+    pub cached: bool,
+    pub cache_key: Option<String>,
+    pub size_mb: Option<f64>,
+    pub ttl_hours: Option<f64>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct LayerStats {
+    pub total_requests: i32,
+    pub xyz_tile_count: i32,
+    pub cog_download_count: i32,
+    pub pixel_query_count: i32,
+    pub stac_request_count: i32,
+    pub other_request_count: i32,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+}
+
+/// Custom get_one function that includes cache and stats metadata
+pub async fn get_one_with_metadata(
+    db: &sea_orm::DatabaseConnection,
+    id: Uuid,
+) -> Result<LayerWithMetadata, sea_orm::DbErr> {
+    use sea_orm::{EntityTrait, ModelTrait};
+
+    // Fetch the layer
+    let layer = Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(sea_orm::DbErr::RecordNotFound(
+            "Layer not found".to_string(),
+        ))?;
+
+    // Fetch cache status from Redis
+    let cache_status = if let Some(ref layer_name) = layer.layer_name {
+        fetch_cache_status(layer_name).await.ok()
+    } else {
+        None
+    };
+
+    // Fetch stats from database
+    let stats = fetch_layer_stats(db, id).await.ok().flatten();
+
+    // Build response
+    Ok(LayerWithMetadata {
+        id: layer.id,
+        layer_name: layer.layer_name,
+        crop: layer.crop,
+        water_model: layer.water_model,
+        climate_model: layer.climate_model,
+        scenario: layer.scenario,
+        variable: layer.variable,
+        year: layer.year,
+        enabled: layer.enabled,
+        uploaded_at: layer.uploaded_at,
+        last_updated: layer.last_updated,
+        global_average: layer.global_average,
+        filename: layer.filename,
+        min_value: layer.min_value,
+        max_value: layer.max_value,
+        style_id: layer.style_id,
+        is_crop_specific: layer.is_crop_specific,
+        cache_status,
+        stats,
+    })
+}
+
+/// Helper function to fetch cache status from Redis
+async fn fetch_cache_status(layer_name: &str) -> anyhow::Result<CacheStatus> {
+    use crate::routes::tiles::cache;
+
+    let redis_client = cache::get_redis_client();
+    let mut con = redis_client.get_multiplexed_async_connection().await?;
+
+    // Try to find the cache key - check with and without .tif extension
+    let cache_key = cache::build_cache_key(layer_name);
+    let cache_key_tif = cache::build_cache_key(&format!("{}.tif", layer_name));
+
+    // Try to get TTL for the cache key
+    let mut ttl_seconds: i64 = redis::cmd("TTL")
+        .arg(&cache_key)
+        .query_async(&mut con)
+        .await?;
+
+    let mut actual_key = cache_key.clone();
+
+    // If not found, try with .tif extension
+    if ttl_seconds == -2 {
+        ttl_seconds = redis::cmd("TTL")
+            .arg(&cache_key_tif)
+            .query_async(&mut con)
+            .await?;
+        actual_key = cache_key_tif;
+    }
+
+    if ttl_seconds >= 0 {
+        // Cache exists, get size
+        let size_bytes: Option<usize> = redis::cmd("STRLEN")
+            .arg(&actual_key)
+            .query_async(&mut con)
+            .await
+            .ok();
+
+        Ok(CacheStatus {
+            cached: true,
+            cache_key: Some(actual_key),
+            size_mb: size_bytes.map(|bytes| bytes as f64 / (1024.0 * 1024.0)),
+            ttl_hours: Some(ttl_seconds as f64 / 3600.0),
+        })
+    } else {
+        // Cache doesn't exist
+        Ok(CacheStatus {
+            cached: false,
+            cache_key: None,
+            size_mb: None,
+            ttl_hours: None,
+        })
+    }
+}
+
+/// Helper function to fetch stats from database
+async fn fetch_layer_stats(
+    db: &sea_orm::DatabaseConnection,
+    layer_id: Uuid,
+) -> anyhow::Result<Option<LayerStats>> {
+    use crate::routes::admin::db::layer_statistics;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    // Get all stats for this layer and aggregate
+    let stats = layer_statistics::Entity::find()
+        .filter(layer_statistics::Column::LayerId.eq(layer_id))
+        .all(db)
+        .await?;
+
+    if stats.is_empty() {
+        return Ok(None);
+    }
+
+    // Aggregate all stats
+    let mut total_xyz = 0;
+    let mut total_cog = 0;
+    let mut total_pixel = 0;
+    let mut total_stac = 0;
+    let mut total_other = 0;
+    let mut last_accessed: Option<DateTime<Utc>> = None;
+
+    for stat in stats {
+        total_xyz += stat.xyz_tile_count;
+        total_cog += stat.cog_download_count;
+        total_pixel += stat.pixel_query_count;
+        total_stac += stat.stac_request_count;
+        total_other += stat.other_request_count;
+
+        // Track most recent access
+        if last_accessed.is_none() || stat.last_accessed_at > last_accessed.unwrap() {
+            last_accessed = Some(stat.last_accessed_at);
+        }
+    }
+
+    Ok(Some(LayerStats {
+        total_requests: total_xyz + total_cog + total_pixel + total_stac + total_other,
+        xyz_tile_count: total_xyz,
+        cog_download_count: total_cog,
+        pixel_query_count: total_pixel,
+        stac_request_count: total_stac,
+        other_request_count: total_other,
+        last_accessed_at: last_accessed,
+    }))
+}

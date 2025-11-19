@@ -93,6 +93,12 @@ struct StatsSummary {
     most_accessed_layer: Option<LayerAccessInfo>,
     active_layers_24h: i64,
     total_layers: i64,
+    // Breakdown by request type for today
+    xyz_tile_count_today: i64,
+    cog_download_count_today: i64,
+    pixel_query_count_today: i64,
+    stac_request_count_today: i64,
+    other_request_count_today: i64,
 }
 
 #[derive(Serialize)]
@@ -120,6 +126,7 @@ struct LayerStatDetail {
 struct CacheInfo {
     redis_connected: bool,
     cache_size_mb: f64,
+    max_memory_mb: Option<f64>,
     cached_layers_count: usize,
     current_ttl_seconds: u64,
     last_sync_time: Option<String>,
@@ -128,6 +135,7 @@ struct CacheInfo {
 #[derive(Serialize)]
 struct CachedLayer {
     layer_name: String,
+    layer_id: Option<uuid::Uuid>,
     cache_key: String,
     size_bytes: Option<usize>,
     size_mb: Option<f64>,
@@ -181,6 +189,13 @@ async fn get_stats_summary(
                 + s.other_request_count as i64
         })
         .sum();
+
+    // Breakdown by request type for today
+    let xyz_tile_count_today: i64 = today_stats.iter().map(|s| s.xyz_tile_count as i64).sum();
+    let cog_download_count_today: i64 = today_stats.iter().map(|s| s.cog_download_count as i64).sum();
+    let pixel_query_count_today: i64 = today_stats.iter().map(|s| s.pixel_query_count as i64).sum();
+    let stac_request_count_today: i64 = today_stats.iter().map(|s| s.stac_request_count as i64).sum();
+    let other_request_count_today: i64 = today_stats.iter().map(|s| s.other_request_count as i64).sum();
 
     // Total requests this week
     let week_stats = layer_statistics::Entity::find()
@@ -249,6 +264,11 @@ async fn get_stats_summary(
         most_accessed_layer,
         active_layers_24h,
         total_layers,
+        xyz_tile_count_today,
+        cog_download_count_today,
+        pixel_query_count_today,
+        stac_request_count_today,
+        other_request_count_today,
     }))
 }
 
@@ -514,6 +534,20 @@ async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
                 / 1024.0
                 / 1024.0;
 
+            // Parse maxmemory (0 means unlimited)
+            let max_memory_bytes = info
+                .lines()
+                .find(|line| line.starts_with("maxmemory:"))
+                .and_then(|line| line.split(':').nth(1))
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+
+            let max_memory_mb = if max_memory_bytes > 0.0 {
+                Some(max_memory_bytes / 1024.0 / 1024.0)
+            } else {
+                None
+            };
+
             // Count cached layers (exclude stats and internal keys)
             let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
             let all_keys: Vec<String> = scan_keys(&mut con, &cache_pattern).await.unwrap_or_default();
@@ -528,6 +562,7 @@ async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
             Ok(Json(CacheInfo {
                 redis_connected: true,
                 cache_size_mb,
+                max_memory_mb,
                 cached_layers_count,
                 current_ttl_seconds: config.tile_cache_ttl,
                 last_sync_time,
@@ -536,6 +571,7 @@ async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
         Err(_) => Ok(Json(CacheInfo {
             redis_connected: false,
             cache_size_mb: 0.0,
+            max_memory_mb: None,
             cached_layers_count: 0,
             current_ttl_seconds: config.tile_cache_ttl,
             last_sync_time: None,
@@ -544,7 +580,9 @@ async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
 }
 
 /// GET /api/admin/cache/keys - List all cached layers
-async fn get_cache_keys() -> Result<Json<Vec<CachedLayer>>, StatusCode> {
+async fn get_cache_keys(
+    State(db): State<DatabaseConnection>,
+) -> Result<Json<Vec<CachedLayer>>, StatusCode> {
     let config = crate::config::Config::from_env();
     let redis_client = crate::routes::tiles::cache::get_redis_client();
 
@@ -595,8 +633,47 @@ async fn get_cache_keys() -> Result<Json<Vec<CachedLayer>>, StatusCode> {
 
         let size_mb = size_bytes.map(|bytes| bytes as f64 / (1024.0 * 1024.0));
 
+        // Look up layer_id from database by layer_name
+        use crate::routes::layers::db as layer;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let layer_id = layer::Entity::find()
+            .filter(layer::Column::LayerName.eq(&layer_name))
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+            .map(|l| l.id);
+
+        // If not found, try with .tif extension
+        let layer_id = if layer_id.is_none() && !layer_name.ends_with(".tif") {
+            layer::Entity::find()
+                .filter(layer::Column::LayerName.eq(&format!("{}.tif", layer_name)))
+                .one(&db)
+                .await
+                .ok()
+                .flatten()
+                .map(|l| l.id)
+        } else {
+            layer_id
+        };
+
+        // If still not found, try without .tif extension
+        let layer_id = if layer_id.is_none() && layer_name.ends_with(".tif") {
+            layer::Entity::find()
+                .filter(layer::Column::LayerName.eq(&layer_name.replace(".tif", "")))
+                .one(&db)
+                .await
+                .ok()
+                .flatten()
+                .map(|l| l.id)
+        } else {
+            layer_id
+        };
+
         cached_layers.push(CachedLayer {
             layer_name,
+            layer_id,
             cache_key: key,
             size_bytes,
             size_mb,

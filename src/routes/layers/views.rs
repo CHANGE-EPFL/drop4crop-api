@@ -26,7 +26,6 @@ use std::{collections::HashMap, ffi::CString};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
-
 // // Custom response type for /map endpoint that includes properly formatted style data for legend
 // #[derive(Serialize, ToSchema)]
 // pub struct MapLayerResponse {
@@ -57,17 +56,29 @@ pub struct UploadQueryParams {
 }
 
 pub fn router(state: &AppState) -> OpenApiRouter {
+    use axum::routing;
+
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_groups))
         .routes(routes!(get_pixel_value))
         .with_state(state.db.clone());
 
+    // Get the base crudcrate router
     let mut protected_router = Layer::router(&state.db.clone());
+
+    // Add custom routes
     let protected_custom_routes = OpenApiRouter::new()
         .routes(routes!(upload_file))
         .with_state(state.db.clone());
 
-    protected_router = protected_router.merge(protected_custom_routes);
+    // Add our custom GET /{id}/details endpoint for fetching layer with metadata
+    let metadata_route = OpenApiRouter::new()
+        .routes(routes!(get_layer_details))
+        .with_state(state.db.clone());
+
+    protected_router = protected_router
+        .merge(protected_custom_routes)
+        .merge(metadata_route);
 
     if let Some(instance) = state.keycloak_auth_instance.clone() {
         protected_router = protected_router.layer(
@@ -95,6 +106,31 @@ pub fn cog_router(db: &DatabaseConnection) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(get_cog_data))
         .with_state(db.clone())
+}
+
+/// GET /api/layers/{id}/details - Get layer with cache status and stats
+#[utoipa::path(
+    get,
+    path = "/{id}/details",
+    responses(
+        (status = 200, description = "Layer found with metadata", body = super::db::LayerWithMetadata),
+        (status = 404, description = "Layer not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("id" = Uuid, Path, description = "Layer ID")
+    ),
+    summary = "Get layer details with cache and stats",
+    description = "Returns layer details along with cache status and statistics metadata"
+)]
+pub async fn get_layer_details(
+    State(db): State<DatabaseConnection>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<super::db::LayerWithMetadata>, StatusCode> {
+    super::db::get_one_with_metadata(&db, id)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[utoipa::path(

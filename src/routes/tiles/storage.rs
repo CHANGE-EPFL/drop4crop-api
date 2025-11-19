@@ -46,12 +46,14 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Create a key to indicate that a download is in progress.
     let downloading_key = super::cache::build_downloading_key(object_id);
 
+    let config = crate::config::Config::from_env();
     let client = super::cache::get_redis_client();
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
 
-    // Check if the object is already in the cache.
-    if let Some(data) = super::cache::redis_get(&mut con, &cache_key).await? {
-        // println!("Cache hit for {}", cache_key);
+    // Check if the object is already in the cache and reset its TTL on access.
+    // This ensures frequently accessed layers stay cached longer.
+    if let Some(data) = super::cache::redis_get_and_refresh_ttl(&mut con, &cache_key, config.tile_cache_ttl).await? {
+        // println!("Cache hit for {} (TTL reset to {} seconds)", cache_key, config.tile_cache_ttl);
         return Ok(data);
     }
 
@@ -80,8 +82,8 @@ pub async fn get_object(object_id: &str) -> Result<Vec<u8>> {
     // Loop until the file appears in the cache.
     loop {
         sleep(Duration::from_secs(1)).await;
-        if let Some(data) = super::cache::redis_get(&mut con, &cache_key).await? {
-            println!("Cache filled for {}", cache_key);
+        if let Some(data) = super::cache::redis_get_and_refresh_ttl(&mut con, &cache_key, config.tile_cache_ttl).await? {
+            println!("Cache filled for {} (TTL set to {} seconds)", cache_key, config.tile_cache_ttl);
             return Ok(data);
         }
 

@@ -17,19 +17,19 @@ pub struct Model {
     #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
     pub id: Uuid,
     #[sea_orm(unique)]
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub layer_name: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub crop: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub water_model: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub climate_model: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub scenario: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub variable: Option<String>,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, fulltext)]
     pub year: Option<i32>,
     #[crudcrate(filterable, sortable)]
     pub last_updated: DateTime<Utc>,
@@ -89,7 +89,7 @@ impl ActiveModelBehavior for ActiveModel {}
 pub async fn delete_many(
     db: &sea_orm::DatabaseConnection,
     ids: Vec<Uuid>,
-) -> Result<Vec<Uuid>, sea_orm::DbErr> {
+) -> Result<Vec<Uuid>, crudcrate::ApiError> {
     debug!(ids = ?ids, "Called delete_many");
     let config = crate::config::Config::from_env();
     let mut deleted_ids = Vec::new();

@@ -1341,9 +1341,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crudcrate"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10b883b865048bb0d650066d56303520133395e9b4475ae2411b03201157740c"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1353,15 +1351,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "tracing",
  "utoipa",
  "uuid",
 ]
 
 [[package]]
 name = "crudcrate-derive"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0017e6cdcaf5451a44f8b462381e3f2395a6e7b22294e618cec4d44faa7118a"
+version = "0.7.0"
 dependencies = [
  "convert_case",
  "heck 0.5.0",

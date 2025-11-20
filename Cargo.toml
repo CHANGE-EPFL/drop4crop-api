@@ -33,6 +33,7 @@ aws-config = "1.5.5"
 aws-sdk-s3 = "1.37.0"
 sea-orm = { version = "1.1.17", features = [
     "sqlx-postgres",
+    "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
     "with-uuid",
@@ -62,3 +63,7 @@ reqwest = { version = "0.12.24", features = ["json"] }
 tempfile = "3.23.0"
 stac = "0.13.0"
 stac-api = "0.8.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }

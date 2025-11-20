@@ -1,7 +1,7 @@
-mod admin;
+pub mod admin;
 mod countries;
-mod layers;
-mod styles;
+pub mod layers;
+pub mod styles;
 mod tiles;
 pub mod stats_sync;
 

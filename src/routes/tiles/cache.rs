@@ -1,6 +1,6 @@
+use crate::config::Config;
 use anyhow::Result;
 use redis;
-use crate::config::Config;
 use tracing::error;
 
 /// Builds the cache key based on the app configuration and object ID.
@@ -43,18 +43,9 @@ pub async fn remove_downloading_state_raw(config: &Config, key: &str) -> Result<
     Ok(())
 }
 
-/// Helper function to get a value from Redis by key.
-pub async fn redis_get(
-    con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
-) -> Result<Option<Vec<u8>>> {
-    let result: Option<Vec<u8>> = redis::cmd("GET").arg(key).query_async(con).await?;
-    Ok(result)
-}
-
 /// Gets a value from Redis and resets its TTL atomically using GETEX.
 /// This ensures frequently accessed layers stay cached longer.
-pub async fn redis_get_and_refresh_ttl(
+pub async fn redis_get(
     con: &mut redis::aio::MultiplexedConnection,
     key: &str,
     ttl_seconds: u64,
@@ -86,13 +77,12 @@ pub async fn increment_stats(config: Config, layer_id: String, stat_type: String
         match async {
             let client = get_redis_client(&config);
             let mut con = client.get_multiplexed_async_connection().await?;
-            let _: i64 = redis::cmd("INCR")
-                .arg(&key)
-                .query_async(&mut con)
-                .await?;
+            let _: i64 = redis::cmd("INCR").arg(&key).query_async(&mut con).await?;
             Ok::<(), anyhow::Error>(())
-        }.await {
-            Ok(_) => {},
+        }
+        .await
+        {
+            Ok(_) => {}
             Err(e) => {
                 error!(key, error = %e, "Failed to increment stats");
             }

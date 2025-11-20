@@ -45,6 +45,11 @@ need_stdout = false
 command = ["cargo", "test"]
 need_stdout = true
 
+# Run integration tests with watch (sequential to avoid database conflicts)
+[jobs.test-integration]
+command = ["cargo", "test", "--test", "integration_tests", "--", "--test-threads=1"]
+need_stdout = true
+
 [jobs.nextest]
 command = [
     "cargo", "nextest", "run",

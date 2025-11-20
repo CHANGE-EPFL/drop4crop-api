@@ -2,8 +2,8 @@ use anyhow::Result;
 use redis::AsyncCommands;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
-use tokio::time::{interval, Duration};
-use tracing::{info, error};
+use tokio::time::{Duration, interval};
+use tracing::{error, info};
 
 /// Spawns a background task that syncs statistics from Redis to PostgreSQL every 5 minutes.
 /// Uses distributed locking to ensure only one instance runs the sync at a time.
@@ -18,10 +18,7 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
             match sync_stats_to_db(&db, &instance_id).await {
                 Ok(synced_count) => {
                     if synced_count > 0 {
-                        info!(
-                            synced_count,
-                            "Synced statistics to PostgreSQL"
-                        );
+                        info!(synced_count, "Synced statistics to PostgreSQL");
                     }
                 }
                 Err(e) => {
@@ -59,16 +56,20 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
     }
 
     // Check if it's been at least 5 minutes since last sync
-    let last_sync_key = format!("{}-{}/stats:last_sync_time", config.app_name, config.deployment);
+    let last_sync_key = format!(
+        "{}-{}/stats:last_sync_time",
+        config.app_name, config.deployment
+    );
     let last_sync: Option<String> = con.get(&last_sync_key).await?;
 
-    if let Some(last_sync_str) = last_sync {
-        if let Ok(last_sync_time) = chrono::DateTime::parse_from_rfc3339(&last_sync_str) {
-            let elapsed = chrono::Utc::now().signed_duration_since(last_sync_time.with_timezone(&chrono::Utc));
-            if elapsed < chrono::Duration::minutes(5) {
-                // Too soon, skip this sync
-                return Ok(0);
-            }
+    if let Some(last_sync_str) = last_sync
+        && let Ok(last_sync_time) = chrono::DateTime::parse_from_rfc3339(&last_sync_str)
+    {
+        let elapsed =
+            chrono::Utc::now().signed_duration_since(last_sync_time.with_timezone(&chrono::Utc));
+        if elapsed < chrono::Duration::minutes(5) {
+            // Too soon, skip this sync
+            return Ok(0);
         }
     }
 
@@ -110,10 +111,7 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
 
     // Delete processed keys
     if !keys.is_empty() {
-        let _: () = redis::cmd("DEL")
-            .arg(&keys)
-            .query_async(&mut con)
-            .await?;
+        let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut con).await?;
     }
 
     // Update last sync time
@@ -125,7 +123,10 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
 }
 
 /// Scans Redis for keys matching the pattern.
-async fn scan_keys(con: &mut redis::aio::MultiplexedConnection, pattern: &str) -> Result<Vec<String>> {
+async fn scan_keys(
+    con: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
+) -> Result<Vec<String>> {
     let mut keys = Vec::new();
     let mut cursor = 0u64;
 
@@ -158,7 +159,11 @@ fn parse_stats_key(key: &str, config: &crate::config::Config) -> Option<(String,
     let parts: Vec<&str> = rest.splitn(3, ':').collect();
 
     if parts.len() == 3 {
-        Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
+        Some((
+            parts[0].to_string(),
+            parts[1].to_string(),
+            parts[2].to_string(),
+        ))
     } else {
         None
     }
@@ -182,10 +187,7 @@ async fn write_stats_to_db(
             .await?;
 
         if layer_record.is_none() {
-            error!(
-                layer_name,
-                "Layer not found during stats sync"
-            );
+            error!(layer_name, "Layer not found during stats sync");
             continue;
         }
 
@@ -204,11 +206,16 @@ async fn write_stats_to_db(
         if let Some(existing_record) = existing {
             // Update existing record
             let mut active_model: stats_entity::ActiveModel = existing_record.into();
-            active_model.xyz_tile_count = Set(active_model.xyz_tile_count.unwrap() + stats.xyz_tile_count);
-            active_model.cog_download_count = Set(active_model.cog_download_count.unwrap() + stats.cog_download_count);
-            active_model.pixel_query_count = Set(active_model.pixel_query_count.unwrap() + stats.pixel_query_count);
-            active_model.stac_request_count = Set(active_model.stac_request_count.unwrap() + stats.stac_request_count);
-            active_model.other_request_count = Set(active_model.other_request_count.unwrap() + stats.other_request_count);
+            active_model.xyz_tile_count =
+                Set(active_model.xyz_tile_count.unwrap() + stats.xyz_tile_count);
+            active_model.cog_download_count =
+                Set(active_model.cog_download_count.unwrap() + stats.cog_download_count);
+            active_model.pixel_query_count =
+                Set(active_model.pixel_query_count.unwrap() + stats.pixel_query_count);
+            active_model.stac_request_count =
+                Set(active_model.stac_request_count.unwrap() + stats.stac_request_count);
+            active_model.other_request_count =
+                Set(active_model.other_request_count.unwrap() + stats.other_request_count);
             active_model.last_accessed_at = Set(chrono::Utc::now());
 
             stats_entity::Entity::update(active_model).exec(db).await?;

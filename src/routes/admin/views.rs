@@ -333,17 +333,15 @@ async fn get_layer_stats(
         }
 
         // Apply date filters
-        if let Some(ref start) = f.start_date {
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d") {
+        if let Some(ref start) = f.start_date
+            && let Ok(date) = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d") {
                 query = query.filter(layer_statistics::Column::StatDate.gte(date));
             }
-        }
 
-        if let Some(ref end) = f.end_date {
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d") {
+        if let Some(ref end) = f.end_date
+            && let Ok(date) = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d") {
                 query = query.filter(layer_statistics::Column::StatDate.lte(date));
             }
-        }
     } else {
         debug!("No filter provided");
     }
@@ -658,7 +656,7 @@ async fn get_cache_keys(
         // If not found, try with .tif extension
         let layer_id = if layer_id.is_none() && !layer_name.ends_with(".tif") {
             layer::Entity::find()
-                .filter(layer::Column::LayerName.eq(&format!("{}.tif", layer_name)))
+                .filter(layer::Column::LayerName.eq(format!("{}.tif", layer_name)))
                 .one(&db)
                 .await
                 .ok()
@@ -671,7 +669,7 @@ async fn get_cache_keys(
         // If still not found, try without .tif extension
         let layer_id = if layer_id.is_none() && layer_name.ends_with(".tif") {
             layer::Entity::find()
-                .filter(layer::Column::LayerName.eq(&layer_name.replace(".tif", "")))
+                .filter(layer::Column::LayerName.eq(layer_name.replace(".tif", "")))
                 .one(&db)
                 .await
                 .ok()

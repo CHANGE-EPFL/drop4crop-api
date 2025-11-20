@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use crudcrate::{CRUDResource, EntityToModels};
+use sea_orm::EntityTrait;
 use sea_orm::entity::prelude::*;
 use tracing::debug;
 
@@ -157,8 +158,6 @@ pub async fn get_one_with_metadata(
     db: &sea_orm::DatabaseConnection,
     id: Uuid,
 ) -> Result<LayerWithMetadata, sea_orm::DbErr> {
-    use sea_orm::{EntityTrait, ModelTrait};
-
     // Fetch the layer
     let layer = Entity::find_by_id(id)
         .one(db)

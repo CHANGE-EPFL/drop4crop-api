@@ -1,7 +1,7 @@
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::env;
-use tracing::{info, debug};
+
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
@@ -160,6 +160,7 @@ pub mod test_helpers {
     use axum::Router;
     use migration::{Migrator, MigratorTrait};
     use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+    use tracing::{debug, info};
 
     pub fn init_test_env() {
         // No need for Once since each test gets its own database

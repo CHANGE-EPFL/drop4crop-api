@@ -1,5 +1,11 @@
 use super::db::Layer;
-use super::utils::{LayerInfo, convert_to_cog_in_memory, get_min_max_of_raster, get_global_average_of_raster, parse_filename};
+use super::models::{
+    DownloadQueryParams, GetPixelValueParams, PixelValueResponse, UploadQueryParams,
+};
+use super::utils::{
+    LayerInfo, convert_to_cog_in_memory, get_global_average_of_raster, get_min_max_of_raster,
+    parse_filename,
+};
 use crate::common::auth::Role;
 use crate::common::state::AppState;
 use crate::routes::tiles::storage;
@@ -8,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::{
     body::Body,
     extract::Multipart,
-    http::{header, HeaderMap},
+    http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
 use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
@@ -16,49 +22,16 @@ use crudcrate::CRUDResource;
 use gdal::Dataset;
 use hyper::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,  QueryFilter,
-    QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::vec;
 use std::{collections::HashMap, ffi::CString};
-use utoipa::{IntoParams, ToSchema};
+use tracing::{debug, error, info, warn};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
-use tracing::{debug, info, warn, error};
-// // Custom response type for /map endpoint that includes properly formatted style data for legend
-// #[derive(Serialize, ToSchema)]
-// pub struct MapLayerResponse {
-//     pub id: uuid::Uuid,
-//     pub layer_name: Option<String>,
-//     pub crop: Option<String>,
-//     pub water_model: Option<String>,
-//     pub climate_model: Option<String>,
-//     pub scenario: Option<String>,
-//     pub variable: Option<String>,
-//     pub year: Option<i32>,
-//     pub enabled: bool,
-//     pub uploaded_at: chrono::DateTime<Utc>,
-//     pub last_updated: chrono::DateTime<Utc>,
-//     pub global_average: Option<f64>,
-//     pub filename: Option<String>,
-//     pub min_value: Option<f64>,
-//     pub max_value: Option<f64>,
-//     pub style_id: Option<uuid::Uuid>,
-//     pub is_crop_specific: bool,
-//     #[serde(skip_serializing_if = "Option::is_none")]
-//     pub style: Option<serde_json::Value>,
-//     pub country_values: Option<Vec<serde_json::Value>>,
-// }
-#[derive(Deserialize, IntoParams)]
-pub struct UploadQueryParams {
-    overwrite_duplicates: Option<bool>,
-}
 
 pub fn router(state: &AppState) -> OpenApiRouter {
-    use axum::routing;
-
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_groups))
         .routes(routes!(get_pixel_value))
@@ -182,17 +155,6 @@ pub async fn get_groups(
     Ok(Json(groups))
 }
 
-#[derive(Deserialize, ToSchema, IntoParams)]
-pub struct GetPixelValueParams {
-    pub lat: f64,
-    pub lon: f64,
-}
-
-#[derive(Serialize, ToSchema, IntoParams)]
-pub struct PixelValueResponse {
-    pub value: f64,
-}
-
 #[utoipa::path(
     get,
     path = "/{layer_id}/value",
@@ -279,8 +241,8 @@ pub async fn get_pixel_value(
     let (raster_x_size, raster_y_size) = dataset.raster_size();
     if col < 0 || row < 0 || col >= raster_x_size as isize || row >= raster_y_size as isize {
         debug!(
-            col, row, raster_x_size, raster_y_size,
-            "Pixel value query coordinates out of bounds"
+            col,
+            row, raster_x_size, raster_y_size, "Pixel value query coordinates out of bounds"
         );
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -429,15 +391,17 @@ pub async fn upload_file(
                     // Delete existing layer from S3 and database
                     if let Some(ref filename) = existing.filename {
                         let s3_key = storage::get_s3_key(&config, filename);
-                        storage::delete_object(&config, &s3_key).await.map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({
-                                    "message": "Failed to delete existing layer from S3",
-                                    "error": e.to_string()
-                                })),
-                            )
-                        })?;
+                        storage::delete_object(&config, &s3_key)
+                            .await
+                            .map_err(|e| {
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({
+                                        "message": "Failed to delete existing layer from S3",
+                                        "error": e.to_string()
+                                    })),
+                                )
+                            })?;
                     }
 
                     use crate::routes::layers::db::Entity as LayerEntity;
@@ -602,7 +566,10 @@ pub async fn upload_file(
                     response
                 }
                 Err(panic_info) => {
-                    error!(filename, "PANIC during Layer::from() conversion for layer: {:?}", panic_info);
+                    error!(
+                        filename,
+                        "PANIC during Layer::from() conversion for layer: {:?}", panic_info
+                    );
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
@@ -624,14 +591,6 @@ pub async fn upload_file(
             "message": "No file found in upload"
         })),
     ))
-}
-
-#[derive(Deserialize, IntoParams)]
-pub struct DownloadQueryParams {
-    minx: Option<f64>,
-    miny: Option<f64>,
-    maxx: Option<f64>,
-    maxy: Option<f64>,
 }
 
 /// S3-compatible COG endpoint - serves GeoTIFF files with HTTP Range support
@@ -701,15 +660,17 @@ async fn get_layer_data(
     // Fetch the file from S3
     let data = if let Some(range) = range_header {
         // Parse range header and fetch only requested bytes from S3
-        storage::get_object_range(&config, &filename, range.to_str().unwrap_or("")).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "message": "Failed to fetch file range from S3",
-                    "error": e.to_string()
-                })),
-            )
-        })?
+        storage::get_object_range(&config, &filename, range.to_str().unwrap_or(""))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "message": "Failed to fetch file range from S3",
+                        "error": e.to_string()
+                    })),
+                )
+            })?
     } else {
         // Fetch entire file
         storage::get_object(&config, &filename).await.map_err(|e| {
@@ -737,7 +698,10 @@ async fn get_layer_data(
             // Return 206 Partial Content for range requests
             response_builder = response_builder
                 .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_RANGE, format!("bytes 0-{}/{}", file_size - 1, file_size))
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes 0-{}/{}", file_size - 1, file_size),
+                )
                 .header(header::ACCEPT_RANGES, "bytes");
         } else {
             response_builder = response_builder.status(StatusCode::OK);
@@ -748,7 +712,10 @@ async fn get_layer_data(
             .header(header::CONTENT_LENGTH, file_size)
             .header(header::CACHE_CONTROL, "public, max-age=31536000")
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Content-Range, Accept-Ranges")
+            .header(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Content-Range, Accept-Ranges",
+            )
             .header(
                 header::CONTENT_DISPOSITION,
                 format!("inline; filename=\"{}\"", filename),
@@ -829,7 +796,12 @@ fn crop_to_bbox(
         if fp.is_null() {
             return Err("Failed to open vsimem input file".to_string());
         }
-        let written = gdal_sys::VSIFWriteL(original_data.as_ptr() as *const _, 1, original_data.len(), fp);
+        let written = gdal_sys::VSIFWriteL(
+            original_data.as_ptr() as *const _,
+            1,
+            original_data.len(),
+            fp,
+        );
         if written != original_data.len() {
             gdal_sys::VSIFCloseL(fp);
             return Err("Failed to write all data to vsimem".to_string());
@@ -838,10 +810,13 @@ fn crop_to_bbox(
     }
 
     // Open the dataset
-    let dataset = Dataset::open(&input_path).map_err(|e| format!("Failed to open dataset: {}", e))?;
+    let dataset =
+        Dataset::open(&input_path).map_err(|e| format!("Failed to open dataset: {}", e))?;
 
     // Get geotransform
-    let gt = dataset.geo_transform().map_err(|e| format!("Failed to get geotransform: {}", e))?;
+    let gt = dataset
+        .geo_transform()
+        .map_err(|e| format!("Failed to get geotransform: {}", e))?;
 
     // Calculate pixel coordinates for the bounding box
     let col_min = ((minx - gt[0]) / gt[1]).floor() as isize;
@@ -873,7 +848,9 @@ fn crop_to_bbox(
     let new_gt = [new_origin_x, gt[1], gt[2], new_origin_y, gt[4], gt[5]];
 
     // Read the cropped data from the band
-    let band = dataset.rasterband(1).map_err(|e| format!("Failed to get rasterband: {}", e))?;
+    let band = dataset
+        .rasterband(1)
+        .map_err(|e| format!("Failed to get rasterband: {}", e))?;
     let mut buffer: Buffer<f64> = band
         .read_as((col_min, row_min), (width, height), (width, height), None)
         .map_err(|e| format!("Failed to read raster data: {}", e))?;
@@ -901,7 +878,8 @@ fn crop_to_bbox(
     }
 
     // Write the data
-    let mut out_band = out_dataset.rasterband(1)
+    let mut out_band = out_dataset
+        .rasterband(1)
         .map_err(|e| format!("Failed to get output rasterband: {}", e))?;
 
     out_band
@@ -1051,8 +1029,14 @@ mod tests {
         let height = (row_max - row_min) as usize;
 
         // Verify the cropped dimensions are smaller than original
-        assert!(width < raster_x_size, "Cropped width should be less than original");
-        assert!(height < raster_y_size, "Cropped height should be less than original");
+        assert!(
+            width < raster_x_size,
+            "Cropped width should be less than original"
+        );
+        assert!(
+            height < raster_y_size,
+            "Cropped height should be less than original"
+        );
         assert!(width > 0, "Cropped width should be greater than 0");
         assert!(height > 0, "Cropped height should be greater than 0");
 
@@ -1060,7 +1044,10 @@ mod tests {
         // -90 to 0 longitude = 90 degrees = 25 pixels
         // 0 to 45 latitude = 45 degrees = 12.5 pixels
         assert_eq!(width, 25, "Expected width of 25 pixels for 90 degree span");
-        assert_eq!(height, 13, "Expected height of 13 pixels for 45 degree span (rounded up)");
+        assert_eq!(
+            height, 13,
+            "Expected height of 13 pixels for 45 degree span (rounded up)"
+        );
 
         // Clean up
         unsafe {
@@ -1138,7 +1125,8 @@ mod tests {
             let fp = gdal_sys::VSIFOpenL(c_cropped_vsi_path.as_ptr(), mode.as_ptr());
             assert!(!fp.is_null());
 
-            let written = gdal_sys::VSIFWriteL(cropped_data.as_ptr() as *const _, 1, cropped_data.len(), fp);
+            let written =
+                gdal_sys::VSIFWriteL(cropped_data.as_ptr() as *const _, 1, cropped_data.len(), fp);
             assert_eq!(written, cropped_data.len());
             gdal_sys::VSIFCloseL(fp);
         }
@@ -1158,8 +1146,16 @@ mod tests {
         // The origin should be at the top-left corner of the cropped region
         // For minx=-90, the origin X should be -90
         // For maxy=45, with pixel height of 3.6, and row_min=12, the origin Y should be 90 - 12*3.6 = 46.8
-        assert!((gt[0] - (-90.0)).abs() < 0.1, "Origin X should be around -90, got {}", gt[0]);
-        assert!((gt[3] - 46.8).abs() < 0.1, "Origin Y should be around 46.8, got {}", gt[3]);
+        assert!(
+            (gt[0] - (-90.0)).abs() < 0.1,
+            "Origin X should be around -90, got {}",
+            gt[0]
+        );
+        assert!(
+            (gt[3] - 46.8).abs() < 0.1,
+            "Origin Y should be around 46.8, got {}",
+            gt[3]
+        );
         assert!((gt[1] - 3.6).abs() < 0.01, "Pixel width should be 3.6");
         assert!((gt[5] - (-3.6)).abs() < 0.01, "Pixel height should be -3.6");
 

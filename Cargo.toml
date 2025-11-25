@@ -67,3 +67,4 @@ stac-api = "0.8.1"
 [dev-dependencies]
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
+tiff = "0.9"

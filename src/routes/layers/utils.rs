@@ -1,37 +1,13 @@
-use anyhow::{anyhow, Result};
-use gdal::cpl::CslStringList;
-use gdal::raster::RasterBand;
-use gdal::{Dataset, DriverManager};
-use serde::{Deserialize, Serialize};
-use std::fs;
-
 use crate::config::Config;
-use tracing::{info, debug};
-
-/// Represents the parsed components of a climate layer filename
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClimateLayerInfo {
-    pub crop: String,
-    pub water_model: String,
-    pub climate_model: String,
-    pub scenario: String,
-    pub variable: String,
-    pub year: i32,
-}
-
-/// Represents the parsed components of a crop layer filename
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CropLayerInfo {
-    pub crop: String,
-    pub variable: String,
-}
-
-/// Represents the parsed information from a layer filename
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LayerInfo {
-    Climate(ClimateLayerInfo),
-    Crop(CropLayerInfo),
-}
+use anyhow::{Result, anyhow};
+use gdal::{
+    cpl::CslStringList,
+    raster::RasterBand,
+    {Dataset, DriverManager},
+};
+use std::{ffi::CString, vec::Vec, fs};
+use tracing::{debug, info};
+use super::models::{ClimateLayerInfo, CropLayerInfo, LayerInfo};
 
 /// Parses a filename to extract layer information
 pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
@@ -52,7 +28,8 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
                 climate_model: parts[2].to_string(),
                 scenario: parts[3].to_string(),
                 variable: parts[4].to_string(),
-                year: parts[5].parse()
+                year: parts[5]
+                    .parse()
                     .map_err(|_| anyhow!("Invalid year in filename: {}", parts[5]))?,
             }))
         }
@@ -71,7 +48,8 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
                 climate_model: parts[2].to_string(),
                 scenario: parts[3].to_string(),
                 variable,
-                year: parts[6].parse()
+                year: parts[6]
+                    .parse()
                     .map_err(|_| anyhow!("Invalid year in filename: {}", parts[6]))?,
             }))
         }
@@ -82,10 +60,7 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
 
             // Validate that the variable is in the list of crop variables
             if config.crop_variables.contains(&variable) {
-                Ok(LayerInfo::Crop(CropLayerInfo {
-                    crop,
-                    variable,
-                }))
+                Ok(LayerInfo::Crop(CropLayerInfo { crop, variable }))
             } else {
                 Err(anyhow!(
                     "Invalid crop variable '{}'. Must be one of: {:?}",
@@ -128,7 +103,8 @@ pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
     creation_options.add_string("BLOCKYSIZE=512")?;
 
     // Create COG with proper options
-    let mut cog_dataset = dataset.create_copy(&driver, output_path.to_str().unwrap(), &creation_options)?;
+    let mut cog_dataset =
+        dataset.create_copy(&driver, output_path.to_str().unwrap(), &creation_options)?;
 
     // Build overviews for the COG
     let overview_list = &[2, 4, 8, 16];
@@ -200,9 +176,9 @@ pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
 
     // Get raster statistics which includes mean
     // force=true means it will compute if not already cached, approx=false means exact calculation
-    let stats = rasterband.get_statistics(true, false)?.ok_or_else(|| {
-        anyhow!("Failed to compute raster statistics")
-    })?;
+    let stats = rasterband
+        .get_statistics(true, false)?
+        .ok_or_else(|| anyhow!("Failed to compute raster statistics"))?;
     let mean = stats.mean;
 
     // Clean up temporary file
@@ -213,61 +189,154 @@ pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
     Ok(mean)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Crops a GeoTIFF to the specified bounding box
+/// Returns the cropped GeoTIFF as bytes
+pub fn crop_to_bbox(
+    original_data: &[u8],
+    minx: f64,
+    miny: f64,
+    maxx: f64,
+    maxy: f64,
+) -> Result<Vec<u8>, String> {
+    use gdal::raster::Buffer;
 
-    #[test]
-    fn test_parse_climate_filename() {
-        let config = Config::for_tests();
-        let result = parse_filename(&config, "wheat_lpjml_gfdl-esm4_historical_yield_2020.tif").unwrap();
+    // Write original data to vsimem
+    let input_path = format!("/vsimem/input_{}.tif", uuid::Uuid::new_v4());
+    let c_input_path = CString::new(input_path.clone()).map_err(|e| e.to_string())?;
 
-        match result {
-            LayerInfo::Climate(info) => {
-                assert_eq!(info.crop, "wheat");
-                assert_eq!(info.water_model, "lpjml");
-                assert_eq!(info.climate_model, "gfdl-esm4");
-                assert_eq!(info.scenario, "historical");
-                assert_eq!(info.variable, "yield");
-                assert_eq!(info.year, 2020);
-            }
-            _ => panic!("Expected climate layer info"),
+    unsafe {
+        let mode = CString::new("w").unwrap();
+        let fp = gdal_sys::VSIFOpenL(c_input_path.as_ptr(), mode.as_ptr());
+        if fp.is_null() {
+            return Err("Failed to open vsimem input file".to_string());
         }
-    }
-
-    #[test]
-    fn test_parse_crop_filename() {
-        let config = Config::for_tests();
-        let result = parse_filename(&config, "soy_mirca_area_total.tif").unwrap();
-
-        match result {
-            LayerInfo::Crop(info) => {
-                assert_eq!(info.crop, "soy");
-                assert_eq!(info.variable, "mirca_area_total");
-            }
-            _ => panic!("Expected crop layer info"),
+        let written = gdal_sys::VSIFWriteL(
+            original_data.as_ptr() as *const _,
+            1,
+            original_data.len(),
+            fp,
+        );
+        if written != original_data.len() {
+            gdal_sys::VSIFCloseL(fp);
+            return Err("Failed to write all data to vsimem".to_string());
         }
+        gdal_sys::VSIFCloseL(fp);
     }
 
-    #[test]
-    fn test_parse_percentage_filename() {
-        let config = Config::for_tests();
-        let result = parse_filename(&config, "rice_lpjml_gfdl-esm4_historical_yield_perc_2020.tif").unwrap();
+    // Open the dataset
+    let dataset =
+        Dataset::open(&input_path).map_err(|e| format!("Failed to open dataset: {}", e))?;
 
-        match result {
-            LayerInfo::Climate(info) => {
-                assert_eq!(info.crop, "rice");
-                assert_eq!(info.variable, "yield_perc");
-                assert_eq!(info.year, 2020);
-            }
-            _ => panic!("Expected climate layer info"),
+    // Get geotransform
+    let gt = dataset
+        .geo_transform()
+        .map_err(|e| format!("Failed to get geotransform: {}", e))?;
+
+    // Calculate pixel coordinates for the bounding box
+    let col_min = ((minx - gt[0]) / gt[1]).floor() as isize;
+    let col_max = ((maxx - gt[0]) / gt[1]).ceil() as isize;
+    let row_min = ((maxy - gt[3]) / gt[5]).floor() as isize; // gt[5] is typically negative
+    let row_max = ((miny - gt[3]) / gt[5]).ceil() as isize;
+
+    let (raster_x_size, raster_y_size) = dataset.raster_size();
+
+    // Clamp to raster bounds
+    let col_min = col_min.max(0).min(raster_x_size as isize);
+    let col_max = col_max.max(0).min(raster_x_size as isize);
+    let row_min = row_min.max(0).min(raster_y_size as isize);
+    let row_max = row_max.max(0).min(raster_y_size as isize);
+
+    let width = (col_max - col_min) as usize;
+    let height = (row_max - row_min) as usize;
+
+    if width == 0 || height == 0 {
+        unsafe {
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
         }
+        return Err("Bounding box results in zero-sized raster".to_string());
     }
 
-    #[test]
-    fn test_parse_invalid_filename() {
-        let config = Config::for_tests();
-        let result = parse_filename(&config, "invalid.txt");
-        assert!(result.is_err());
+    // Calculate new geotransform for cropped region
+    let new_origin_x = gt[0] + col_min as f64 * gt[1];
+    let new_origin_y = gt[3] + row_min as f64 * gt[5];
+    let new_gt = [new_origin_x, gt[1], gt[2], new_origin_y, gt[4], gt[5]];
+
+    // Read the cropped data from the band
+    let band = dataset
+        .rasterband(1)
+        .map_err(|e| format!("Failed to get rasterband: {}", e))?;
+    let mut buffer: Buffer<f64> = band
+        .read_as((col_min, row_min), (width, height), (width, height), None)
+        .map_err(|e| format!("Failed to read raster data: {}", e))?;
+
+    // Create output dataset in vsimem
+    let output_path = format!("/vsimem/output_{}.tif", uuid::Uuid::new_v4());
+    let c_output_path = CString::new(output_path.clone()).map_err(|e| e.to_string())?;
+
+    let driver = gdal::DriverManager::get_driver_by_name("GTiff")
+        .map_err(|e| format!("Failed to get GTiff driver: {}", e))?;
+
+    let mut out_dataset = driver
+        .create_with_band_type::<f64, _>(&output_path, width, height, 1)
+        .map_err(|e| format!("Failed to create output dataset: {}", e))?;
+
+    // Set geotransform and spatial reference
+    out_dataset
+        .set_geo_transform(&new_gt)
+        .map_err(|e| format!("Failed to set geotransform: {}", e))?;
+
+    if let Ok(srs) = dataset.spatial_ref() {
+        out_dataset
+            .set_spatial_ref(&srs)
+            .map_err(|e| format!("Failed to set spatial reference: {}", e))?;
     }
+
+    // Write the data
+    let mut out_band = out_dataset
+        .rasterband(1)
+        .map_err(|e| format!("Failed to get output rasterband: {}", e))?;
+
+    out_band
+        .write((0, 0), (width, height), &mut buffer)
+        .map_err(|e| format!("Failed to write raster data: {}", e))?;
+
+    // Flush and close
+    drop(out_dataset);
+    drop(dataset);
+
+    // Read the cropped file from vsimem
+    let cropped_data = unsafe {
+        let mode = CString::new("r").unwrap();
+        let fp = gdal_sys::VSIFOpenL(c_output_path.as_ptr(), mode.as_ptr());
+        if fp.is_null() {
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
+            return Err("Failed to open output file".to_string());
+        }
+
+        // Get file size
+        gdal_sys::VSIFSeekL(fp, 0, 2); // SEEK_END
+        let size = gdal_sys::VSIFTellL(fp) as usize;
+        gdal_sys::VSIFSeekL(fp, 0, 0); // SEEK_SET
+
+        // Read data
+        let mut buffer = vec![0u8; size];
+        let read = gdal_sys::VSIFReadL(buffer.as_mut_ptr() as *mut _, 1, size, fp);
+        if read != size {
+            gdal_sys::VSIFCloseL(fp);
+            gdal_sys::VSIUnlink(c_input_path.as_ptr());
+            gdal_sys::VSIUnlink(c_output_path.as_ptr());
+            return Err("Failed to read all cropped data".to_string());
+        }
+        gdal_sys::VSIFCloseL(fp);
+
+        buffer
+    };
+
+    // Clean up vsimem files
+    unsafe {
+        gdal_sys::VSIUnlink(c_input_path.as_ptr());
+        gdal_sys::VSIUnlink(c_output_path.as_ptr());
+    }
+
+    Ok(cropped_data)
 }

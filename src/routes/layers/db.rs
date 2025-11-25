@@ -1,10 +1,29 @@
 use chrono::{DateTime, Utc};
-use crudcrate::{CRUDResource, EntityToModels};
+use crudcrate::{CRUDResource, EntityToModels, ApiError};
 use sea_orm::EntityTrait;
 use sea_orm::entity::prelude::*;
 use tracing::debug;
 
-#[derive(Clone, Debug, DeriveEntityModel, EntityToModels)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct CacheStatus {
+    pub cached: bool,
+    pub cache_key: Option<String>,
+    pub size_mb: Option<f64>,
+    pub ttl_hours: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct LayerStats {
+    pub total_requests: i32,
+    pub xyz_tile_count: i32,
+    pub cog_download_count: i32,
+    pub pixel_query_count: i32,
+    pub stac_request_count: i32,
+    pub other_request_count: i32,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, EntityToModels, serde::Serialize, serde::Deserialize)]
 #[sea_orm(table_name = "layer")]
 #[crudcrate(
     api_struct = "Layer",
@@ -12,6 +31,7 @@ use tracing::debug;
     name_plural = "layers",
     fn_delete_many = delete_many,
     generate_router,
+    operations = LayerOperations,
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -37,7 +57,8 @@ pub struct Model {
     #[crudcrate(filterable)]
     pub enabled: bool,
     pub uploaded_at: DateTime<Utc>,
-    #[sea_orm(column_type = "Double", nullable, sortable)]
+    #[sea_orm(column_type = "Double", nullable)]
+    #[crudcrate(sortable)]
     pub global_average: Option<f64>,
     pub filename: Option<String>,
     #[sea_orm(column_type = "Double", nullable)]
@@ -48,6 +69,13 @@ pub struct Model {
     pub style_id: Option<Uuid>,
     #[crudcrate(filterable)]
     pub is_crop_specific: bool,
+    // Metadata fields (populated by after_get_one hook, not stored in DB)
+    #[sea_orm(ignore)]
+    #[crudcrate(non_db_attr = true, exclude(create, update))]
+    pub cache_status: Option<CacheStatus>,
+    #[sea_orm(ignore)]
+    #[crudcrate(non_db_attr = true, exclude(create, update))]
+    pub stats: Option<LayerStats>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -87,130 +115,48 @@ impl Related<crate::routes::countries::db::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-pub async fn delete_many(
-    db: &sea_orm::DatabaseConnection,
-    ids: Vec<Uuid>,
-) -> Result<Vec<Uuid>, crudcrate::ApiError> {
-    debug!(ids = ?ids, "Called delete_many");
-    let config = crate::config::Config::from_env();
-    let mut deleted_ids = Vec::new();
+// Operations struct for implementing hooks
+pub struct LayerOperations;
 
-    for id in &ids {
-        let _ = crate::routes::tiles::storage::delete_s3_object_by_db_id(&config, db, id).await;
+// Implement CRUDOperations to add metadata enrichment hook
+#[async_trait::async_trait]
+impl crudcrate::CRUDOperations for LayerOperations {
+    type Resource = Layer;
 
-        if Entity::delete_by_id(*id).exec(db).await.is_ok() {
-            deleted_ids.push(*id);
+    /// Enrich layer data with cache status and stats after fetching
+    async fn after_get_one(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        entity: &mut Self::Resource,
+    ) -> Result<(), ApiError> {
+        // Fetch cache status from Redis (gracefully handle errors)
+        if let Some(ref layer_name) = entity.layer_name {
+            // Only try to fetch cache status if config is available
+            if let Ok(config) = std::panic::catch_unwind(crate::config::Config::from_env) {
+                entity.cache_status = fetch_cache_status_with_config(&config, layer_name).await.ok();
+            }
         }
+
+        // Fetch stats from database (this should always work if database is available)
+        entity.stats = fetch_layer_stats(db, entity.id).await.ok().flatten();
+
+        Ok(())
     }
-
-    Ok(deleted_ids)
 }
 
-// Extended layer response with cache and stats metadata
-#[derive(serde::Serialize, utoipa::ToSchema)]
-pub struct LayerWithMetadata {
-    // Layer fields
-    pub id: Uuid,
-    pub layer_name: Option<String>,
-    pub crop: Option<String>,
-    pub water_model: Option<String>,
-    pub climate_model: Option<String>,
-    pub scenario: Option<String>,
-    pub variable: Option<String>,
-    pub year: Option<i32>,
-    pub enabled: bool,
-    pub uploaded_at: DateTime<Utc>,
-    pub last_updated: DateTime<Utc>,
-    pub global_average: Option<f64>,
-    pub filename: Option<String>,
-    pub min_value: Option<f64>,
-    pub max_value: Option<f64>,
-    pub style_id: Option<Uuid>,
-    pub is_crop_specific: bool,
-    // Additional metadata
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_status: Option<CacheStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stats: Option<LayerStats>,
-}
-
-#[derive(serde::Serialize, utoipa::ToSchema)]
-pub struct CacheStatus {
-    pub cached: bool,
-    pub cache_key: Option<String>,
-    pub size_mb: Option<f64>,
-    pub ttl_hours: Option<f64>,
-}
-
-#[derive(serde::Serialize, utoipa::ToSchema)]
-pub struct LayerStats {
-    pub total_requests: i32,
-    pub xyz_tile_count: i32,
-    pub cog_download_count: i32,
-    pub pixel_query_count: i32,
-    pub stac_request_count: i32,
-    pub other_request_count: i32,
-    pub last_accessed_at: Option<DateTime<Utc>>,
-}
-
-/// Custom get_one function that includes cache and stats metadata
-pub async fn get_one_with_metadata(
-    db: &sea_orm::DatabaseConnection,
-    id: Uuid,
-) -> Result<LayerWithMetadata, sea_orm::DbErr> {
-    // Fetch the layer
-    let layer = Entity::find_by_id(id)
-        .one(db)
-        .await?
-        .ok_or(sea_orm::DbErr::RecordNotFound(
-            "Layer not found".to_string(),
-        ))?;
-
-    // Fetch cache status from Redis
-    let cache_status = if let Some(ref layer_name) = layer.layer_name {
-        fetch_cache_status(layer_name).await.ok()
-    } else {
-        None
-    };
-
-    // Fetch stats from database
-    let stats = fetch_layer_stats(db, id).await.ok().flatten();
-
-    // Build response
-    Ok(LayerWithMetadata {
-        id: layer.id,
-        layer_name: layer.layer_name,
-        crop: layer.crop,
-        water_model: layer.water_model,
-        climate_model: layer.climate_model,
-        scenario: layer.scenario,
-        variable: layer.variable,
-        year: layer.year,
-        enabled: layer.enabled,
-        uploaded_at: layer.uploaded_at,
-        last_updated: layer.last_updated,
-        global_average: layer.global_average,
-        filename: layer.filename,
-        min_value: layer.min_value,
-        max_value: layer.max_value,
-        style_id: layer.style_id,
-        is_crop_specific: layer.is_crop_specific,
-        cache_status,
-        stats,
-    })
-}
-
-/// Helper function to fetch cache status from Redis
-async fn fetch_cache_status(layer_name: &str) -> anyhow::Result<CacheStatus> {
+/// Helper function to fetch cache status with provided config
+async fn fetch_cache_status_with_config(
+    config: &crate::config::Config,
+    layer_name: &str,
+) -> anyhow::Result<CacheStatus> {
     use crate::routes::tiles::cache;
 
-    let config = crate::config::Config::from_env();
-    let redis_client = cache::get_redis_client(&config);
+    let redis_client = cache::get_redis_client(config);
     let mut con = redis_client.get_multiplexed_async_connection().await?;
 
     // Try to find the cache key - check with and without .tif extension
-    let cache_key = cache::build_cache_key(&config, layer_name);
-    let cache_key_tif = cache::build_cache_key(&config, &format!("{}.tif", layer_name));
+    let cache_key = cache::build_cache_key(config, layer_name);
+    let cache_key_tif = cache::build_cache_key(config, &format!("{}.tif", layer_name));
 
     // Try to get TTL for the cache key
     let mut ttl_seconds: i64 = redis::cmd("TTL")
@@ -252,6 +198,25 @@ async fn fetch_cache_status(layer_name: &str) -> anyhow::Result<CacheStatus> {
             ttl_hours: None,
         })
     }
+}
+
+pub async fn delete_many(
+    db: &sea_orm::DatabaseConnection,
+    ids: Vec<Uuid>,
+) -> Result<Vec<Uuid>, crudcrate::ApiError> {
+    debug!(ids = ?ids, "Called delete_many");
+    let config = crate::config::Config::from_env();
+    let mut deleted_ids = Vec::new();
+
+    for id in &ids {
+        let _ = crate::routes::tiles::storage::delete_s3_object_by_db_id(&config, db, id).await;
+
+        if Entity::delete_by_id(*id).exec(db).await.is_ok() {
+            deleted_ids.push(*id);
+        }
+    }
+
+    Ok(deleted_ids)
 }
 
 /// Helper function to fetch stats from database

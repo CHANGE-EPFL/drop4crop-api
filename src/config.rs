@@ -99,7 +99,8 @@ impl Config {
         }
     }
 
-    #[cfg(test)]
+    /// Creates a test configuration with defaults suitable for testing
+    /// Available in both unit tests and integration tests
     pub fn for_tests() -> Self {
         // Set default test environment variables if not already set
         let db_uri = Some(format!(

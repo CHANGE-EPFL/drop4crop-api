@@ -3,6 +3,7 @@
 pub mod db;
 pub mod fixtures;
 pub mod client;
+pub mod test_router;
 
 use std::sync::Once;
 

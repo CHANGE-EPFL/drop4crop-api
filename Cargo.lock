@@ -1594,6 +1594,7 @@ dependencies = [
  "stac-api",
  "strum 0.27.2",
  "tempfile",
+ "tiff 0.9.1",
  "tile-grid",
  "tokio",
  "tokio-retry",

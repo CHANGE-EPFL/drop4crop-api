@@ -2,7 +2,6 @@
 // Run with: cargo test
 
 mod common;
-mod test_router;
 
 use axum::Router;
 use common::client::TestClient;
@@ -51,7 +50,7 @@ async fn create_test_app() -> Router {
     };
 
     // Build test router (without rate limiting)
-    test_router::build_test_router(&db, &config)
+    common::test_router::build_test_router(&db, &config)
 }
 
 // ============================================================================
@@ -231,13 +230,15 @@ async fn test_layers_get_one_with_details() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
-    let response = client.get(&format!("/api/layers/{}/details", LAYER_1_ID)).await;
+    // Use standard get endpoint - metadata is now populated via hooks
+    let response = client.get(&format!("/api/layers/{}", LAYER_1_ID)).await;
     response.assert_success();
 
     let data = response.json();
     assert_eq!(data["id"], LAYER_1_ID);
     assert!(data.is_object());
-    // Note: cache_status field requires Redis, so it may not be present in tests
+    // Note: cache_status and stats fields are optional metadata populated by hooks
+    // They may not be present in tests without Redis/stats data
 }
 
 #[tokio::test]

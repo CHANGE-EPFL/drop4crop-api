@@ -4,6 +4,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, config::Credentials, config::Region};
 use crudcrate::CRUDResource;
 use redis;
+use std::error::Error;
 use tokio::{
     task,
     time::{Duration, sleep},
@@ -232,8 +233,18 @@ pub async fn upload_object(config: &crate::config::Config, key: &str, data: &[u8
             Ok(())
         }
         Err(e) => {
-            error!(key, error = %e, "AWS SDK upload error");
-            Err(anyhow::anyhow!("AWS SDK upload error: {}", e))
+            error!(
+                key,
+                error = %e,
+                debug_error = ?e,
+                "AWS SDK upload error - full details"
+            );
+            Err(anyhow::anyhow!(
+                "AWS SDK upload error: {} | Debug: {:?} | Source: {:?}",
+                e,
+                e,
+                e.source()
+            ))
         }
     }
 }

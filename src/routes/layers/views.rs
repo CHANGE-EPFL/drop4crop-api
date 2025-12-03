@@ -20,7 +20,7 @@ use crudcrate::CRUDResource;
 use gdal::Dataset;
 use hyper::StatusCode;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set,
 };
 use serde_json::Value as JsonValue;
 use std::vec;
@@ -33,7 +33,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_groups))
         .routes(routes!(get_pixel_value))
-        .with_state(state.db.clone());
+        .with_state(state.clone());
 
     // Get the base crudcrate router
     let mut protected_router = Layer::router(&state.db.clone());
@@ -41,7 +41,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     // Add custom routes
     let protected_custom_routes = OpenApiRouter::new()
         .routes(routes!(upload_file))
-        .with_state(state.db.clone());
+        .with_state(state.clone());
 
     protected_router = protected_router
         .merge(protected_custom_routes);
@@ -69,10 +69,10 @@ pub fn router(state: &AppState) -> OpenApiRouter {
 
 /// S3-compatible COG data router (for /cog endpoint under /layers)
 /// This provides a clean S3-like path structure for COG files
-pub fn cog_router(db: &DatabaseConnection) -> OpenApiRouter {
+pub fn cog_router(state: &AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(super::cog::views::get_cog_data))
-        .with_state(db.clone())
+        .with_state(state.clone())
 }
 
 #[utoipa::path(
@@ -86,8 +86,9 @@ pub fn cog_router(db: &DatabaseConnection) -> OpenApiRouter {
     description = "This endpoint allows the menu to be populated with available keys"
 )]
 pub async fn get_groups(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<HashMap<String, Vec<JsonValue>>>, (StatusCode, Json<String>)> {
+    let db = &app_state.db;
     let mut groups: HashMap<String, Vec<JsonValue>> = HashMap::new();
 
     let layer_variables = [
@@ -106,7 +107,7 @@ pub async fn get_groups(
             .column(*column)
             .distinct()
             .into_json()
-            .all(&db)
+            .all(db)
             .await
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
@@ -140,9 +141,9 @@ pub async fn get_groups(
 pub async fn get_pixel_value(
     Path(layer_id): Path<String>,
     Query(params): Query<GetPixelValueParams>,
-    State(_db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
+    let config = &app_state.config;
     // Build the filename for the TIFF.
     let filename = format!("{}.tif", layer_id);
 
@@ -246,12 +247,13 @@ pub async fn get_pixel_value(
     description = "Uploads a GeoTIFF file, converts it to COG format, and creates a layer record"
 )]
 pub async fn upload_file(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
     Query(params): Query<UploadQueryParams>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     debug!("Starting upload request");
-    let config = crate::config::Config::from_env();
+    let db = &app_state.db;
+    let config = &app_state.config;
     let overwrite_duplicates = params
         .overwrite_duplicates
         .unwrap_or(config.overwrite_duplicate_layers);
@@ -343,7 +345,7 @@ pub async fn upload_file(
                 }
             };
 
-            let existing_layer = duplicate_query.one(&db).await.map_err(|e| {
+            let existing_layer = duplicate_query.one(db).await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -373,7 +375,7 @@ pub async fn upload_file(
 
                     use crate::routes::layers::db::Entity as LayerEntity;
                     LayerEntity::delete_by_id(existing.id)
-                        .exec(&db)
+                        .exec(db)
                         .await
                         .map_err(|e| {
                             (
@@ -506,7 +508,7 @@ pub async fn upload_file(
             };
 
             debug!(filename, "Attempting to save layer to database");
-            let saved_layer = match layer_record.insert(&db).await {
+            let saved_layer = match layer_record.insert(db).await {
                 Ok(layer) => {
                     info!(filename, "Successfully saved layer to database");
                     layer

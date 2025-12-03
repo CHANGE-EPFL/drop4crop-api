@@ -32,6 +32,11 @@ impl Config {
     pub fn from_env() -> Self {
         dotenv().ok(); // Load from .env file if available
 
+        // Check if tests are running - if so, return test config with defaults
+        if env::var("TESTS_RUNNING").map(|v| v == "true").unwrap_or(false) {
+            return Self::for_tests();
+        }
+
         let db_uri = env::var("DB_URL").ok().or_else(|| {
             Some(format!(
                 "{}://{}:{}@{}:{}/{}",

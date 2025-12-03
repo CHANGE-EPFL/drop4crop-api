@@ -9,7 +9,7 @@ use crate::common::state::AppState;
 use crate::common::auth::Role;
 use crate::routes::admin::db::layer_statistics;
 use axum_keycloak_auth::{layer::KeycloakAuthLayer, PassthroughMode};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ pub fn stats_router(state: &AppState) -> OpenApiRouter {
         .route("/{id}", get(get_layer_stat_detail))  // Get individual statistic
         .route("/{id}/timeline", get(get_layer_timeline))
         .route("/live", get(get_live_stats))
-        .with_state(state.db.clone());
+        .with_state(state.clone());
 
     // Protect stats routes with Keycloak authentication
     if let Some(instance) = state.keycloak_auth_instance.clone() {
@@ -55,7 +55,7 @@ pub fn cache_router(state: &AppState) -> OpenApiRouter {
         .route("/layers/{layer_name}/persist", post(persist_layer_cache))
         .route("/layers/{layer_name}/persist", delete(unpersist_layer_cache))
         .route("/ttl", get(get_cache_ttl))
-        .with_state(state.db.clone());
+        .with_state(state.clone());
 
     // Protect cache routes with Keycloak authentication
     if let Some(instance) = state.keycloak_auth_instance.clone() {
@@ -158,17 +158,18 @@ struct CachedLayer {
 
 /// GET /api/admin/stats/summary - Dashboard overview
 async fn get_stats_summary(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<StatsSummary>, StatusCode> {
     use super::db::layer_statistics;
     use crate::routes::layers::db as layer;
 
+    let db = &app_state.db;
     let today = chrono::Utc::now().naive_utc().date();
     let week_ago = today - chrono::Duration::days(7);
     let day_ago = chrono::Utc::now() - chrono::Duration::hours(24);
 
     // Total requests all time
-    let all_stats = layer_statistics::Entity::find().all(&db).await.map_err(|e| {
+    let all_stats = layer_statistics::Entity::find().all(db).await.map_err(|e| {
         error!(error = %e, "Database error fetching stats");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -187,7 +188,7 @@ async fn get_stats_summary(
     // Total requests today
     let today_stats = layer_statistics::Entity::find()
         .filter(layer_statistics::Column::StatDate.eq(today))
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -212,7 +213,7 @@ async fn get_stats_summary(
     // Total requests this week
     let week_stats = layer_statistics::Entity::find()
         .filter(layer_statistics::Column::StatDate.gte(week_ago))
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -240,7 +241,7 @@ async fn get_stats_summary(
 
     let most_accessed_layer = if let Some((layer_id, total)) = layer_totals.iter().max_by_key(|&(_, v)| v) {
         let layer_record = layer::Entity::find_by_id(*layer_id)
-            .one(&db)
+            .one(db)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -255,7 +256,7 @@ async fn get_stats_summary(
     // Active layers in past 24 hours
     let active_layers_24h = layer_statistics::Entity::find()
         .filter(layer_statistics::Column::LastAccessedAt.gte(day_ago.naive_utc()))
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .iter()
@@ -265,7 +266,7 @@ async fn get_stats_summary(
 
     // Total layers
     let total_layers = layer::Entity::find()
-        .count(&db)
+        .count(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as i64;
 
@@ -312,34 +313,39 @@ async fn get_stats_summary(
 
 /// GET /api/admin/stats/layers - All layer statistics
 async fn get_layer_stats(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
     Query(params): Query<StatsQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     use super::db::layer_statistics;
     use crate::routes::layers::db as layer;
-    use axum::http::HeaderMap;
+    use sea_orm::Order;
+
+    let db = &app_state.db;
 
     // Parse filter JSON if provided
     let filter: Option<StatsFilter> = params.filter.as_ref().and_then(|f| {
         serde_json::from_str(f).ok()
     });
 
-    // Parse range JSON if provided [start, end]
-    let (limit, offset) = if let Some(range_str) = &params.range {
-        if let Ok(range) = serde_json::from_str::<Vec<u64>>(range_str) {
-            if range.len() == 2 {
-                let start = range[0];
-                let end = range[1];
-                let limit = end - start + 1;
-                (limit, start)
+    // Parse range using crudcrate utility (returns [start, end])
+    let (start, end) = crudcrate::parse_range(params.range.clone());
+    let limit = end - start + 1;
+    let offset = start;
+
+    // Parse sort JSON if provided ["field", "ASC"|"DESC"]
+    let (sort_field, sort_order) = if let Some(sort_str) = &params.sort {
+        if let Ok(sort) = serde_json::from_str::<Vec<String>>(sort_str) {
+            if sort.len() == 2 {
+                let order = if sort[1].to_uppercase() == "ASC" { Order::Asc } else { Order::Desc };
+                (Some(sort[0].clone()), order)
             } else {
-                (100, 0)
+                (None, Order::Desc)
             }
         } else {
-            (100, 0)
+            (None, Order::Desc)
         }
     } else {
-        (100, 0)
+        (None, Order::Desc)
     };
 
     let mut query = layer_statistics::Entity::find();
@@ -351,7 +357,7 @@ async fn get_layer_stats(
             // Find the layer by name first
             let layer_record = layer::Entity::find()
                 .filter(layer::Column::LayerName.eq(layer_name))
-                .one(&db)
+                .one(db)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -362,8 +368,7 @@ async fn get_layer_stats(
             } else {
                 debug!(layer_name, "Layer not found, returning empty results");
                 // If layer not found, return empty results
-                let mut headers = HeaderMap::new();
-                headers.insert("Content-Range", "statistics 0-0/0".parse().unwrap());
+                let mut headers = crudcrate::calculate_content_range(0, 0, 0, "statistics");
                 headers.insert("Access-Control-Expose-Headers", "Content-Range".parse().unwrap());
                 return Ok((headers, Json(vec![])));
             }
@@ -386,15 +391,26 @@ async fn get_layer_stats(
     // Get total count for Content-Range header
     let total_count = query
         .clone()
-        .count(&db)
+        .count(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
 
+    // Apply sorting based on field name
+    let query = match sort_field.as_deref() {
+        Some("stat_date") => query.order_by(layer_statistics::Column::StatDate, sort_order),
+        Some("last_accessed_at") => query.order_by(layer_statistics::Column::LastAccessedAt, sort_order),
+        Some("xyz_tile_count") => query.order_by(layer_statistics::Column::XyzTileCount, sort_order),
+        Some("cog_download_count") => query.order_by(layer_statistics::Column::CogDownloadCount, sort_order),
+        Some("pixel_query_count") => query.order_by(layer_statistics::Column::PixelQueryCount, sort_order),
+        Some("stac_request_count") => query.order_by(layer_statistics::Column::StacRequestCount, sort_order),
+        Some("other_request_count") => query.order_by(layer_statistics::Column::OtherRequestCount, sort_order),
+        _ => query.order_by(layer_statistics::Column::LastAccessedAt, sort_order),
+    };
+
     let stats = query
-        .order_by_desc(layer_statistics::Column::LastAccessedAt)
         .limit(limit)
         .offset(offset)
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -402,7 +418,7 @@ async fn get_layer_stats(
     let layer_ids: Vec<uuid::Uuid> = stats.iter().map(|s| s.layer_id).collect();
     let layers = layer::Entity::find()
         .filter(layer::Column::Id.is_in(layer_ids))
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -436,16 +452,8 @@ async fn get_layer_stats(
         })
         .collect();
 
-    // Build Content-Range header
-    let end_index = if results.is_empty() {
-        offset.saturating_sub(1)
-    } else {
-        offset + results.len() as u64 - 1
-    };
-    let content_range = format!("statistics {}-{}/{}", offset, end_index, total_count);
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Range", content_range.parse().unwrap());
+    // Build Content-Range header using crudcrate utility
+    let mut headers = crudcrate::calculate_content_range(offset, limit, total_count as u64, "statistics");
     headers.insert("Access-Control-Expose-Headers", "Content-Range".parse().unwrap());
 
     Ok((headers, Json(results)))
@@ -453,23 +461,24 @@ async fn get_layer_stats(
 
 /// GET /api/statistics/:id - Get single statistic by ID (for React Admin)
 async fn get_layer_stat_detail(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
     Path(stat_id): Path<String>,
 ) -> Result<Json<LayerStatDetail>, StatusCode> {
     use super::db::layer_statistics;
     use crate::routes::layers::db as layer;
 
+    let db = &app_state.db;
     let stat_uuid = uuid::Uuid::parse_str(&stat_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let stat = layer_statistics::Entity::find_by_id(stat_uuid)
-        .one(&db)
+        .one(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Fetch layer name
     let layer_record = layer::Entity::find_by_id(stat.layer_id)
-        .one(&db)
+        .one(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -503,15 +512,16 @@ async fn get_layer_stat_detail(
 /// GET /api/admin/statistics/:stat_id/timeline - Time-series data for charts
 /// This gets the timeline for the layer associated with the given statistic record
 async fn get_layer_timeline(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
     Path(stat_id): Path<String>,
 ) -> Result<Json<Vec<LayerStatDetail>>, StatusCode> {
+    let db = &app_state.db;
     // First get the statistic record to find the layer_id
     let stat_uuid = uuid::Uuid::parse_str(&stat_id)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let stat = layer_statistics::Entity::find_by_id(stat_uuid)
-        .one(&db)
+        .one(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -520,13 +530,13 @@ async fn get_layer_timeline(
     let stats = layer_statistics::Entity::find()
         .filter(layer_statistics::Column::LayerId.eq(stat.layer_id))
         .order_by_asc(layer_statistics::Column::StatDate)
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Get the layer name
     let layer = crate::routes::layers::db::Entity::find_by_id(stat.layer_id)
-        .one(&db)
+        .one(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -554,9 +564,11 @@ async fn get_layer_timeline(
 }
 
 /// GET /api/admin/cache/info - Cache statistics
-async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+async fn get_cache_info(
+    State(app_state): State<AppState>,
+) -> Result<Json<CacheInfo>, StatusCode> {
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     match redis_client.get_multiplexed_async_connection().await {
         Ok(mut con) => {
@@ -626,10 +638,11 @@ async fn get_cache_info() -> Result<Json<CacheInfo>, StatusCode> {
 
 /// GET /api/admin/cache/keys - List all cached layers
 async fn get_cache_keys(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<Vec<CachedLayer>>, StatusCode> {
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+    let db = &app_state.db;
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -684,7 +697,7 @@ async fn get_cache_keys(
 
         let layer_id = layer::Entity::find()
             .filter(layer::Column::LayerName.eq(&layer_name))
-            .one(&db)
+            .one(db)
             .await
             .ok()
             .flatten()
@@ -694,7 +707,7 @@ async fn get_cache_keys(
         let layer_id = if layer_id.is_none() && !layer_name.ends_with(".tif") {
             layer::Entity::find()
                 .filter(layer::Column::LayerName.eq(format!("{}.tif", layer_name)))
-                .one(&db)
+                .one(db)
                 .await
                 .ok()
                 .flatten()
@@ -707,7 +720,7 @@ async fn get_cache_keys(
         let layer_id = if layer_id.is_none() && layer_name.ends_with(".tif") {
             layer::Entity::find()
                 .filter(layer::Column::LayerName.eq(layer_name.replace(".tif", "")))
-                .one(&db)
+                .one(db)
                 .await
                 .ok()
                 .flatten()
@@ -732,9 +745,11 @@ async fn get_cache_keys(
 }
 
 /// POST /api/admin/cache/clear - Clear all cache
-async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+async fn clear_all_cache(
+    State(app_state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -769,8 +784,11 @@ async fn clear_all_cache() -> Result<impl IntoResponse, StatusCode> {
 }
 
 /// DELETE /api/admin/cache/layers/:layer_name - Clear specific layer cache
-async fn clear_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
+async fn clear_layer_cache(
+    State(app_state): State<AppState>,
+    Path(layer_name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let config = &app_state.config;
     // Add .tif extension if not present (cache keys use filename format)
     let filename = if layer_name.ends_with(".tif") {
         layer_name.clone()
@@ -805,8 +823,10 @@ async fn clear_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoRe
 }
 
 /// GET /api/admin/cache/ttl - Get current TTL
-async fn get_cache_ttl() -> Result<Json<serde_json::Value>, StatusCode> {
-    let config = crate::config::Config::from_env();
+async fn get_cache_ttl(
+    State(app_state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = &app_state.config;
     Ok(Json(json!({
         "ttl_seconds": config.tile_cache_ttl,
         "ttl_hours": config.tile_cache_ttl / 3600
@@ -814,8 +834,11 @@ async fn get_cache_ttl() -> Result<Json<serde_json::Value>, StatusCode> {
 }
 
 /// POST /api/admin/cache/layers/:layer_name/warm - Pre-warm cache for a layer
-async fn warm_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
+async fn warm_layer_cache(
+    State(app_state): State<AppState>,
+    Path(layer_name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let config = &app_state.config;
 
     // Add .tif extension if not present
     let filename = if layer_name.ends_with(".tif") {
@@ -842,9 +865,12 @@ async fn warm_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoRes
 }
 
 /// POST /api/admin/cache/layers/:layer_name/persist - Remove TTL from cache (make permanent)
-async fn persist_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+async fn persist_layer_cache(
+    State(app_state): State<AppState>,
+    Path(layer_name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     // Add .tif extension if not present
     let filename = if layer_name.ends_with(".tif") {
@@ -896,9 +922,12 @@ async fn persist_layer_cache(Path(layer_name): Path<String>) -> Result<impl Into
 }
 
 /// DELETE /api/admin/cache/layers/:layer_name/persist - Restore TTL to cache
-async fn unpersist_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+async fn unpersist_layer_cache(
+    State(app_state): State<AppState>,
+    Path(layer_name): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     // Add .tif extension if not present
     let filename = if layer_name.ends_with(".tif") {
@@ -959,11 +988,12 @@ struct LiveLayerStats {
 }
 
 /// GET /api/admin/stats/live - Get real-time statistics from Redis (today's data)
-async fn get_live_stats(State(db): State<DatabaseConnection>) -> Result<Json<Vec<LiveLayerStats>>, StatusCode> {
+async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<LiveLayerStats>>, StatusCode> {
     use crate::routes::layers::db as layer;
 
-    let config = crate::config::Config::from_env();
-    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+    let db = &app_state.db;
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
 
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -1017,7 +1047,7 @@ async fn get_live_stats(State(db): State<DatabaseConnection>) -> Result<Json<Vec
     for stat in &mut results {
         let layer_record = layer::Entity::find()
             .filter(layer::Column::LayerName.eq(&stat.layer_name))
-            .one(&db)
+            .one(db)
             .await
             .ok()
             .flatten();

@@ -84,7 +84,7 @@ impl RateLimitTracker {
 
 /// Tracks layer access statistics based on the request path and query string.
 /// Extracts layer name and determines the access type (xyz, cog, pixel, stac, other).
-fn track_layer_statistics(uri_path: &str, query_string: &str) {
+fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
     // Skip non-layer requests
     if !uri_path.starts_with("/api/layers") && !uri_path.starts_with("/api/stac") {
         return;
@@ -143,7 +143,7 @@ fn track_layer_statistics(uri_path: &str, query_string: &str) {
 
     if let Some(layer_id) = layer_name {
         // Fire-and-forget statistics increment
-        let config = Config::from_env();
+        let config = config.clone();
         let layer_id = layer_id.to_string();
         let stat_type = stat_type.to_string();
         tokio::spawn(async move {
@@ -154,7 +154,8 @@ fn track_layer_statistics(uri_path: &str, query_string: &str) {
 
 async fn log_request_ip(
     axum::extract::State(tracker): axum::extract::State<Arc<Mutex<RateLimitTracker>>>,
-    axum::extract::State(config): axum::extract::State<RateLimitConfig>,
+    axum::extract::State(rate_limit_config): axum::extract::State<RateLimitConfig>,
+    axum::extract::State(config): axum::extract::State<Config>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -167,8 +168,8 @@ async fn log_request_ip(
     let ip_opt = request.extensions().get::<RealIp>().map(|r| r.ip());
 
     // Use single rate limit for all endpoints
-    let per_ip_limit = config.per_ip;
-    let global_limit = config.global;
+    let per_ip_limit = rate_limit_config.per_ip;
+    let global_limit = rate_limit_config.global;
 
     // Record request and get counts
     let (global_count, ip_count) = if let Some(ip) = ip_opt {
@@ -180,7 +181,7 @@ async fn log_request_ip(
     };
 
     // Track statistics for layer access
-    track_layer_statistics(&uri_path, query_string);
+    track_layer_statistics(&uri_path, query_string, &config);
 
     // Execute the request
     let response = next.run(request).await;
@@ -294,12 +295,13 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     //   3. GovernorLayer - Applies rate limiting based on IP
     let rate_limit_stack = ServiceBuilder::new()
         .layer(RealIpLayer::default())
-        .layer(middleware::from_fn_with_state((rate_limit_tracker.clone(), rate_limit_config.clone()),
-            |axum::extract::State((tracker, config)): axum::extract::State<(Arc<Mutex<RateLimitTracker>>, RateLimitConfig)>,
+        .layer(middleware::from_fn_with_state((rate_limit_tracker.clone(), rate_limit_config.clone(), config.clone()),
+            |axum::extract::State((tracker, rate_limit_config, config)): axum::extract::State<(Arc<Mutex<RateLimitTracker>>, RateLimitConfig, Config)>,
              request: Request,
              next: Next| async move {
                 log_request_ip(
                     axum::extract::State(tracker),
+                    axum::extract::State(rate_limit_config),
                     axum::extract::State(config),
                     request,
                     next
@@ -315,8 +317,8 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/cache", admin::views::cache_router(&app_state))
         .nest("/api/countries", countries::views::router(&app_state))
         .nest("/api/layers", layers::views::router(&app_state))
-        .nest("/api/layers/xyz", tiles::views::xyz_router(db)) // XYZ tiles
-        .nest("/api/layers/cog", layers::views::cog_router(db)) // S3-compatible COG endpoint
+        .nest("/api/layers/xyz", tiles::views::xyz_router(&app_state)) // XYZ tiles
+        .nest("/api/layers/cog", layers::views::cog_router(&app_state)) // S3-compatible COG endpoint
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
         .layer(rate_limit_stack.clone()) // Apply rate limiting to API routes
@@ -324,7 +326,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
 
     // Merge health check routes (NO rate limiting), STAC router (with rate limiting), and docs
     router
-        .merge(crate::common::views::router(db)) // Health check routes - no rate limiting
-        .nest("/api/stac", tiles::stac_router::router(db).layer(rate_limit_stack)) // STAC with rate limiting
+        .merge(crate::common::views::router(&app_state)) // Health check routes - no rate limiting
+        .nest("/api/stac", tiles::stac_router::router(&app_state).layer(rate_limit_stack)) // STAC with rate limiting
         .merge(Scalar::with_url("/api/docs", api))
 }

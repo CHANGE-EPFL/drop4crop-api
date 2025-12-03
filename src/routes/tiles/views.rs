@@ -1,3 +1,4 @@
+use crate::common::state::AppState;
 use crate::routes::layers::db as layer;
 use crate::routes::styles::db as style;
 use crate::routes::tiles::utils::XYZTile;
@@ -8,7 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 use image::ImageBuffer;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, JsonValue, entity::prelude::*};
+use sea_orm::{ColumnTrait, EntityTrait, JsonValue, entity::prelude::*};
 use serde::Deserialize;
 use tokio_retry::{RetryIf, strategy::FixedInterval};
 use utoipa::ToSchema;
@@ -22,10 +23,10 @@ pub struct Params {
 }
 
 /// XYZ tiles router (for /xyz endpoint under /layers)
-pub fn xyz_router(db: &DatabaseConnection) -> OpenApiRouter {
+pub fn xyz_router(state: &AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(tile_handler))
-        .with_state(db.clone())
+        .with_state(state.clone())
 }
 
 /// Parse a tile coordinate from a string, handling both integers and floats.
@@ -68,14 +69,15 @@ fn parse_tile_coord(s: &str) -> Result<u32, StatusCode> {
 pub async fn tile_handler(
     Query(params): Query<Params>,
     Path((z_str, x_str, y_str)): Path<(String, String, String)>,
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Parse coordinates, handling both integers and floats (truncating floats)
     let z = parse_tile_coord(&z_str)?;
     let x = parse_tile_coord(&x_str)?;
     let y = parse_tile_coord(&y_str)?;
 
-    let config = crate::config::Config::from_env();
+    let db = &app_state.db;
+    let config = &app_state.config;
     let max_tiles = 1 << z;
     if x >= max_tiles || y >= max_tiles {
         // Invalid tile coordinate - this is expected for out-of-bounds requests
@@ -110,7 +112,7 @@ pub async fn tile_handler(
     // Find the layer record by layer name.
     let layer_record = match layer::Entity::find()
         .filter(layer::Column::LayerName.eq(&params.layer))
-        .one(&db)
+        .one(db)
         .await
         .map_err(|e| {
             error!(error = %e, "Database query error");
@@ -126,7 +128,7 @@ pub async fn tile_handler(
     // Load the related style record(s).
     let related_styles = layer_record
         .find_related(style::Entity)
-        .all(&db)
+        .all(db)
         .await
         .map_err(|e| {
             error!(error = %e, "Database query error");

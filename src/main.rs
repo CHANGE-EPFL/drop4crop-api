@@ -51,8 +51,8 @@ async fn main() {
     }
 
     // Spawn background task for syncing statistics from Redis to PostgreSQL
-    info!("Starting statistics sync background task (every 5 minutes)...");
-    routes::stats_sync::spawn_stats_sync_task(db.clone());
+    info!("Starting statistics sync background task (every 30 seconds)...");
+    routes::stats_sync::spawn_stats_sync_task(db.clone(), config.clone());
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
     info!("Server listening on {}", addr);

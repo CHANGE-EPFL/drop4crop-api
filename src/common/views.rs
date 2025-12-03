@@ -1,7 +1,6 @@
 use super::models::HealthCheck;
-use crate::config::Config;
+use super::state::AppState;
 use axum::{Json, extract::State, http::StatusCode};
-use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -14,11 +13,12 @@ pub struct KeycloakConfig {
     realm: String,
     url: String,
 }
-pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
+
+pub fn router(state: &AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(healthz))
         .routes(routes!(get_keycloak_config))
-        .with_state(db.clone())
+        .with_state(state.clone())
 }
 
 #[utoipa::path(
@@ -33,7 +33,8 @@ pub fn router(db: &DatabaseConnection) -> OpenApiRouter {
         )
     )
 )]
-pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<HealthCheck>) {
+pub async fn healthz(State(app_state): State<AppState>) -> (StatusCode, Json<HealthCheck>) {
+    let db = &app_state.db;
     let now = chrono::Utc::now();
     if db.ping().await.is_err() {
         error!(
@@ -75,15 +76,14 @@ pub async fn healthz(State(db): State<DatabaseConnection>) -> (StatusCode, Json<
         )
     )
 )]
-pub async fn get_keycloak_config() -> (StatusCode, Json<KeycloakConfig>) {
-    // Note: This is a public endpoint that needs config for the keycloak info
-    // It's acceptable to call Config::from_env() here since this endpoint is specifically
-    // about returning configuration to the client
-    let config = Config::from_env();
+pub async fn get_keycloak_config(
+    State(app_state): State<AppState>,
+) -> (StatusCode, Json<KeycloakConfig>) {
+    let config = &app_state.config;
     let keycloak_config = KeycloakConfig {
-        client_id: config.keycloak_client_id,
-        realm: config.keycloak_realm,
-        url: config.keycloak_url,
+        client_id: config.keycloak_client_id.clone(),
+        realm: config.keycloak_realm.clone(),
+        url: config.keycloak_url.clone(),
     };
 
     (StatusCode::OK, Json(keycloak_config))

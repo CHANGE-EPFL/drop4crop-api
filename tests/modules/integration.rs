@@ -1,15 +1,16 @@
 // Integration tests for drop4crop-api
 // Run with: cargo test
-
-mod common;
+// Note: Tests use #[serial] to avoid database conflicts
 
 use axum::Router;
-use common::client::TestClient;
-use common::db::{create_test_db, seed_test_data};
-use common::fixtures::*;
+use crate::common::client::TestClient;
+use crate::common::db::{create_test_db, seed_test_data};
+use crate::common::fixtures::*;
+use crate::common;
 use drop4crop_api::config::Config;
 use serde_json::json;
 use axum::http::StatusCode;
+use serial_test::serial;
 
 /// Create test app state with PostgreSQL test database
 /// Note: Authentication is disabled for tests (keycloak_auth_instance = None)
@@ -58,6 +59,7 @@ async fn create_test_app() -> Router {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_styles_get_list() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
@@ -76,6 +78,7 @@ async fn test_styles_get_list() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_styles_get_one() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
@@ -90,6 +93,7 @@ async fn test_styles_get_one() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_styles_get_one_not_found() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
@@ -100,6 +104,7 @@ async fn test_styles_get_one_not_found() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_styles_create() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
@@ -400,52 +405,64 @@ async fn test_statistics_summary() {
 }
 
 // ============================================================================
-// CACHE MANAGEMENT ENDPOINTS (Note: These will fail without Redis running)
+// CACHE MANAGEMENT ENDPOINTS (Skip if Redis not available)
 // ============================================================================
 
 #[tokio::test]
 async fn test_cache_info() {
+    // Skip if Redis is not available
+    if !crate::common::is_redis_available().await {
+        eprintln!("Skipping test_cache_info: Redis not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
     let response = client.get("/api/cache/info").await;
-    // Note: This may fail if Redis is not running, which is expected in CI
-    // In that case, we expect a 500 error
-    if response.status.is_success() {
-        let data = response.json();
-        assert!(data.is_object());
-        // Should have cache info fields
-        assert!(data.get("redis_connected").is_some());
-        assert!(data.get("cache_size_mb").is_some());
-    } else {
-        // Redis not available - expected in test environment
-        assert!(response.status.is_server_error());
-    }
+    response.assert_success();
+
+    let data = response.json();
+    assert!(data.is_object());
+    // Should have cache info fields
+    assert!(data.get("redis_connected").is_some());
+    assert!(data.get("cache_size_mb").is_some());
 }
 
 #[tokio::test]
 async fn test_cache_keys() {
+    // Skip if Redis is not available
+    if !crate::common::is_redis_available().await {
+        eprintln!("Skipping test_cache_keys: Redis not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
     let response = client.get("/api/cache/keys").await;
-    // May fail without Redis
-    if response.status.is_success() {
-        let data = response.json();
-        assert!(data.is_array());
-    }
+    response.assert_success();
+
+    let data = response.json();
+    assert!(data.is_array());
 }
 
 #[tokio::test]
 async fn test_cache_ttl() {
+    // Skip if Redis is not available
+    if !crate::common::is_redis_available().await {
+        eprintln!("Skipping test_cache_ttl: Redis not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
     let response = client.get("/api/cache/ttl").await;
-    if response.status.is_success() {
-        let data = response.json();
-        assert!(data["ttl_seconds"].is_number());
-    }
+    response.assert_success();
+
+    let data = response.json();
+    assert!(data["ttl_seconds"].is_number());
 }
 
 // ============================================================================
@@ -466,6 +483,12 @@ async fn test_healthz() {
 
 #[tokio::test]
 async fn test_keycloak_config() {
+    // Skip if Keycloak is not configured
+    if !crate::common::is_keycloak_configured() {
+        eprintln!("Skipping test_keycloak_config: Keycloak not configured");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router); // No auth required
 

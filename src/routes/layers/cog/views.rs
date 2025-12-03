@@ -1,3 +1,5 @@
+use crate::common::state::AppState;
+use crate::config::Config;
 use crate::routes::layers::models::DownloadQueryParams;
 use crate::routes::layers::utils::crop_to_bbox;
 use crate::routes::tiles::storage;
@@ -30,28 +32,28 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
     description = "Serves Cloud Optimized GeoTIFF files with HTTP Range request support for streaming. Compatible with GDAL /vsicurl/ and QGIS."
 )]
 pub async fn get_cog_data(
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
     Path(filename): Path<String>,
     Query(params): Query<DownloadQueryParams>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    get_layer_data(db, filename, params, headers).await
+    get_layer_data(&app_state.db, &app_state.config, filename, params, headers).await
 }
 
 /// Shared function for fetching layer data (used by both legacy /download and new /data endpoints)
 async fn get_layer_data(
-    db: DatabaseConnection,
+    db: &DatabaseConnection,
+    config: &Config,
     filename: String,
     params: DownloadQueryParams,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    let config = crate::config::Config::from_env();
 
     // Verify layer exists in database
     use crate::routes::layers::db::{Column, Entity as LayerEntity};
     let layer = LayerEntity::find()
         .filter(Column::Filename.eq(&filename))
-        .one(&db)
+        .one(db)
         .await
         .map_err(|e| {
             (

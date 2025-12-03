@@ -1,7 +1,7 @@
 use axum::{routing::get, Router};
-use sea_orm::DatabaseConnection;
+use crate::common::state::AppState;
 
-pub fn router(db: &DatabaseConnection) -> Router {
+pub fn router(state: &AppState) -> Router {
     Router::new()
         .route("/", get(super::stac::stac_root))
         .route("/conformance", get(super::stac::stac_conformance))
@@ -9,5 +9,5 @@ pub fn router(db: &DatabaseConnection) -> Router {
         .route("/collections/drop4crop-tiles", get(super::stac::stac_collection))
         .route("/collections/drop4crop-tiles/items", get(super::stac::stac_items))
         .route("/search", get(super::stac::stac_search))
-        .with_state(db.clone())
+        .with_state(state.clone())
 }

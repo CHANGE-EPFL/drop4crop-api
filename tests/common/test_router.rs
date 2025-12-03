@@ -22,10 +22,10 @@ pub fn build_test_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/statistics", drop4crop_api::routes::admin::views::stats_router(&app_state))
         .nest("/api/cache", drop4crop_api::routes::admin::views::cache_router(&app_state))
         .nest("/api/layers", drop4crop_api::routes::layers::views::router(&app_state))
-        .nest("/api/layers/xyz", drop4crop_api::routes::tiles::views::xyz_router(db))
+        .nest("/api/layers/xyz", drop4crop_api::routes::tiles::views::xyz_router(&app_state))
         .nest("/api/styles", drop4crop_api::routes::styles::views::router(&app_state))
         .split_for_parts();
 
     // Merge health check routes
-    router.merge(drop4crop_api::common::views::router(db))
+    router.merge(drop4crop_api::common::views::router(&app_state))
 }

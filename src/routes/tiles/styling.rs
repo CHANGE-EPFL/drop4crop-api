@@ -3,8 +3,8 @@ use image::{ImageBuffer, ImageEncoder, Rgba, RgbaImage, codecs::png::PngEncoder}
 use sea_orm::{FromQueryResult, JsonValue};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
-use utoipa::ToSchema;
 use tracing::{debug, warn};
+use utoipa::ToSchema;
 
 /// Custom deserializer that accepts both strings and numbers for the label field
 fn deserialize_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -21,7 +21,10 @@ where
         Some(serde_json::Value::String(s)) => Ok(Some(s)),
         Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
         Some(serde_json::Value::Bool(b)) => Ok(Some(b.to_string())),
-        Some(other) => Err(D::Error::custom(format!("unexpected type for label: {:?}", other))),
+        Some(other) => Err(D::Error::custom(format!(
+            "unexpected type for label: {:?}",
+            other
+        ))),
     }
 }
 
@@ -61,13 +64,15 @@ pub fn get_color_discrete(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u
 /// If the value is outside the range of the color stops, returns a transparent color.
 pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
     if let Some(&(min_val, _)) = color_stops.first()
-        && value < min_val {
-            return Rgba([0, 0, 0, 0]);
-        }
+        && value < min_val
+    {
+        return Rgba([0, 0, 0, 0]);
+    }
     if let Some(&(max_val, _)) = color_stops.last()
-        && value > max_val {
-            return Rgba([0, 0, 0, 0]);
-        }
+        && value > max_val
+    {
+        return Rgba([0, 0, 0, 0]);
+    }
     for window in color_stops.windows(2) {
         let (v1, c1) = window[0];
         let (v2, c2) = window[1];
@@ -103,7 +108,7 @@ pub fn style_layer(
     style: Option<JsonValue>,
     interpolation_type: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let is_discrete = interpolation_type.map_or(false, |t| t == "discrete");
+    let is_discrete = interpolation_type == Some("discrete");
 
     // Deserialize the style stops.
     let stops: Vec<ColorStop> = match style {
@@ -165,7 +170,8 @@ pub fn style_layer(
             get_color_discrete(data_value, &color_stops)
         } else {
             // For linear mode, check bounds and interpolate
-            if data_value < color_stops.first().unwrap().0 || data_value > color_stops.last().unwrap().0
+            if data_value < color_stops.first().unwrap().0
+                || data_value > color_stops.last().unwrap().0
             {
                 return Rgba([0, 0, 0, 0]);
             }

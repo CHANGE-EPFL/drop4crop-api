@@ -1,8 +1,6 @@
 // Layer utility function tests
 // Tests for filename parsing and bbox cropping functionality
 
-mod common;
-
 use drop4crop_api::config::Config;
 use drop4crop_api::routes::layers::utils::{parse_filename, crop_to_bbox};
 use drop4crop_api::routes::layers::models::LayerInfo;

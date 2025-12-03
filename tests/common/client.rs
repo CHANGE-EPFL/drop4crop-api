@@ -1,4 +1,5 @@
 // HTTP client utilities for testing
+#![allow(dead_code)]
 
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};

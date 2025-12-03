@@ -68,3 +68,4 @@ stac-api = "0.8.1"
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["util"] }
 tiff = "0.9"
+serial_test = "3.2"

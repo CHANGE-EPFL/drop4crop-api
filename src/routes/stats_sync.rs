@@ -4,10 +4,11 @@ use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use tokio::time::{Duration, interval};
 use tracing::{error, info};
+use crate::config::Config;
 
 /// Spawns a background task that syncs statistics from Redis to PostgreSQL every 30 seconds.
 /// Uses distributed locking to ensure only one instance runs the sync at a time.
-pub fn spawn_stats_sync_task(db: DatabaseConnection) {
+pub fn spawn_stats_sync_task(db: DatabaseConnection, config: Config) {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(30)); // 30 seconds
         let instance_id = uuid::Uuid::new_v4().to_string();
@@ -15,7 +16,7 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
         loop {
             ticker.tick().await;
 
-            match sync_stats_to_db(&db, &instance_id).await {
+            match sync_stats_to_db(&db, &config, &instance_id).await {
                 Ok(synced_count) => {
                     if synced_count > 0 {
                         info!(synced_count, "Synced statistics to PostgreSQL");
@@ -33,9 +34,8 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
 }
 
 /// Attempts to sync statistics from Redis to PostgreSQL with distributed locking.
-async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<usize> {
-    let config = crate::config::Config::from_env();
-    let redis_client = super::tiles::cache::get_redis_client(&config);
+async fn sync_stats_to_db(db: &DatabaseConnection, config: &Config, instance_id: &str) -> Result<usize> {
+    let redis_client = super::tiles::cache::get_redis_client(config);
     let mut con = redis_client.get_multiplexed_async_connection().await?;
 
     // Try to acquire distributed lock
@@ -160,7 +160,7 @@ async fn scan_keys(
 
 /// Parses a stats key and extracts the date, layer_id, and stat_type.
 /// Format: {app}-{deploy}/stats:{YYYY-MM-DD}:{layer_id}:{type}
-fn parse_stats_key(key: &str, config: &crate::config::Config) -> Option<(String, String, String)> {
+fn parse_stats_key(key: &str, config: &Config) -> Option<(String, String, String)> {
     let prefix = format!("{}-{}/stats:", config.app_name, config.deployment);
     let rest = key.strip_prefix(&prefix)?;
     let parts: Vec<&str> = rest.splitn(3, ':').collect();

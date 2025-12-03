@@ -1,9 +1,7 @@
 // Integration tests for S3 storage and Redis caching
 
-mod common;
-
-use common::client::TestClient;
-use common::db::create_test_app;
+use crate::common::client::TestClient;
+use crate::common::db::create_test_app;
 use std::io::Cursor;
 
 /// Creates a test GeoTIFF with a known pattern for verification
@@ -96,6 +94,12 @@ fn verify_geotiff_size(data: &[u8]) -> bool {
 
 #[tokio::test]
 async fn test_upload_file_to_s3() {
+    // Skip if S3 is not available
+    if !crate::common::is_s3_available().await {
+        eprintln!("Skipping test_upload_file_to_s3: S3/MinIO not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
@@ -141,6 +145,12 @@ async fn test_upload_file_to_s3() {
 
 #[tokio::test]
 async fn test_upload_invalid_filename() {
+    // Skip if S3 is not available
+    if !crate::common::is_s3_available().await {
+        eprintln!("Skipping test_upload_invalid_filename: S3/MinIO not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
@@ -163,6 +173,12 @@ async fn test_upload_invalid_filename() {
 
 #[tokio::test]
 async fn test_upload_crop_variable_layer() {
+    // Skip if S3 is not available
+    if !crate::common::is_s3_available().await {
+        eprintln!("Skipping test_upload_crop_variable_layer: S3/MinIO not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
@@ -190,8 +206,17 @@ async fn test_upload_crop_variable_layer() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Requires uploaded layer with actual raster data in S3
 async fn test_tile_caching_with_redis() {
+    // Skip if Redis or S3 is not available
+    if !crate::common::is_redis_available().await {
+        eprintln!("Skipping test_tile_caching_with_redis: Redis not available");
+        return;
+    }
+    if !crate::common::is_s3_available().await {
+        eprintln!("Skipping test_tile_caching_with_redis: S3/MinIO not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
@@ -227,6 +252,12 @@ async fn test_tile_caching_with_redis() {
 
 #[tokio::test]
 async fn test_cache_management_endpoints() {
+    // Skip if Redis is not available
+    if !crate::common::is_redis_available().await {
+        eprintln!("Skipping test_cache_management_endpoints: Redis not available");
+        return;
+    }
+
     let router = create_test_app().await;
     let client = TestClient::new(router);
 

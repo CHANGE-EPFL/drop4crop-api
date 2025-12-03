@@ -3,7 +3,8 @@ use axum::{
     http::{StatusCode, HeaderMap, header},
     Json,
 };
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use crate::common::state::AppState;
 use crate::routes::layers::db as layer;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -121,15 +122,15 @@ pub async fn stac_conformance() -> Json<Conformance> {
 /// STAC collections endpoint - returns a single collection for all Drop4Crop data
 pub async fn stac_collections(
     headers: HeaderMap,
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
     let base_url = get_base_url(&headers);
+    let db = &app_state.db;
 
     // Get count of enabled layers
-    use sea_orm::EntityTrait;
     let count = layer::Entity::find()
         .filter(layer::Column::Enabled.eq(true))
-        .count(&db)
+        .count(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -317,9 +318,9 @@ pub async fn stac_collections(
 /// STAC single collection endpoint
 pub async fn stac_collection(
     headers: HeaderMap,
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let response = stac_collections(headers, State(db)).await?;
+    let response = stac_collections(headers, State(app_state)).await?;
     let collections = response.0["collections"].as_array().unwrap();
     Ok(Json(collections[0].clone()))
 }
@@ -328,25 +329,25 @@ pub async fn stac_collection(
 pub async fn stac_items(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    search_items(headers, params, db).await
+    search_items(headers, params, &app_state.db).await
 }
 
 /// STAC search endpoint
 pub async fn stac_search(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
-    State(db): State<DatabaseConnection>,
+    State(app_state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    search_items(headers, params, db).await
+    search_items(headers, params, &app_state.db).await
 }
 
 /// Common search logic for items and search endpoints
 async fn search_items(
     headers: HeaderMap,
     params: SearchParams,
-    db: DatabaseConnection,
+    db: &sea_orm::DatabaseConnection,
 ) -> Result<Json<Value>, StatusCode> {
     let base_url = get_base_url(&headers);
 
@@ -385,7 +386,7 @@ async fn search_items(
 
     let layers = query
         .limit(limit as u64)
-        .all(&db)
+        .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

@@ -23,6 +23,9 @@ const STALE_TIMEOUT_SECS: i64 = 60;
 /// How often workers poll for work when idle (in seconds)
 pub const WORKER_IDLE_POLL_INTERVAL_SECS: u64 = 30;
 
+/// Maximum number of retries before marking an item as failed
+const MAX_RETRIES: u64 = 3;
+
 // ============================================================================
 // Redis Key Functions
 // ============================================================================
@@ -53,6 +56,10 @@ fn errors_key(config: &crate::config::Config) -> String {
 
 fn cancel_key(config: &crate::config::Config) -> String {
     format!("{}:cancel", key_prefix(config))
+}
+
+fn retries_key(config: &crate::config::Config) -> String {
+    format!("{}:retries", key_prefix(config))
 }
 
 // ============================================================================
@@ -221,6 +228,29 @@ pub async fn start_job(
     Ok(total)
 }
 
+/// Add additional layers to an existing job's todo queue
+/// Used for recovering pending layers from the database
+pub async fn add_layers_to_queue(config: &crate::config::Config, layer_ids: Vec<Uuid>) -> Result<u64, String> {
+    if layer_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut con = get_connection(config).await?;
+    let todo_key = todo_key(config);
+    let total = layer_ids.len() as u64;
+
+    let layer_id_strings: Vec<String> = layer_ids.iter().map(|id| id.to_string()).collect();
+
+    for chunk in layer_id_strings.chunks(1000) {
+        let _: () = con.sadd(&todo_key, chunk)
+            .await
+            .map_err(|e| format!("Redis SADD error: {}", e))?;
+    }
+
+    debug!(count = total, "Added layers to todo queue");
+    Ok(total)
+}
+
 /// Clear all job data from Redis
 pub async fn clear_job_data(config: &crate::config::Config) -> Result<(), String> {
     let mut con = get_connection(config).await?;
@@ -232,6 +262,7 @@ pub async fn clear_job_data(config: &crate::config::Config) -> Result<(), String
         completed_key(config),
         errors_key(config),
         cancel_key(config),
+        retries_key(config),
     ];
 
     for key in keys {
@@ -378,6 +409,8 @@ pub async fn recover_stale_items(config: &crate::config::Config) -> Result<u64, 
     let mut con = get_connection(config).await?;
     let processing_key = processing_key(config);
     let todo_key = todo_key(config);
+    let retries_key = retries_key(config);
+    let errors_key = errors_key(config);
 
     // Get all processing items
     let items: std::collections::HashMap<String, String> = con.hgetall(&processing_key)
@@ -385,30 +418,49 @@ pub async fn recover_stale_items(config: &crate::config::Config) -> Result<u64, 
         .map_err(|e| format!("Redis HGETALL error: {}", e))?;
 
     let mut recovered = 0u64;
+    let mut failed = 0u64;
     let now = Utc::now();
 
     for (layer_id, value) in items {
         // Parse the value: "worker_id:timestamp"
-        if let Some(timestamp_str) = value.split(':').nth(1) {
-            if let Ok(started_at) = DateTime::parse_from_rfc3339(timestamp_str) {
+        let parts: Vec<&str> = value.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            if let Ok(started_at) = DateTime::parse_from_rfc3339(parts[1]) {
                 let elapsed = (now - started_at.with_timezone(&Utc)).num_seconds();
                 if elapsed > STALE_TIMEOUT_SECS {
-                    // Move back to todo
+                    // Remove from processing
                     let _: () = con.hdel(&processing_key, &layer_id)
                         .await
                         .map_err(|e| format!("Redis HDEL error: {}", e))?;
-                    let _: () = con.sadd(&todo_key, &layer_id)
+
+                    // Increment retry count
+                    let retry_count: u64 = con.hincr(&retries_key, &layer_id, 1i64)
                         .await
-                        .map_err(|e| format!("Redis SADD error: {}", e))?;
-                    recovered += 1;
-                    info!(layer_id, elapsed_secs = elapsed, "Recovered stale item");
+                        .map_err(|e| format!("Redis HINCR error: {}", e))?;
+
+                    if retry_count >= MAX_RETRIES {
+                        // Too many retries - mark as failed
+                        let error_msg = format!("Timed out {} times (worker crashed or layer processing too slow)", retry_count);
+                        let _: () = con.hset(&errors_key, &layer_id, &error_msg)
+                            .await
+                            .map_err(|e| format!("Redis HSET error: {}", e))?;
+                        failed += 1;
+                        warn!(layer_id, retry_count, "Layer failed after max retries");
+                    } else {
+                        // Put back in todo queue for retry
+                        let _: () = con.sadd(&todo_key, &layer_id)
+                            .await
+                            .map_err(|e| format!("Redis SADD error: {}", e))?;
+                        recovered += 1;
+                        info!(layer_id, retry_count, elapsed_secs = elapsed, "Recovered stale item for retry");
+                    }
                 }
             }
         }
     }
 
-    if recovered > 0 {
-        info!(recovered, "Recovered stale items back to todo queue");
+    if recovered > 0 || failed > 0 {
+        info!(recovered, failed, "Processed stale items");
     }
 
     Ok(recovered)
@@ -424,18 +476,29 @@ pub async fn is_job_complete(config: &crate::config::Config) -> Result<bool, Str
     Ok(todo_count == 0 && processing_count == 0)
 }
 
-/// Check if a job is currently active
+/// Check if a job is currently active (has work to do or items being processed)
 pub async fn is_job_active(config: &crate::config::Config) -> bool {
     let mut con = match get_connection(config).await {
         Ok(c) => c,
         Err(_) => return false,
     };
 
+    // Check if job metadata says it's running
     let metadata_json: Option<String> = con.get(status_key(config)).await.unwrap_or(None);
-    metadata_json
+    let metadata_running = metadata_json
         .and_then(|j| serde_json::from_str::<JobMetadata>(&j).ok())
         .map(|m| m.is_running)
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    if !metadata_running {
+        return false;
+    }
+
+    // Job is active if there's work in todo OR items in processing (might be stale)
+    let todo_count: u64 = con.scard(todo_key(config)).await.unwrap_or(0);
+    let processing_count: u64 = con.hlen(processing_key(config)).await.unwrap_or(0);
+
+    todo_count > 0 || processing_count > 0
 }
 
 // ============================================================================

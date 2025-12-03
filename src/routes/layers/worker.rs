@@ -3,7 +3,7 @@
 //! Each API replica runs this worker, which polls Redis for work items
 //! and processes them. Multiple workers can run concurrently across replicas.
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait};
 use sea_orm::entity::*;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -70,6 +70,15 @@ pub async fn start_worker(config: Config, db: DatabaseConnection) {
                 // No work available, check if job should be marked complete
                 match jobs::is_job_complete(&config).await {
                     Ok(true) => {
+                        // Before marking complete, check database for any pending layers
+                        // that might have been missed or not added to the queue
+                        let recovered_from_db = recover_pending_from_db(&config, &db).await;
+                        if recovered_from_db > 0 {
+                            info!(recovered_from_db, "Found pending layers in database, continuing job");
+                            // Don't sleep - loop back to process recovered items
+                            continue;
+                        }
+
                         if jobs::is_job_active(&config).await {
                             info!(worker_id, "Job complete, marking as finished");
                             if let Err(e) = jobs::mark_job_completed(&config).await {
@@ -250,4 +259,38 @@ async fn update_layer_error_status(db: &DatabaseConnection, layer: super::db::Mo
         "error": error_msg
     })));
     let _ = active_layer.update(db).await;
+}
+
+/// Find layers with stats_status='pending' in the database and add them to the queue
+/// Returns the number of layers added
+async fn recover_pending_from_db(config: &Config, db: &DatabaseConnection) -> u64 {
+    // Find all layers with stats_status_value = 'pending'
+    let pending_layers = match super::db::Entity::find()
+        .filter(super::db::Column::StatsStatusValue.eq("pending"))
+        .all(db)
+        .await
+    {
+        Ok(layers) => layers,
+        Err(e) => {
+            warn!(error = %e, "Failed to query pending layers from database");
+            return 0;
+        }
+    };
+
+    if pending_layers.is_empty() {
+        return 0;
+    }
+
+    let layer_ids: Vec<Uuid> = pending_layers.iter().map(|l| l.id).collect();
+    let count = layer_ids.len() as u64;
+
+    info!(count, "Found pending layers in database, adding to queue");
+
+    // Add them to the todo queue
+    if let Err(e) = jobs::add_layers_to_queue(config, layer_ids).await {
+        warn!(error = %e, "Failed to add pending layers to queue");
+        return 0;
+    }
+
+    count
 }

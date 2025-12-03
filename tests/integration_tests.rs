@@ -480,3 +480,24 @@ async fn test_keycloak_config() {
     assert!(data.get("realm").is_some());
     assert!(data.get("url").is_some());
 }
+
+// ============================================================================
+// TILE COORDINATE PARSING TESTS
+// ============================================================================
+
+// Note: Integer and float coordinate tests require full environment setup (S3, etc.)
+// and are better suited for end-to-end testing. The parse_tile_coord function
+// is validated by:
+// 1. The invalid test below (proves BAD_REQUEST is returned for unparseable coords)
+// 2. Unit tests could be added for parse_tile_coord directly if needed
+
+#[tokio::test]
+async fn test_tile_coordinates_invalid() {
+    let router = create_test_app().await;
+    let client = TestClient::new(router);
+
+    // Invalid coordinates (non-numeric) should return BAD_REQUEST
+    // This validates that parse_tile_coord correctly rejects invalid input
+    let response = client.get("/api/layers/xyz/abc/4/5?layer=test_layer").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST, "Invalid coordinates should return BAD_REQUEST");
+}

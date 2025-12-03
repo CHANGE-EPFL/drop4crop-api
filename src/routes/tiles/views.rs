@@ -28,6 +28,25 @@ pub fn xyz_router(db: &DatabaseConnection) -> OpenApiRouter {
         .with_state(db.clone())
 }
 
+/// Parse a tile coordinate from a string, handling both integers and floats.
+/// Floats are truncated toward zero. Negative values are rejected.
+fn parse_tile_coord(s: &str) -> Result<u32, StatusCode> {
+    // First try parsing as u32 directly (fastest path for normal integer requests)
+    if let Ok(v) = s.parse::<u32>() {
+        return Ok(v);
+    }
+    // If that fails, try parsing as f64 and truncate
+    // This handles browsers that send float coordinates like "3.7"
+    let f = s.parse::<f64>().map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Reject negative values - tile coordinates must be non-negative
+    if f < 0.0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok(f.trunc() as u32)
+}
+
 #[utoipa::path(
     get,
     path = "/{z}/{x}/{y}",
@@ -37,9 +56,9 @@ pub fn xyz_router(db: &DatabaseConnection) -> OpenApiRouter {
         (status = 500, description = "Internal server error")
     ),
     params(
-        ("z" = u32, description = "Zoom level"),
-        ("x" = u32, description = "Tile x coordinate"),
-        ("y" = u32, description = "Tile y coordinate"),
+        ("z" = String, description = "Zoom level"),
+        ("x" = String, description = "Tile x coordinate"),
+        ("y" = String, description = "Tile y coordinate"),
         ("layer" = String, Query, description = "Layer name")
     ),
     summary = "Get tile image",
@@ -48,9 +67,14 @@ pub fn xyz_router(db: &DatabaseConnection) -> OpenApiRouter {
 #[axum::debug_handler]
 pub async fn tile_handler(
     Query(params): Query<Params>,
-    Path((z, x, y)): Path<(u32, u32, u32)>,
+    Path((z_str, x_str, y_str)): Path<(String, String, String)>,
     State(db): State<DatabaseConnection>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // Parse coordinates, handling both integers and floats (truncating floats)
+    let z = parse_tile_coord(&z_str)?;
+    let x = parse_tile_coord(&x_str)?;
+    let y = parse_tile_coord(&y_str)?;
+
     let config = crate::config::Config::from_env();
     let max_tiles = 1 << z;
     if x >= max_tiles || y >= max_tiles {
@@ -124,4 +148,53 @@ pub async fn tile_handler(
 
     let response = ([(header::CONTENT_TYPE, "image/png")], png_data);
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_tile_coord_integer() {
+        assert_eq!(parse_tile_coord("0").unwrap(), 0);
+        assert_eq!(parse_tile_coord("1").unwrap(), 1);
+        assert_eq!(parse_tile_coord("123").unwrap(), 123);
+        assert_eq!(parse_tile_coord("4294967295").unwrap(), u32::MAX); // max u32
+    }
+
+    #[test]
+    fn test_parse_tile_coord_float_truncation() {
+        // Floats should be truncated (not rounded)
+        assert_eq!(parse_tile_coord("3.7").unwrap(), 3);
+        assert_eq!(parse_tile_coord("4.2").unwrap(), 4);
+        assert_eq!(parse_tile_coord("5.9").unwrap(), 5);
+        assert_eq!(parse_tile_coord("0.0").unwrap(), 0);
+        assert_eq!(parse_tile_coord("0.999").unwrap(), 0);
+        assert_eq!(parse_tile_coord("10.5").unwrap(), 10);
+    }
+
+    #[test]
+    fn test_parse_tile_coord_invalid() {
+        assert_eq!(parse_tile_coord("abc").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("12abc").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("abc12").unwrap_err(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_parse_tile_coord_negative() {
+        // All negative values should be rejected - tile coordinates must be non-negative
+        assert_eq!(parse_tile_coord("-1").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("-0.5").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("-0.001").unwrap_err(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_tile_coord("-100").unwrap_err(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_parse_tile_coord_zero_is_valid() {
+        // Zero is a valid tile coordinate (e.g., at zoom 0 the only tile is 0/0/0)
+        assert_eq!(parse_tile_coord("0").unwrap(), 0);
+        assert_eq!(parse_tile_coord("0.0").unwrap(), 0);
+        assert_eq!(parse_tile_coord("0.9").unwrap(), 0); // truncates to 0
+    }
 }

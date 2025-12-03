@@ -2,7 +2,7 @@ pub mod admin;
 mod countries;
 pub mod layers;
 pub mod styles;
-mod tiles;
+pub mod tiles;
 pub mod stats_sync;
 
 use crate::{common::state::AppState, config::Config};

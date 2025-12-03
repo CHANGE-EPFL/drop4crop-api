@@ -41,6 +41,8 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     // Add custom routes
     let protected_custom_routes = OpenApiRouter::new()
         .routes(routes!(upload_file))
+        .routes(routes!(recalculate_layer_stats))
+        .routes(routes!(recalculate_all_layer_stats))
         .with_state(state.clone());
 
     protected_router = protected_router
@@ -467,6 +469,13 @@ pub async fn upload_file(
 
             // Create layer record in database
             let layer_name = filename.strip_suffix(".tif").unwrap_or(&filename);
+            let cog_file_size = cog_bytes.len() as i64;
+            let stats_status_json = serde_json::json!({
+                "status": "success",
+                "last_run": chrono::Utc::now(),
+                "error": null,
+                "details": format!("Initial upload - min: {}, max: {}, avg: {}, file_size: {} bytes", min_val, max_val, global_avg, cog_file_size)
+            });
             debug!(layer_name, "Creating layer record");
             let layer_record = match layer_info {
                 LayerInfo::Climate(info) => {
@@ -484,6 +493,8 @@ pub async fn upload_file(
                         min_value: Set(Some(min_val)),
                         max_value: Set(Some(max_val)),
                         global_average: Set(Some(global_avg)),
+                        file_size: Set(Some(cog_file_size)),
+                        stats_status: Set(Some(stats_status_json.clone())),
                         enabled: Set(true),
                         is_crop_specific: Set(false),
                         ..Default::default()
@@ -500,6 +511,8 @@ pub async fn upload_file(
                         min_value: Set(Some(min_val)),
                         max_value: Set(Some(max_val)),
                         global_average: Set(Some(global_avg)),
+                        file_size: Set(Some(cog_file_size)),
+                        stats_status: Set(Some(stats_status_json.clone())),
                         enabled: Set(true),
                         is_crop_specific: Set(true),
                         ..Default::default()
@@ -560,5 +573,404 @@ pub async fn upload_file(
             "message": "No file found in upload"
         })),
     ))
+}
+
+/// Response for recalculated statistics
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct RecalculatedStats {
+    pub id: Uuid,
+    pub layer_name: Option<String>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    pub global_average: Option<f64>,
+    pub previous_min_value: Option<f64>,
+    pub previous_max_value: Option<f64>,
+    pub previous_global_average: Option<f64>,
+}
+
+/// Response for bulk recalculation
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BulkRecalculateResponse {
+    pub success_count: usize,
+    pub error_count: usize,
+    pub results: Vec<RecalculatedStats>,
+    pub errors: Vec<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/{layer_id}/recalculate-stats",
+    params(
+        ("layer_id" = Uuid, Path, description = "Layer ID")
+    ),
+    responses(
+        (status = 200, description = "Statistics recalculated", body = RecalculatedStats),
+        (status = 404, description = "Layer not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Recalculate layer statistics",
+    description = "Fetches the layer from S3 and recalculates min_value, max_value, and global_average using GDAL"
+)]
+pub async fn recalculate_layer_stats(
+    Path(layer_id): Path<Uuid>,
+    State(app_state): State<AppState>,
+) -> Result<Json<RecalculatedStats>, (StatusCode, Json<serde_json::Value>)> {
+    let db = &app_state.db;
+    let config = &app_state.config;
+
+    // Find the layer
+    let layer = super::db::Entity::find_by_id(layer_id)
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database error finding layer");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": "Database error", "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "message": "Layer not found" })),
+            )
+        })?;
+
+    let filename = layer.filename.clone().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": "Layer has no filename" })),
+        )
+    })?;
+
+    // Fetch the file from S3
+    let object = storage::get_object(&config, &filename).await.map_err(|e| {
+        error!(filename, error = %e, "Error fetching object from S3");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": "Failed to fetch layer from S3", "error": e.to_string() })),
+        )
+    })?;
+
+    // Validate file size - a valid GeoTIFF should be at least a few KB
+    let file_size = object.len() as i64;
+    if file_size < 1024 {
+        error!(filename, file_size, "File too small to be a valid GeoTIFF");
+
+        // Update stats_status with error
+        use super::db::ActiveModel as LayerActiveModel;
+        let mut active_layer: LayerActiveModel = layer.clone().into();
+        active_layer.stats_status = Set(Some(serde_json::json!({
+            "status": "error",
+            "last_run": chrono::Utc::now(),
+            "error": format!("File too small: {} bytes", file_size),
+            "details": format!("filename: {}", filename)
+        })));
+        active_layer.file_size = Set(Some(file_size));
+        let _ = active_layer.update(db).await;
+
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "File appears to be corrupted or invalid",
+                "error": format!("File size is only {} bytes, expected a valid GeoTIFF", file_size),
+                "filename": filename
+            })),
+        ));
+    }
+
+    debug!(filename = %filename, file_size, "Fetched file from S3, calculating statistics");
+
+    // Helper to update stats_status on error
+    async fn update_error_status(
+        db: &sea_orm::DatabaseConnection,
+        layer: super::db::Model,
+        error_msg: &str,
+        filename: &str,
+        file_size: i64,
+    ) {
+        use super::db::ActiveModel as LayerActiveModel;
+        let mut active_layer: LayerActiveModel = layer.into();
+        active_layer.stats_status = Set(Some(serde_json::json!({
+            "status": "error",
+            "last_run": chrono::Utc::now(),
+            "error": error_msg,
+            "details": format!("filename: {}, file_size: {} bytes", filename, file_size)
+        })));
+        active_layer.file_size = Set(Some(file_size));
+        let _ = active_layer.update(db).await;
+    }
+
+    // Calculate statistics
+    let (min_val, max_val) = match get_min_max_of_raster(&object) {
+        Ok(v) => v,
+        Err(e) => {
+            let error_msg = e.to_string();
+            error!(filename = %filename, file_size, error = %e, "Error calculating min/max");
+            update_error_status(db, layer.clone(), &error_msg, &filename, file_size).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "message": "Failed to calculate min/max",
+                    "error": error_msg,
+                    "filename": filename,
+                    "file_size": file_size
+                })),
+            ));
+        }
+    };
+
+    let global_avg = match get_global_average_of_raster(&object) {
+        Ok(v) => v,
+        Err(e) => {
+            let error_msg = e.to_string();
+            error!(filename = %filename, file_size, error = %e, "Error calculating global average");
+            update_error_status(db, layer.clone(), &error_msg, &filename, file_size).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "message": "Failed to calculate global average",
+                    "error": error_msg,
+                    "filename": filename,
+                    "file_size": file_size
+                })),
+            ));
+        }
+    };
+
+    // Validate values
+    if !min_val.is_finite() || !max_val.is_finite() || !global_avg.is_finite() {
+        let error_msg = "Calculated statistics contain invalid values (NaN/Inf)";
+        update_error_status(db, layer.clone(), error_msg, &filename, file_size).await;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": error_msg })),
+        ));
+    }
+
+    // Store previous values for response
+    let previous_min = layer.min_value;
+    let previous_max = layer.max_value;
+    let previous_avg = layer.global_average;
+
+    // Update the layer with stats and success status
+    use super::db::ActiveModel as LayerActiveModel;
+    let mut active_layer: LayerActiveModel = layer.clone().into();
+    active_layer.min_value = Set(Some(min_val));
+    active_layer.max_value = Set(Some(max_val));
+    active_layer.global_average = Set(Some(global_avg));
+    active_layer.file_size = Set(Some(file_size));
+    active_layer.stats_status = Set(Some(serde_json::json!({
+        "status": "success",
+        "last_run": chrono::Utc::now(),
+        "error": null,
+        "details": format!("min: {}, max: {}, avg: {}, file_size: {} bytes", min_val, max_val, global_avg, file_size)
+    })));
+
+    active_layer.update(db).await.map_err(|e| {
+        error!(error = %e, "Error updating layer");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "message": "Failed to update layer", "error": e.to_string() })),
+        )
+    })?;
+
+    info!(
+        layer_id = %layer_id,
+        layer_name = layer.layer_name,
+        min_val, max_val, global_avg,
+        "Recalculated layer statistics"
+    );
+
+    Ok(Json(RecalculatedStats {
+        id: layer_id,
+        layer_name: layer.layer_name,
+        min_value: Some(min_val),
+        max_value: Some(max_val),
+        global_average: Some(global_avg),
+        previous_min_value: previous_min,
+        previous_max_value: previous_max,
+        previous_global_average: previous_avg,
+    }))
+}
+
+/// Query parameters for bulk recalculation
+#[derive(serde::Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct BulkRecalculateParams {
+    /// Filter by crop
+    pub crop: Option<String>,
+    /// Filter by variable
+    pub variable: Option<String>,
+    /// Filter by water model
+    pub water_model: Option<String>,
+    /// Filter by climate model
+    pub climate_model: Option<String>,
+    /// Filter by scenario
+    pub scenario: Option<String>,
+    /// Filter by year
+    pub year: Option<i32>,
+    /// Only recalculate layers with null statistics
+    pub only_null_stats: Option<bool>,
+    /// Limit number of layers to process (default 100, max 1000)
+    pub limit: Option<u64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/recalculate-stats",
+    params(BulkRecalculateParams),
+    responses(
+        (status = 200, description = "Bulk recalculation completed", body = BulkRecalculateResponse),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Bulk recalculate layer statistics",
+    description = "Recalculates statistics for multiple layers. Use filters to target specific layers."
+)]
+pub async fn recalculate_all_layer_stats(
+    Query(params): Query<BulkRecalculateParams>,
+    State(app_state): State<AppState>,
+) -> Result<Json<BulkRecalculateResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let db = &app_state.db;
+    let config = &app_state.config;
+
+    // Build query with filters
+    let mut query = super::db::Entity::find();
+
+    if let Some(crop) = &params.crop {
+        query = query.filter(super::db::Column::Crop.eq(crop));
+    }
+    if let Some(variable) = &params.variable {
+        query = query.filter(super::db::Column::Variable.eq(variable));
+    }
+    if let Some(water_model) = &params.water_model {
+        query = query.filter(super::db::Column::WaterModel.eq(water_model));
+    }
+    if let Some(climate_model) = &params.climate_model {
+        query = query.filter(super::db::Column::ClimateModel.eq(climate_model));
+    }
+    if let Some(scenario) = &params.scenario {
+        query = query.filter(super::db::Column::Scenario.eq(scenario));
+    }
+    if let Some(year) = params.year {
+        query = query.filter(super::db::Column::Year.eq(year));
+    }
+    if params.only_null_stats.unwrap_or(false) {
+        query = query.filter(
+            super::db::Column::MinValue.is_null()
+                .or(super::db::Column::MaxValue.is_null())
+                .or(super::db::Column::GlobalAverage.is_null())
+        );
+    }
+
+    // Apply limit (default 100, max 1000)
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    let layers = query
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database error fetching layers");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": "Database error", "error": e.to_string() })),
+            )
+        })?;
+
+    info!(count = layers.len(), "Starting bulk recalculation");
+
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for layer in layers {
+        let layer_id = layer.id;
+        let layer_name = layer.layer_name.clone();
+
+        let filename = match &layer.filename {
+            Some(f) => f.clone(),
+            None => {
+                errors.push(format!("Layer {} has no filename", layer_id));
+                error_count += 1;
+                continue;
+            }
+        };
+
+        // Fetch from S3
+        let object = match storage::get_object(&config, &filename).await {
+            Ok(o) => o,
+            Err(e) => {
+                errors.push(format!("Layer {}: Failed to fetch from S3: {}", layer_id, e));
+                error_count += 1;
+                continue;
+            }
+        };
+
+        // Calculate statistics
+        let (min_val, max_val) = match get_min_max_of_raster(&object) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("Layer {}: Failed to calculate min/max: {}", layer_id, e));
+                error_count += 1;
+                continue;
+            }
+        };
+
+        let global_avg = match get_global_average_of_raster(&object) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("Layer {}: Failed to calculate average: {}", layer_id, e));
+                error_count += 1;
+                continue;
+            }
+        };
+
+        // Validate
+        if !min_val.is_finite() || !max_val.is_finite() || !global_avg.is_finite() {
+            errors.push(format!("Layer {}: Invalid statistics (NaN/Inf)", layer_id));
+            error_count += 1;
+            continue;
+        }
+
+        // Store previous values
+        let previous_min = layer.min_value;
+        let previous_max = layer.max_value;
+        let previous_avg = layer.global_average;
+
+        // Update
+        use super::db::ActiveModel as LayerActiveModel;
+        let mut active_layer: LayerActiveModel = layer.into();
+        active_layer.min_value = Set(Some(min_val));
+        active_layer.max_value = Set(Some(max_val));
+        active_layer.global_average = Set(Some(global_avg));
+
+        if let Err(e) = active_layer.update(db).await {
+            errors.push(format!("Layer {}: Failed to update: {}", layer_id, e));
+            error_count += 1;
+            continue;
+        }
+
+        results.push(RecalculatedStats {
+            id: layer_id,
+            layer_name,
+            min_value: Some(min_val),
+            max_value: Some(max_val),
+            global_average: Some(global_avg),
+            previous_min_value: previous_min,
+            previous_max_value: previous_max,
+            previous_global_average: previous_avg,
+        });
+        success_count += 1;
+    }
+
+    info!(success_count, error_count, "Bulk recalculation completed");
+
+    Ok(Json(BulkRecalculateResponse {
+        success_count,
+        error_count,
+        results,
+        errors,
+    }))
 }
 

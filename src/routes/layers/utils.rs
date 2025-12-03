@@ -129,24 +129,42 @@ pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
 pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
     debug!("Calculating raster min/max values using GDAL");
 
-    // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
-    let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join(format!("minmax_{}.tif", std::process::id()));
+    // Use vsimem (GDAL virtual memory filesystem) for better compatibility
+    let vsi_path = format!("/vsimem/minmax_{}.tif", uuid::Uuid::new_v4());
 
-    // Write input bytes to temporary file
-    fs::write(&input_path, input_bytes)?;
+    // Write input bytes to vsimem
+    {
+        let c_vsi_path = std::ffi::CString::new(vsi_path.clone()).unwrap();
+        let mode = std::ffi::CString::new("w").unwrap();
+        unsafe {
+            let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+            if fp.is_null() {
+                return Err(anyhow!("Failed to open vsimem file for min/max calculation"));
+            }
+            let written = gdal_sys::VSIFWriteL(input_bytes.as_ptr() as *const _, 1, input_bytes.len(), fp);
+            gdal_sys::VSIFCloseL(fp);
+            if written != input_bytes.len() {
+                return Err(anyhow!("Failed to write all data to vsimem"));
+            }
+        }
+    }
 
     // Open dataset
-    let dataset = Dataset::open(&input_path)?;
+    let dataset = Dataset::open(&vsi_path)?;
 
     // Get the first raster band (band index 1)
     let rasterband: RasterBand = dataset.rasterband(1)?;
 
-    // Compute statistics (this calculates min, max, mean, stddev)
-    let stats = rasterband.compute_raster_min_max(true)?;
+    // Compute exact min/max by reading all pixels (approx_ok=false for accuracy)
+    let stats = rasterband.compute_raster_min_max(false)?;
 
-    // Clean up temporary file
-    let _ = fs::remove_file(&input_path);
+    // Clean up vsimem file
+    {
+        let c_vsi_path = std::ffi::CString::new(vsi_path).unwrap();
+        unsafe {
+            gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+        }
+    }
 
     debug!(
         min = stats.min,
@@ -161,15 +179,28 @@ pub fn get_min_max_of_raster(input_bytes: &[u8]) -> Result<(f64, f64)> {
 pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
     debug!("Calculating raster global average using GDAL");
 
-    // Use temporary file since GDAL Rust bindings don't expose VSI write/read functions
-    let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join(format!("avg_{}.tif", std::process::id()));
+    // Use vsimem (GDAL virtual memory filesystem) for better compatibility
+    let vsi_path = format!("/vsimem/avg_{}.tif", uuid::Uuid::new_v4());
 
-    // Write input bytes to temporary file
-    fs::write(&input_path, input_bytes)?;
+    // Write input bytes to vsimem
+    {
+        let c_vsi_path = std::ffi::CString::new(vsi_path.clone()).unwrap();
+        let mode = std::ffi::CString::new("w").unwrap();
+        unsafe {
+            let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+            if fp.is_null() {
+                return Err(anyhow!("Failed to open vsimem file for average calculation"));
+            }
+            let written = gdal_sys::VSIFWriteL(input_bytes.as_ptr() as *const _, 1, input_bytes.len(), fp);
+            gdal_sys::VSIFCloseL(fp);
+            if written != input_bytes.len() {
+                return Err(anyhow!("Failed to write all data to vsimem"));
+            }
+        }
+    }
 
     // Open dataset
-    let dataset = Dataset::open(&input_path)?;
+    let dataset = Dataset::open(&vsi_path)?;
 
     // Get the first raster band (band index 1)
     let rasterband: RasterBand = dataset.rasterband(1)?;
@@ -181,8 +212,13 @@ pub fn get_global_average_of_raster(input_bytes: &[u8]) -> Result<f64> {
         .ok_or_else(|| anyhow!("Failed to compute raster statistics"))?;
     let mean = stats.mean;
 
-    // Clean up temporary file
-    let _ = fs::remove_file(&input_path);
+    // Clean up vsimem file
+    {
+        let c_vsi_path = std::ffi::CString::new(vsi_path).unwrap();
+        unsafe {
+            gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+        }
+    }
 
     debug!(mean, "Global average calculation completed");
 

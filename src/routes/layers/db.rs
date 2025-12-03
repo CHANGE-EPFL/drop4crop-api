@@ -23,6 +23,19 @@ pub struct LayerStats {
     pub last_accessed_at: Option<DateTime<Utc>>,
 }
 
+/// Status of the last statistics recalculation
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct StatsStatus {
+    /// Status of the last recalculation: "success", "error", or "pending"
+    pub status: String,
+    /// Timestamp of when the stats were last calculated
+    pub last_run: Option<DateTime<Utc>>,
+    /// Error message if the last recalculation failed
+    pub error: Option<String>,
+    /// Additional details (e.g., file size at time of calculation)
+    pub details: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, EntityToModels, serde::Serialize, serde::Deserialize)]
 #[sea_orm(table_name = "layer")]
 #[crudcrate(
@@ -72,6 +85,12 @@ pub struct Model {
     /// Total view count across all statistics (updated automatically by database trigger)
     #[crudcrate(sortable, filterable, exclude(create, update))]
     pub total_views: i64,
+    /// Status of the last statistics recalculation (JSON with status, timestamp, error message)
+    #[crudcrate(exclude(create, update))]
+    pub stats_status: Option<serde_json::Value>,
+    /// File size in bytes (from S3)
+    #[crudcrate(sortable, exclude(create, update))]
+    pub file_size: Option<i64>,
     // Metadata fields (populated by after_get_one hook, not stored in DB)
     #[sea_orm(ignore)]
     #[crudcrate(non_db_attr = true, exclude(create, update))]

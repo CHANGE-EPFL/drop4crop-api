@@ -43,7 +43,7 @@ pub struct ColorStop {
 
 /// Returns a discrete (non-interpolated) color based on a value and a set of color stops.
 /// Each color stop represents the upper bound of its bucket.
-/// If the value is outside the range, returns a transparent color.
+/// Values outside the range are clamped to the nearest bucket's color.
 pub fn get_color_discrete(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
     if color_stops.is_empty() {
         return Rgba([0, 0, 0, 0]);
@@ -56,23 +56,32 @@ pub fn get_color_discrete(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u
         }
     }
 
-    // Value exceeds all thresholds - return transparent
-    Rgba([0, 0, 0, 0])
+    // Value exceeds all thresholds - clamp to the highest bucket's color
+    color_stops.last().map(|(_, c)| *c).unwrap_or(Rgba([0, 0, 0, 0]))
 }
 
 /// Returns an interpolated color based on a value and a set of color stops.
-/// If the value is outside the range of the color stops, returns a transparent color.
+/// Values outside the range are clamped to the nearest stop's color.
 pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
-    if let Some(&(min_val, _)) = color_stops.first()
-        && value < min_val
-    {
+    if color_stops.is_empty() {
         return Rgba([0, 0, 0, 0]);
     }
-    if let Some(&(max_val, _)) = color_stops.last()
-        && value > max_val
-    {
-        return Rgba([0, 0, 0, 0]);
+
+    // Clamp to min color if below range
+    if let Some(&(min_val, min_color)) = color_stops.first() {
+        if value <= min_val {
+            return min_color;
+        }
     }
+
+    // Clamp to max color if above range
+    if let Some(&(max_val, max_color)) = color_stops.last() {
+        if value >= max_val {
+            return max_color;
+        }
+    }
+
+    // Interpolate between stops
     for window in color_stops.windows(2) {
         let (v1, c1) = window[0];
         let (v2, c2) = window[1];
@@ -169,12 +178,7 @@ pub fn style_layer(
             // For discrete mode, find the bucket and return its color
             get_color_discrete(data_value, &color_stops)
         } else {
-            // For linear mode, check bounds and interpolate
-            if data_value < color_stops.first().unwrap().0
-                || data_value > color_stops.last().unwrap().0
-            {
-                return Rgba([0, 0, 0, 0]);
-            }
+            // For linear mode, interpolate (clamping is handled in get_color)
             get_color(data_value, &color_stops)
         }
     });

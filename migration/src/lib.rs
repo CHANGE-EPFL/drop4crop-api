@@ -6,6 +6,7 @@ mod m20251120_000001_enable_pg_trgm;
 mod m20251126_000001_add_layer_total_views;
 mod m20251202_000001_add_style_interpolation_type;
 mod m20251203_000001_add_style_label_settings;
+mod m20251203_000002_add_layer_stats_status;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251126_000001_add_layer_total_views::Migration),
             Box::new(m20251202_000001_add_style_interpolation_type::Migration),
             Box::new(m20251203_000001_add_style_label_settings::Migration),
+            Box::new(m20251203_000002_add_layer_stats_status::Migration),
         ]
     }
 }

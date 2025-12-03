@@ -14,6 +14,28 @@ pub struct ColorStop {
     pub green: u8,
     pub blue: u8,
     pub opacity: u8,
+    /// Optional label for discrete legends (e.g., "0.1 - 0.2", "<= 0.1", "> 10")
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Returns a discrete (non-interpolated) color based on a value and a set of color stops.
+/// Each color stop represents the upper bound of its bucket.
+/// If the value is outside the range, returns a transparent color.
+pub fn get_color_discrete(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
+    if color_stops.is_empty() {
+        return Rgba([0, 0, 0, 0]);
+    }
+
+    // Find the first bucket where value <= threshold
+    for &(threshold, color) in color_stops {
+        if value <= threshold {
+            return color;
+        }
+    }
+
+    // Value exceeds all thresholds - return transparent
+    Rgba([0, 0, 0, 0])
 }
 
 /// Returns an interpolated color based on a value and a set of color stops.
@@ -51,12 +73,19 @@ pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
 
 /// Applies a style to a grayscale image based on a provided style.
 /// In this version, we assume that the input image is an ImageBuffer with u16 pixel values
-/// (i.e. ImageBuffer<Luma<u16>, Vec<u16>>), where each pixel’s value is the data value.
+/// (i.e. ImageBuffer<Luma<u16>, Vec<u16>>), where each pixel's value is the data value.
 /// If the data value is outside the color stops range, a transparent pixel is returned.
+///
+/// The `interpolation_type` parameter determines how colors are applied:
+/// - "linear" (default): Smooth gradient interpolation between color stops
+/// - "discrete": Each value falls into a bucket and gets that bucket's color
 pub fn style_layer(
     img: ImageBuffer<image::Luma<u16>, Vec<u16>>,
     style: Option<JsonValue>,
+    interpolation_type: Option<&str>,
 ) -> Result<Vec<u8>> {
+    let is_discrete = interpolation_type.map_or(false, |t| t == "discrete");
+
     // Deserialize the style stops.
     let stops: Vec<ColorStop> = match style {
         Some(JsonValue::Array(arr)) => serde_json::from_value(JsonValue::Array(arr.clone()))
@@ -111,12 +140,18 @@ pub fn style_layer(
         if data_value == 0.0 {
             return Rgba([0, 0, 0, 0]);
         }
-        // If the data value is outside the defined color stop range, return transparent.
-        if data_value < color_stops.first().unwrap().0 || data_value > color_stops.last().unwrap().0
-        {
-            return Rgba([0, 0, 0, 0]);
+
+        if is_discrete {
+            // For discrete mode, find the bucket and return its color
+            get_color_discrete(data_value, &color_stops)
+        } else {
+            // For linear mode, check bounds and interpolate
+            if data_value < color_stops.first().unwrap().0 || data_value > color_stops.last().unwrap().0
+            {
+                return Rgba([0, 0, 0, 0]);
+            }
+            get_color(data_value, &color_stops)
         }
-        get_color(data_value, &color_stops)
     });
 
     // Encode the final RGBA image as a PNG.

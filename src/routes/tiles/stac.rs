@@ -380,8 +380,8 @@ async fn search_items(
 
     query = query.order_by_asc(layer::Column::LayerName);
 
-    // Apply limit (default 10, max 10000)
-    let limit = params.limit.unwrap_or(10).min(10000);
+    // Apply limit (default 10000 for QGIS compatibility, max 10000)
+    let limit = params.limit.unwrap_or(10000).min(10000);
 
     let layers = query
         .limit(limit as u64)
@@ -397,10 +397,13 @@ async fn search_items(
             let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
             let year = layer_record.year.unwrap_or(2010);
 
-            // Convert style to JSON if present
+            // Convert style to JSON if present, and get interpolation_type
             let style_json = style_opt.as_ref().and_then(|style| {
                 style.style.as_ref()
             });
+            let interpolation_type = style_opt.as_ref().map(|style| {
+                style.interpolation_type.as_str()
+            }).unwrap_or("linear");
 
             json!({
                 "stac_version": "1.0.0",
@@ -450,6 +453,7 @@ async fn search_items(
                     "min_value": layer_record.min_value,
                     "max_value": layer_record.max_value,
                     "style": style_json,
+                    "interpolation_type": interpolation_type,
                     "country_values": null  // Not yet implemented in database
                 },
                 "links": [

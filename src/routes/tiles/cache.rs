@@ -45,18 +45,37 @@ pub async fn remove_downloading_state_raw(config: &Config, key: &str) -> Result<
 
 /// Gets a value from Redis and resets its TTL atomically using GETEX.
 /// This ensures frequently accessed layers stay cached longer.
+/// IMPORTANT: If the key has no TTL (persistent/pinned), we use GET instead
+/// of GETEX to preserve the permanent status.
 pub async fn redis_get(
     con: &mut redis::aio::MultiplexedConnection,
     key: &str,
     ttl_seconds: u64,
 ) -> Result<Option<Vec<u8>>> {
-    let result: Option<Vec<u8>> = redis::cmd("GETEX")
+    // First check if the key is persistent (TTL = -1)
+    let current_ttl: i64 = redis::cmd("TTL")
         .arg(key)
-        .arg("EX")
-        .arg(ttl_seconds)
         .query_async(con)
-        .await?;
-    Ok(result)
+        .await
+        .unwrap_or(-2);
+
+    if current_ttl == -1 {
+        // Key exists with no expiry (persistent) - use GET to preserve it
+        let result: Option<Vec<u8>> = redis::cmd("GET")
+            .arg(key)
+            .query_async(con)
+            .await?;
+        Ok(result)
+    } else {
+        // Key has TTL or doesn't exist - use GETEX to reset TTL on access
+        let result: Option<Vec<u8>> = redis::cmd("GETEX")
+            .arg(key)
+            .arg("EX")
+            .arg(ttl_seconds)
+            .query_async(con)
+            .await?;
+        Ok(result)
+    }
 }
 
 /// Builds a statistics key for tracking layer access by type.

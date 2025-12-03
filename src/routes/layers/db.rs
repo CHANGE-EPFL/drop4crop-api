@@ -29,7 +29,7 @@ pub struct LayerStats {
     api_struct = "Layer",
     name_singular = "layer",
     name_plural = "layers",
-    fn_delete_many = delete_many,
+    delete::many::body = delete_many,
     generate_router,
     operations = LayerOperations,
 )]
@@ -69,6 +69,9 @@ pub struct Model {
     pub style_id: Option<Uuid>,
     #[crudcrate(filterable)]
     pub is_crop_specific: bool,
+    /// Total view count across all statistics (updated automatically by database trigger)
+    #[crudcrate(sortable, filterable, exclude(create, update))]
+    pub total_views: i64,
     // Metadata fields (populated by after_get_one hook, not stored in DB)
     #[sea_orm(ignore)]
     #[crudcrate(non_db_attr = true, exclude(create, update))]
@@ -175,7 +178,8 @@ async fn fetch_cache_status_with_config(
         actual_key = cache_key_tif;
     }
 
-    if ttl_seconds >= 0 {
+    // TTL returns: -2 if key doesn't exist, -1 if key has no expiry (persistent), >= 0 if key has TTL
+    if ttl_seconds != -2 {
         // Cache exists, get size
         let size_bytes: Option<usize> = redis::cmd("STRLEN")
             .arg(&actual_key)
@@ -187,10 +191,11 @@ async fn fetch_cache_status_with_config(
             cached: true,
             cache_key: Some(actual_key),
             size_mb: size_bytes.map(|bytes| bytes as f64 / (1024.0 * 1024.0)),
-            ttl_hours: Some(ttl_seconds as f64 / 3600.0),
+            // -1 means no expiry (persistent), show as None to indicate "permanent"
+            ttl_hours: if ttl_seconds >= 0 { Some(ttl_seconds as f64 / 3600.0) } else { None },
         })
     } else {
-        // Cache doesn't exist
+        // Cache doesn't exist (TTL = -2)
         Ok(CacheStatus {
             cached: false,
             cache_key: None,

@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use tokio::time::{Duration, interval};
 use tracing::{error, info};
 
-/// Spawns a background task that syncs statistics from Redis to PostgreSQL every 5 minutes.
+/// Spawns a background task that syncs statistics from Redis to PostgreSQL every 30 seconds.
 /// Uses distributed locking to ensure only one instance runs the sync at a time.
 pub fn spawn_stats_sync_task(db: DatabaseConnection) {
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(300)); // 5 minutes
+        let mut ticker = interval(Duration::from_secs(30)); // 30 seconds
         let instance_id = uuid::Uuid::new_v4().to_string();
 
         loop {
@@ -24,7 +24,7 @@ pub fn spawn_stats_sync_task(db: DatabaseConnection) {
                 Err(e) => {
                     error!(
                         error = %e,
-                        "Stats sync failed, will retry in 5 minutes"
+                        "Stats sync failed, will retry in 30 seconds"
                     );
                 }
             }
@@ -45,7 +45,7 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
         .arg(instance_id)
         .arg("NX")
         .arg("EX")
-        .arg(360) // 6 minute TTL (longer than sync interval)
+        .arg(60) // 60 second TTL (longer than sync interval)
         .query_async(&mut con)
         .await
         .unwrap_or(false);
@@ -55,7 +55,7 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
         return Ok(0);
     }
 
-    // Check if it's been at least 5 minutes since last sync
+    // Check if it's been at least 30 seconds since last sync
     let last_sync_key = format!(
         "{}-{}/stats:last_sync_time",
         config.app_name, config.deployment
@@ -67,7 +67,7 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
     {
         let elapsed =
             chrono::Utc::now().signed_duration_since(last_sync_time.with_timezone(&chrono::Utc));
-        if elapsed < chrono::Duration::minutes(5) {
+        if elapsed < chrono::Duration::seconds(30) {
             // Too soon, skip this sync
             return Ok(0);
         }
@@ -118,6 +118,13 @@ async fn sync_stats_to_db(db: &DatabaseConnection, instance_id: &str) -> Result<
     let _: () = con
         .set(&last_sync_key, chrono::Utc::now().to_rfc3339())
         .await?;
+
+    // Release the distributed lock (TTL is just a safety net for crashes)
+    let _: () = redis::cmd("DEL")
+        .arg(&lock_key)
+        .query_async(&mut con)
+        .await
+        .unwrap_or(()); // Ignore errors on lock release
 
     Ok(synced_count)
 }
@@ -179,15 +186,21 @@ async fn write_stats_to_db(
 
     let mut synced_count = 0;
 
-    for ((layer_name, date_str), stats) in stats_map {
-        // Find layer by name
-        let layer_record = layer::Entity::find()
-            .filter(layer::Column::LayerName.eq(&layer_name))
-            .one(db)
-            .await?;
+    for ((layer_identifier, date_str), stats) in stats_map {
+        // Try to find layer by name first, then by UUID if it looks like one
+        let layer_record = if let Ok(uuid) = uuid::Uuid::parse_str(&layer_identifier) {
+            // It's a UUID - look up by ID
+            layer::Entity::find_by_id(uuid).one(db).await?
+        } else {
+            // It's a name - look up by layer_name
+            layer::Entity::find()
+                .filter(layer::Column::LayerName.eq(&layer_identifier))
+                .one(db)
+                .await?
+        };
 
         if layer_record.is_none() {
-            error!(layer_name, "Layer not found during stats sync");
+            error!(layer_identifier, "Layer not found during stats sync");
             continue;
         }
 

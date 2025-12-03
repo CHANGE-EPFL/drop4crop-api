@@ -51,6 +51,9 @@ pub fn cache_router(state: &AppState) -> OpenApiRouter {
         .route("/keys", get(get_cache_keys))
         .route("/clear", post(clear_all_cache))
         .route("/layers/{layer_name}", delete(clear_layer_cache))
+        .route("/layers/{layer_name}/warm", post(warm_layer_cache))
+        .route("/layers/{layer_name}/persist", post(persist_layer_cache))
+        .route("/layers/{layer_name}/persist", delete(unpersist_layer_cache))
         .route("/ttl", get(get_cache_ttl))
         .with_state(state.db.clone());
 
@@ -87,6 +90,12 @@ struct StatsFilter {
 }
 
 #[derive(Serialize)]
+struct DailyRequests {
+    date: String,
+    requests: i64,
+}
+
+#[derive(Serialize)]
 struct StatsSummary {
     total_requests_all_time: i64,
     total_requests_today: i64,
@@ -100,6 +109,8 @@ struct StatsSummary {
     pixel_query_count_today: i64,
     stac_request_count_today: i64,
     other_request_count_today: i64,
+    // Daily breakdown for last 7 days (for charts)
+    daily_requests: Vec<DailyRequests>,
 }
 
 #[derive(Serialize)]
@@ -258,6 +269,31 @@ async fn get_stats_summary(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as i64;
 
+    // Daily breakdown for last 7 days (for charts)
+    let mut daily_requests = Vec::new();
+    for i in (0..7).rev() {
+        let date = today - chrono::Duration::days(i);
+        let date_str = date.format("%Y-%m-%d").to_string();
+
+        // Sum all requests for this date across all layers
+        let day_total: i64 = week_stats
+            .iter()
+            .filter(|s| s.stat_date == date)
+            .map(|s| {
+                s.xyz_tile_count as i64
+                    + s.cog_download_count as i64
+                    + s.pixel_query_count as i64
+                    + s.stac_request_count as i64
+                    + s.other_request_count as i64
+            })
+            .sum();
+
+        daily_requests.push(DailyRequests {
+            date: date_str,
+            requests: day_total,
+        });
+    }
+
     Ok(Json(StatsSummary {
         total_requests_all_time,
         total_requests_today,
@@ -270,6 +306,7 @@ async fn get_stats_summary(
         pixel_query_count_today,
         stac_request_count_today,
         other_request_count_today,
+        daily_requests,
     }))
 }
 
@@ -773,6 +810,136 @@ async fn get_cache_ttl() -> Result<Json<serde_json::Value>, StatusCode> {
     Ok(Json(json!({
         "ttl_seconds": config.tile_cache_ttl,
         "ttl_hours": config.tile_cache_ttl / 3600
+    })))
+}
+
+/// POST /api/admin/cache/layers/:layer_name/warm - Pre-warm cache for a layer
+async fn warm_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
+
+    // Add .tif extension if not present
+    let filename = if layer_name.ends_with(".tif") {
+        layer_name.clone()
+    } else {
+        format!("{}.tif", layer_name)
+    };
+
+    // Use the storage module to fetch and cache the layer
+    match crate::routes::tiles::storage::get_object(&config, &filename).await {
+        Ok(data) => {
+            info!(layer_name, size = data.len(), "Warmed cache for layer");
+            Ok(Json(json!({
+                "message": format!("Cache warmed for layer: {}", layer_name),
+                "size_bytes": data.len(),
+                "size_mb": data.len() as f64 / (1024.0 * 1024.0)
+            })))
+        }
+        Err(e) => {
+            error!(layer_name, error = %e, "Failed to warm cache for layer");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /api/admin/cache/layers/:layer_name/persist - Remove TTL from cache (make permanent)
+async fn persist_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+
+    // Add .tif extension if not present
+    let filename = if layer_name.ends_with(".tif") {
+        layer_name.clone()
+    } else {
+        format!("{}.tif", layer_name)
+    };
+    let cache_key = crate::routes::tiles::cache::build_cache_key(&config, &filename);
+
+    let mut con = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Check if the key exists
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query_async(&mut con)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !exists {
+        return Ok(Json(json!({
+            "message": format!("Layer not in cache: {}. Use /warm first.", layer_name),
+            "persisted": false
+        })));
+    }
+
+    // Remove TTL using PERSIST command
+    let result: i32 = redis::cmd("PERSIST")
+        .arg(&cache_key)
+        .query_async(&mut con)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if result == 1 {
+        info!(layer_name, "Persisted cache for layer (removed TTL)");
+        Ok(Json(json!({
+            "message": format!("Cache persisted for layer: {} (TTL removed)", layer_name),
+            "persisted": true
+        })))
+    } else {
+        // Key exists but had no TTL (already persistent)
+        Ok(Json(json!({
+            "message": format!("Layer already persistent: {}", layer_name),
+            "persisted": true
+        })))
+    }
+}
+
+/// DELETE /api/admin/cache/layers/:layer_name/persist - Restore TTL to cache
+async fn unpersist_layer_cache(Path(layer_name): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    let config = crate::config::Config::from_env();
+    let redis_client = crate::routes::tiles::cache::get_redis_client(&config);
+
+    // Add .tif extension if not present
+    let filename = if layer_name.ends_with(".tif") {
+        layer_name.clone()
+    } else {
+        format!("{}.tif", layer_name)
+    };
+    let cache_key = crate::routes::tiles::cache::build_cache_key(&config, &filename);
+
+    let mut con = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Check if the key exists
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query_async(&mut con)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !exists {
+        return Ok(Json(json!({
+            "message": format!("Layer not in cache: {}", layer_name),
+            "unpersisted": false
+        })));
+    }
+
+    // Restore TTL using EXPIRE command
+    let _: bool = redis::cmd("EXPIRE")
+        .arg(&cache_key)
+        .arg(config.tile_cache_ttl)
+        .query_async(&mut con)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!(layer_name, ttl = config.tile_cache_ttl, "Restored TTL for layer cache");
+    Ok(Json(json!({
+        "message": format!("TTL restored for layer: {} ({} seconds)", layer_name, config.tile_cache_ttl),
+        "unpersisted": true,
+        "ttl_seconds": config.tile_cache_ttl
     })))
 }
 

@@ -109,11 +109,15 @@ pub async fn tile_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Attempt to extract the style from the first related record.
-    let dbstyle: Option<JsonValue> = related_styles.into_iter().next().and_then(|s| s.style);
+    // Attempt to extract the style and interpolation_type from the first related record.
+    let (dbstyle, interpolation_type): (Option<JsonValue>, Option<String>) = related_styles
+        .into_iter()
+        .next()
+        .map(|s| (s.style, Some(s.interpolation_type)))
+        .unwrap_or((None, None));
 
     // Apply the style to the image.
-    let png_data = super::styling::style_layer(img, dbstyle).map_err(|e| {
+    let png_data = super::styling::style_layer(img, dbstyle, interpolation_type.as_deref()).map_err(|e| {
         error!(error = %e, "Error applying style");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

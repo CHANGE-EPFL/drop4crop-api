@@ -126,7 +126,13 @@ fn track_layer_statistics(uri_path: &str, query_string: &str) {
         // Other layer requests (e.g., GET /api/layers/{id})
         let parts: Vec<&str> = uri_path.split('/').collect();
         let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers" {
-            Some(parts[3])
+            let segment = parts[3];
+            // Skip non-layer endpoints
+            if matches!(segment, "groups" | "xyz" | "cog" | "uploads") {
+                None
+            } else {
+                Some(segment)
+            }
         } else {
             None
         };

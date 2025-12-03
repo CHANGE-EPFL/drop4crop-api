@@ -54,6 +54,10 @@ async fn main() {
     info!("Starting statistics sync background task (every 30 seconds)...");
     routes::stats_sync::spawn_stats_sync_task(db.clone(), config.clone());
 
+    // Spawn background worker for distributed layer recalculation jobs
+    info!("Starting distributed recalculation worker (polling every 5 seconds)...");
+    tokio::spawn(routes::layers::worker::start_worker(config.clone(), db.clone()));
+
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
     info!("Server listening on {}", addr);
 

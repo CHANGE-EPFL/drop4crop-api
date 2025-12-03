@@ -44,6 +44,8 @@ pub fn router(state: &AppState) -> OpenApiRouter {
         .routes(routes!(recalculate_layer_stats))
         .routes(routes!(recalculate_all_layer_stats))
         .routes(routes!(recalculate_stats_by_ids))
+        .routes(routes!(get_recalculate_job_status))
+        .routes(routes!(cancel_recalculate_job))
         .with_state(state.clone());
 
     protected_router = protected_router
@@ -812,8 +814,12 @@ pub struct BulkRecalculateParams {
     pub year: Option<i32>,
     /// Only recalculate layers with null statistics
     pub only_null_stats: Option<bool>,
-    /// Limit number of layers to process (default 100, max 1000)
+    /// Limit number of layers to process
     pub limit: Option<u64>,
+    /// Filter by stats_status_value: "success", "error", "pending", or "null" for layers never calculated
+    pub stats_status_value: Option<String>,
+    /// Force restart: cancel any running job and start a new one
+    pub force: Option<bool>,
 }
 
 /// Request body for bulk recalculation by IDs
@@ -823,23 +829,60 @@ pub struct BulkRecalculateByIdsRequest {
     pub ids: Vec<Uuid>,
 }
 
+/// Response when starting a background recalculation job
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct RecalculateJobStartResponse {
+    /// Whether the job was started successfully
+    pub started: bool,
+    /// Message describing the result
+    pub message: String,
+    /// Number of layers queued for processing
+    pub total_layers: u64,
+}
+
 #[utoipa::path(
     post,
     path = "/recalculate-stats",
     params(BulkRecalculateParams),
     responses(
-        (status = 200, description = "Bulk recalculation completed", body = BulkRecalculateResponse),
+        (status = 200, description = "Background job started", body = RecalculateJobStartResponse),
+        (status = 409, description = "Job already running"),
         (status = 500, description = "Internal server error")
     ),
-    summary = "Bulk recalculate layer statistics",
-    description = "Recalculates statistics for multiple layers. Use filters to target specific layers."
+    summary = "Start background bulk recalculation of layer statistics",
+    description = "Starts a background job to recalculate statistics for all layers. Returns immediately. Use GET /recalculate-stats/status to check progress."
 )]
 pub async fn recalculate_all_layer_stats(
     Query(params): Query<BulkRecalculateParams>,
     State(app_state): State<AppState>,
-) -> Result<Json<BulkRecalculateResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<RecalculateJobStartResponse>, (StatusCode, Json<serde_json::Value>)> {
     let db = &app_state.db;
     let config = &app_state.config;
+
+    // Generate a unique worker ID for this request
+    let worker_id = super::worker::generate_worker_id();
+
+    // Check if a job is already running
+    let current_status = super::jobs::get_job_status(config).await;
+    if current_status.is_running {
+        // If force=true, clear the existing job and start fresh
+        if params.force.unwrap_or(false) {
+            info!("Force restart requested, clearing existing job");
+            if let Err(e) = super::jobs::clear_job_data(config).await {
+                warn!(error = %e, "Failed to clear job data");
+            }
+        } else {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "message": "A recalculation job is already running. Use force=true to cancel and restart.",
+                    "started_at": current_status.started_at,
+                    "progress": format!("{}/{}", current_status.processed_count, current_status.total_layers),
+                    "active_workers": current_status.active_workers
+                })),
+            ));
+        }
+    }
 
     // Build query with filters
     let mut query = super::db::Entity::find();
@@ -870,8 +913,17 @@ pub async fn recalculate_all_layer_stats(
         );
     }
 
-    // Apply optional limit (no limit by default for recalculate all)
-    let layers = if let Some(limit) = params.limit {
+    // Filter by stats_status_value
+    if let Some(status_filter) = &params.stats_status_value {
+        if status_filter == "null" || status_filter.is_empty() {
+            query = query.filter(super::db::Column::StatsStatusValue.is_null());
+        } else {
+            query = query.filter(super::db::Column::StatsStatusValue.eq(status_filter));
+        }
+    }
+
+    // Get the layers to process
+    let layers: Vec<super::db::Model> = if let Some(limit) = params.limit {
         query.limit(limit).all(db)
     } else {
         query.all(db)
@@ -885,165 +937,172 @@ pub async fn recalculate_all_layer_stats(
             )
         })?;
 
-    info!(count = layers.len(), "Starting bulk recalculation");
-
-    let mut results = Vec::new();
-    let mut errors = Vec::new();
-    let mut success_count = 0;
-    let mut error_count = 0;
-
-    for layer in layers {
-        let layer_id = layer.id;
-        let layer_name = layer.layer_name.clone();
-
-        let filename = match &layer.filename {
-            Some(f) => f.clone(),
-            None => {
-                errors.push(format!("Layer {} has no filename", layer_id));
-                error_count += 1;
-                continue;
-            }
-        };
-
-        // Fetch directly from S3 (bypassing cache to avoid polluting Redis)
-        let object = match storage::get_object_direct(&config, &filename).await {
-            Ok(o) => o,
-            Err(e) => {
-                let error_msg = format!("Failed to fetch from S3: {}", e);
-                errors.push(format!("Layer {}: {}", layer_id, error_msg));
-                // Update stats_status with error
-                let mut active_layer: super::db::ActiveModel = layer.into();
-                active_layer.stats_status = Set(Some(serde_json::json!({
-                    "status": "error",
-                    "last_run": chrono::Utc::now(),
-                    "error": error_msg,
-                    "details": format!("filename: {}", filename)
-                })));
-                let _ = active_layer.update(db).await;
-                error_count += 1;
-                continue;
-            }
-        };
-
-        let file_size = object.len() as i64;
-
-        // Validate file size
-        if file_size < 1024 {
-            let error_msg = format!("File too small: {} bytes", file_size);
-            errors.push(format!("Layer {}: {}", layer_id, error_msg));
-            let mut active_layer: super::db::ActiveModel = layer.into();
-            active_layer.stats_status = Set(Some(serde_json::json!({
-                "status": "error",
-                "last_run": chrono::Utc::now(),
-                "error": error_msg,
-                "details": format!("filename: {}", filename)
-            })));
-            active_layer.file_size = Set(Some(file_size));
-            let _ = active_layer.update(db).await;
-            error_count += 1;
-            continue;
-        }
-
-        // Calculate statistics
-        let (min_val, max_val) = match get_min_max_of_raster(&object) {
-            Ok(v) => v,
-            Err(e) => {
-                let error_msg = format!("Failed to calculate min/max: {}", e);
-                errors.push(format!("Layer {}: {}", layer_id, error_msg));
-                let mut active_layer: super::db::ActiveModel = layer.into();
-                active_layer.stats_status = Set(Some(serde_json::json!({
-                    "status": "error",
-                    "last_run": chrono::Utc::now(),
-                    "error": error_msg,
-                    "details": format!("filename: {}, file_size: {} bytes", filename, file_size)
-                })));
-                active_layer.file_size = Set(Some(file_size));
-                let _ = active_layer.update(db).await;
-                error_count += 1;
-                continue;
-            }
-        };
-
-        let global_avg = match get_global_average_of_raster(&object) {
-            Ok(v) => v,
-            Err(e) => {
-                let error_msg = format!("Failed to calculate average: {}", e);
-                errors.push(format!("Layer {}: {}", layer_id, error_msg));
-                let mut active_layer: super::db::ActiveModel = layer.into();
-                active_layer.stats_status = Set(Some(serde_json::json!({
-                    "status": "error",
-                    "last_run": chrono::Utc::now(),
-                    "error": error_msg,
-                    "details": format!("filename: {}, file_size: {} bytes", filename, file_size)
-                })));
-                active_layer.file_size = Set(Some(file_size));
-                let _ = active_layer.update(db).await;
-                error_count += 1;
-                continue;
-            }
-        };
-
-        // Validate
-        if !min_val.is_finite() || !max_val.is_finite() || !global_avg.is_finite() {
-            let error_msg = "Invalid statistics (NaN/Inf)";
-            errors.push(format!("Layer {}: {}", layer_id, error_msg));
-            let mut active_layer: super::db::ActiveModel = layer.into();
-            active_layer.stats_status = Set(Some(serde_json::json!({
-                "status": "error",
-                "last_run": chrono::Utc::now(),
-                "error": error_msg,
-                "details": format!("filename: {}, file_size: {} bytes", filename, file_size)
-            })));
-            active_layer.file_size = Set(Some(file_size));
-            let _ = active_layer.update(db).await;
-            error_count += 1;
-            continue;
-        }
-
-        // Store previous values
-        let previous_min = layer.min_value;
-        let previous_max = layer.max_value;
-        let previous_avg = layer.global_average;
-
-        // Update with success
-        let mut active_layer: super::db::ActiveModel = layer.into();
-        active_layer.min_value = Set(Some(min_val));
-        active_layer.max_value = Set(Some(max_val));
-        active_layer.global_average = Set(Some(global_avg));
-        active_layer.file_size = Set(Some(file_size));
-        active_layer.stats_status = Set(Some(serde_json::json!({
-            "status": "success",
-            "last_run": chrono::Utc::now(),
-            "error": null,
-            "details": format!("min: {}, max: {}, avg: {}, file_size: {} bytes", min_val, max_val, global_avg, file_size)
-        })));
-
-        if let Err(e) = active_layer.update(db).await {
-            errors.push(format!("Layer {}: Failed to update: {}", layer_id, e));
-            error_count += 1;
-            continue;
-        }
-
-        results.push(RecalculatedStats {
-            id: layer_id,
-            layer_name,
-            min_value: Some(min_val),
-            max_value: Some(max_val),
-            global_average: Some(global_avg),
-            previous_min_value: previous_min,
-            previous_max_value: previous_max,
-            previous_global_average: previous_avg,
-        });
-        success_count += 1;
+    if layers.is_empty() {
+        return Ok(Json(RecalculateJobStartResponse {
+            started: false,
+            message: "No layers match the specified filters".to_string(),
+            total_layers: 0,
+        }));
     }
 
-    info!(success_count, error_count, "Bulk recalculation completed");
+    // Extract layer IDs
+    let layer_ids: Vec<Uuid> = layers.iter().map(|l| l.id).collect();
+    let total_layers = layer_ids.len() as u64;
 
-    Ok(Json(BulkRecalculateResponse {
-        success_count,
-        error_count,
-        results,
-        errors,
+    // Mark all selected layers as 'pending' in the database
+    let pending_status = serde_json::json!({
+        "status": "pending",
+        "last_run": chrono::Utc::now(),
+        "error": null,
+        "details": "Queued for distributed bulk recalculation"
+    });
+
+    if let Err(e) = super::db::Entity::update_many()
+        .col_expr(super::db::Column::StatsStatus, sea_orm::sea_query::Expr::value(pending_status))
+        .filter(super::db::Column::Id.is_in(layer_ids.clone()))
+        .exec(db)
+        .await
+    {
+        warn!(error = %e, "Failed to mark layers as pending (continuing anyway)");
+    }
+
+    // Start the distributed job - populate Redis queue
+    match super::jobs::start_job(config, layer_ids, &worker_id).await {
+        Ok(total) => {
+            info!(total_layers = total, worker_id, "Started distributed recalculation job");
+            Ok(Json(RecalculateJobStartResponse {
+                started: true,
+                message: format!("Distributed job started with {} layers. Workers will process automatically.", total),
+                total_layers,
+            }))
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to start distributed job");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "message": "Failed to start job", "error": e })),
+            ))
+        }
+    }
+}
+
+/// Response for job status endpoint
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct RecalculateJobStatusResponse {
+    /// Whether a job is currently running
+    pub is_running: bool,
+    /// When the job started (ISO 8601)
+    pub started_at: Option<String>,
+    /// Total layers to process
+    pub total_layers: u64,
+    /// Layers in the todo queue
+    pub todo_count: u64,
+    /// Layers currently being processed by workers
+    pub processing_count: u64,
+    /// Layers processed so far (completed + errors)
+    pub processed_count: u64,
+    /// Successful recalculations
+    pub success_count: u64,
+    /// Failed recalculations
+    pub error_count: u64,
+    /// Progress percentage (0-100)
+    pub progress_percent: f64,
+    /// Elapsed time in seconds
+    pub elapsed_seconds: Option<i64>,
+    /// Recent errors (last 10)
+    pub recent_errors: Vec<String>,
+    /// When the job completed (if finished)
+    pub completed_at: Option<String>,
+    /// Who started the job
+    pub started_by: Option<String>,
+    /// Number of active workers processing items
+    pub active_workers: u64,
+    /// Whether any items appear stale (no progress for >60s)
+    pub has_stale_items: bool,
+    /// Count of stale items
+    pub stale_count: u64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/recalculate-stats/status",
+    responses(
+        (status = 200, description = "Job status", body = RecalculateJobStatusResponse)
+    ),
+    summary = "Get recalculation job status",
+    description = "Returns the current status of the background recalculation job, including progress and any errors."
+)]
+pub async fn get_recalculate_job_status(
+    State(app_state): State<AppState>,
+) -> Json<RecalculateJobStatusResponse> {
+    let status = super::jobs::get_job_status(&app_state.config).await;
+
+    Json(RecalculateJobStatusResponse {
+        is_running: status.is_running,
+        started_at: status.started_at.map(|t| t.to_rfc3339()),
+        total_layers: status.total_layers,
+        todo_count: status.todo_count,
+        processing_count: status.processing_count,
+        processed_count: status.processed_count,
+        success_count: status.success_count,
+        error_count: status.error_count,
+        progress_percent: status.progress_percent(),
+        elapsed_seconds: status.elapsed_seconds(),
+        recent_errors: status.recent_errors,
+        completed_at: status.completed_at.map(|t| t.to_rfc3339()),
+        started_by: status.started_by,
+        active_workers: status.active_workers,
+        has_stale_items: status.has_stale_items,
+        stale_count: status.stale_count,
+    })
+}
+
+/// Response for cancel job endpoint
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CancelJobResponse {
+    /// Whether cancellation was requested
+    pub cancelled: bool,
+    /// Message describing the result
+    pub message: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/recalculate-stats/cancel",
+    responses(
+        (status = 200, description = "Cancellation requested", body = CancelJobResponse),
+        (status = 400, description = "No job running")
+    ),
+    summary = "Cancel the running recalculation job",
+    description = "Requests cancellation of the currently running background recalculation job. The job will stop after completing the current layer."
+)]
+pub async fn cancel_recalculate_job(
+    State(app_state): State<AppState>,
+) -> Result<Json<CancelJobResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let status = super::jobs::get_job_status(&app_state.config).await;
+
+    if !status.is_running {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "No recalculation job is currently running"
+            })),
+        ));
+    }
+
+    if let Err(e) = super::jobs::request_cancellation(&app_state.config).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "message": "Failed to request cancellation",
+                "error": e
+            })),
+        ));
+    }
+
+    Ok(Json(CancelJobResponse {
+        cancelled: true,
+        message: "Cancellation requested. Job will stop after completing the current layer.".to_string(),
     }))
 }
 

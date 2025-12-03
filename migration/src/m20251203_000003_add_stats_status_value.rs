@@ -9,23 +9,32 @@ impl MigrationTrait for Migration {
         // Add a generated column that extracts the 'status' value from the stats_status JSON
         // This allows us to filter by stats_status_value using standard SQL
         // Values will be: 'success', 'error', 'pending', or NULL
+        // Use IF NOT EXISTS pattern via DO block for idempotency
         manager
             .get_connection()
             .execute_unprepared(
                 r#"
-                ALTER TABLE layer
-                ADD COLUMN stats_status_value TEXT
-                GENERATED ALWAYS AS (stats_status->>'status') STORED;
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'layer' AND column_name = 'stats_status_value'
+                    ) THEN
+                        ALTER TABLE layer
+                        ADD COLUMN stats_status_value TEXT
+                        GENERATED ALWAYS AS (stats_status->>'status') STORED;
+                    END IF;
+                END $$;
                 "#,
             )
             .await?;
 
-        // Create an index for efficient filtering
+        // Create an index for efficient filtering (IF NOT EXISTS is supported for indexes)
         manager
             .get_connection()
             .execute_unprepared(
                 r#"
-                CREATE INDEX idx_layer_stats_status_value ON layer (stats_status_value);
+                CREATE INDEX IF NOT EXISTS idx_layer_stats_status_value ON layer (stats_status_value);
                 "#,
             )
             .await?;

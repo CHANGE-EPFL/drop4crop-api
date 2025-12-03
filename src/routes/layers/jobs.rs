@@ -20,8 +20,8 @@ use uuid::Uuid;
 /// Timeout in seconds after which a processing item is considered stale
 const STALE_TIMEOUT_SECS: i64 = 60;
 
-/// How often workers poll for work (in seconds)
-pub const WORKER_POLL_INTERVAL_SECS: u64 = 5;
+/// How often workers poll for work when idle (in seconds)
+pub const WORKER_IDLE_POLL_INTERVAL_SECS: u64 = 30;
 
 // ============================================================================
 // Redis Key Functions

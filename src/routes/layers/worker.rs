@@ -8,7 +8,7 @@ use sea_orm::entity::*;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use super::jobs::{self, WORKER_POLL_INTERVAL_SECS};
+use super::jobs::{self, WORKER_IDLE_POLL_INTERVAL_SECS};
 use super::utils::{get_min_max_of_raster, get_global_average_of_raster};
 use crate::config::Config;
 use crate::routes::tiles::storage;
@@ -28,18 +28,17 @@ pub async fn start_worker(config: Config, db: DatabaseConnection) {
     info!(worker_id, "Starting background recalculation worker");
 
     loop {
-        // Sleep first to avoid hammering Redis on startup
-        tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_POLL_INTERVAL_SECS)).await;
-
         // Check if there's an active job
         if !jobs::is_job_active(&config).await {
             debug!("No active job, sleeping...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
             continue;
         }
 
         // Check for cancellation
         if jobs::is_cancellation_requested(&config).await {
             debug!("Job cancelled, sleeping...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
             continue;
         }
 
@@ -65,6 +64,7 @@ pub async fn start_worker(config: Config, db: DatabaseConnection) {
                     Ok(false) => {}
                     Err(e) => warn!(error = %e, "Failed to check job completion"),
                 }
+                // Immediately try to claim more work - no delay needed, SPOP is atomic
             }
             Ok(None) => {
                 // No work available, check if job should be marked complete
@@ -76,15 +76,39 @@ pub async fn start_worker(config: Config, db: DatabaseConnection) {
                                 error!(error = %e, "Failed to mark job as completed");
                             }
                         }
+                        // Sleep longer when idle - job complete
+                        tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
                     }
                     Ok(false) => {
-                        debug!("No work available but job not complete, other workers processing");
+                        // Job not complete but no work in todo - items might be stuck in processing
+                        // Try to recover stale items immediately, then loop back without sleeping
+                        debug!("No work available but job not complete, checking for stale items");
+                        match jobs::recover_stale_items(&config).await {
+                            Ok(recovered) if recovered > 0 => {
+                                info!(recovered, "Recovered stale items, retrying immediately");
+                                // Don't sleep - items were recovered, loop back to claim them
+                            }
+                            Ok(_) => {
+                                // No stale items recovered, other workers still processing
+                                debug!("No stale items, other workers still processing");
+                                tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to recover stale items");
+                                tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
+                            }
+                        }
                     }
-                    Err(e) => warn!(error = %e, "Failed to check job completion"),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to check job completion");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
+                    }
                 }
             }
             Err(e) => {
                 warn!(error = %e, "Failed to claim work");
+                // Sleep on error to avoid hammering Redis
+                tokio::time::sleep(tokio::time::Duration::from_secs(WORKER_IDLE_POLL_INTERVAL_SECS)).await;
             }
         }
     }

@@ -398,13 +398,19 @@ async fn search_items(
             let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
             let year = layer_record.year.unwrap_or(2010);
 
-            // Convert style to JSON if present, and get interpolation_type
+            // Convert style to JSON if present, and get style settings
             let style_json = style_opt.as_ref().and_then(|style| {
                 style.style.as_ref()
             });
             let interpolation_type = style_opt.as_ref().map(|style| {
                 style.interpolation_type.as_str()
             }).unwrap_or("linear");
+            let label_display_mode = style_opt.as_ref().map(|style| {
+                style.label_display_mode.as_str()
+            }).unwrap_or("auto");
+            let label_count = style_opt.as_ref().and_then(|style| {
+                style.label_count
+            });
 
             json!({
                 "stac_version": "1.0.0",
@@ -455,6 +461,8 @@ async fn search_items(
                     "max_value": layer_record.max_value,
                     "style": style_json,
                     "interpolation_type": interpolation_type,
+                    "label_display_mode": label_display_mode,
+                    "label_count": label_count,
                     "country_values": null  // Not yet implemented in database
                 },
                 "links": [

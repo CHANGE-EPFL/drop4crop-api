@@ -19,6 +19,11 @@ pub struct Model {
     pub style: Option<serde_json::Value>,
     /// Interpolation type: "linear" (smooth gradient) or "discrete" (stepped/bucketed)
     pub interpolation_type: String,
+    /// Label display mode: "auto" (show limited evenly-spaced labels) or "manual" (show all labels)
+    #[crudcrate(default_value = "\"auto\".to_string()")]
+    pub label_display_mode: String,
+    /// Number of labels to display in "auto" mode. NULL means use default (5 labels).
+    pub label_count: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

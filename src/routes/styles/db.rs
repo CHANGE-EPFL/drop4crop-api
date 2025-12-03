@@ -18,7 +18,6 @@ pub struct Model {
     pub name: String,
     pub style: Option<serde_json::Value>,
     /// Interpolation type: "linear" (smooth gradient) or "discrete" (stepped/bucketed)
-    #[sea_orm(default_value = "linear")]
     pub interpolation_type: String,
 }
 

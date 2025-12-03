@@ -1,10 +1,29 @@
 use anyhow::Result;
 use image::{ImageBuffer, ImageEncoder, Rgba, RgbaImage, codecs::png::PngEncoder};
 use sea_orm::{FromQueryResult, JsonValue};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use utoipa::ToSchema;
 use tracing::{debug, warn};
+
+/// Custom deserializer that accepts both strings and numbers for the label field
+fn deserialize_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b.to_string())),
+        Some(other) => Err(D::Error::custom(format!("unexpected type for label: {:?}", other))),
+    }
+}
 
 // Representation of the JSON style.
 #[derive(Deserialize, Clone, ToSchema, Serialize, FromQueryResult, Debug)]
@@ -15,7 +34,7 @@ pub struct ColorStop {
     pub blue: u8,
     pub opacity: u8,
     /// Optional label for discrete legends (e.g., "0.1 - 0.2", "<= 0.1", "> 10")
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_label")]
     pub label: Option<String>,
 }
 

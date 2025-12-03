@@ -106,7 +106,8 @@ async fn test_styles_create() {
 
     let new_style = json!({
         "name": "test_gradient",
-        "style": {"type": "raster", "colormap": "rainbow"}
+        "style": {"type": "raster", "colormap": "rainbow"},
+        "interpolation_type": "linear"
     });
 
     let response = client.post("/api/styles", &new_style).await;
@@ -116,6 +117,7 @@ async fn test_styles_create() {
     assert!(data["id"].is_string());
     assert_eq!(data["name"], "test_gradient");
     assert_eq!(data["style"]["colormap"], "rainbow");
+    assert_eq!(data["interpolation_type"], "linear");
 }
 
 #[tokio::test]

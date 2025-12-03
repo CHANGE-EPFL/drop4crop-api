@@ -16,18 +16,20 @@ pub const STAT_2_ID: &str = "750e8400-e29b-41d4-a716-446655440002";
 
 // Style fixtures (PostgreSQL format with UUID casting)
 pub const STYLE_FIXTURES: &[&str] = &[
-    // Style 1: Default style
-    r#"INSERT INTO style (id, name, style) VALUES (
+    // Style 1: Default style (linear interpolation)
+    r#"INSERT INTO style (id, name, style, interpolation_type) VALUES (
         '550e8400-e29b-41d4-a716-446655440001'::uuid,
         'default_blue',
-        '{"type": "raster", "colormap": "viridis"}'::jsonb
+        '{"type": "raster", "colormap": "viridis"}'::jsonb,
+        'linear'
     )"#,
 
-    // Style 2: Heat map style
-    r#"INSERT INTO style (id, name, style) VALUES (
+    // Style 2: Heat map style (discrete interpolation)
+    r#"INSERT INTO style (id, name, style, interpolation_type) VALUES (
         '550e8400-e29b-41d4-a716-446655440002'::uuid,
         'heatmap_red',
-        '{"type": "raster", "colormap": "hot", "min": 0, "max": 100}'::jsonb
+        '{"type": "raster", "colormap": "hot", "min": 0, "max": 100}'::jsonb,
+        'discrete'
     )"#,
 ];
 

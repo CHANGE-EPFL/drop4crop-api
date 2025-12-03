@@ -43,12 +43,14 @@ fn compute_web_mercator_bounds(tile: &XYZTile) -> WebMercatorTileBounds {
 }
 
 impl XYZTile {
-    /// Retrieves a tile image as a 256x256 grayscale ImageBuffer.
+    /// Retrieves a tile image as a 256x256 grayscale ImageBuffer with f32 values.
     ///
     /// The function first fetches the GeoTIFF data from S3 (in EPSG:4326), then uses GDAL to
     /// reproject it to Web Mercator (EPSG:3857) for correct alignment with basemaps like OSM.
     /// Heavy GDAL operations run in a blocking thread.
-    pub async fn get_one(&self, config: &crate::config::Config, layer_id: &str) -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
+    ///
+    /// Uses f32 to preserve full precision for data values that may be in the millions.
+    pub async fn get_one(&self, config: &crate::config::Config, layer_id: &str) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
         let object = storage::get_object(config, &filename).await?;
@@ -58,7 +60,7 @@ impl XYZTile {
         let tile = XYZTile { x, y, z };
 
         // Offload the heavy reprojection to a blocking task.
-        let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<u16>, Vec<u16>>> {
+        let img = task::spawn_blocking(move || -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
             // Note: GDAL error handler disabled temporarily for debugging
             // Suppress GDAL warnings (but keep errors) to reduce log noise
             // Common harmless warnings: "TIFFFetchNormalTag: IO error during reading of 'Software'"
@@ -116,11 +118,12 @@ impl XYZTile {
                 SpatialRef::from_epsg(3857).context("Creating destination spatial reference")?;
 
             // Create an in-memory destination dataset using the MEM driver.
+            // Use f32 to preserve full range of raster values (many layers have values in millions)
             let mem_driver =
                 gdal::DriverManager::get_driver_by_name("MEM").context("Getting MEM driver")?;
             let band_count = src_ds.raster_count();
             let mut dest_ds = mem_driver
-                .create_with_band_type::<u32, _>("", 256, 256, band_count as usize)
+                .create_with_band_type::<f32, _>("", 256, 256, band_count as usize)
                 .context("Creating destination dataset")?;
 
             // Set the destination projection to EPSG:3857.
@@ -169,10 +172,10 @@ impl XYZTile {
             };
 
             let buf = band
-                .read_as::<u16>((0, 0), (256, 256), (256, 256), None)
+                .read_as::<f32>((0, 0), (256, 256), (256, 256), None)
                 .context("Reading raster data")?;
-            let buffer: Vec<u16> = buf.data().to_vec();
-            let img = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(256, 256, buffer)
+            let buffer: Vec<f32> = buf.data().to_vec();
+            let img = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(256, 256, buffer)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
             Ok(img)
         })

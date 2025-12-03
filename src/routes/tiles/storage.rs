@@ -144,6 +144,26 @@ pub async fn get_object(config: &crate::config::Config, object_id: &str) -> Resu
     }
 }
 
+/// Fetches an object directly from S3, bypassing the Redis cache.
+/// Use this for operations like statistics recalculation where we don't want to pollute the cache.
+pub async fn get_object_direct(config: &crate::config::Config, object_id: &str) -> Result<Vec<u8>> {
+    let client = get_s3_client(config).await?;
+    let s3_key = get_s3_key(config, object_id);
+
+    debug!(s3_key, "Fetching object directly from S3 (bypassing cache)");
+
+    let response = client
+        .get_object()
+        .bucket(&config.s3_bucket_id)
+        .key(&s3_key)
+        .send()
+        .await?;
+
+    let data = response.body.collect().await?.into_bytes().to_vec();
+    debug!(s3_key, size = data.len(), "Fetched object directly from S3");
+    Ok(data)
+}
+
 /// Fetches a specific byte range of an object from S3 (for HTTP Range requests / COG streaming)
 /// Does NOT use caching since range requests are typically for different byte ranges each time
 pub async fn get_object_range(

@@ -7,6 +7,7 @@ mod m20251126_000001_add_layer_total_views;
 mod m20251202_000001_add_style_interpolation_type;
 mod m20251203_000001_add_style_label_settings;
 mod m20251203_000002_add_layer_stats_status;
+mod m20251203_000003_add_stats_status_value;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251202_000001_add_style_interpolation_type::Migration),
             Box::new(m20251203_000001_add_style_label_settings::Migration),
             Box::new(m20251203_000002_add_layer_stats_status::Migration),
+            Box::new(m20251203_000003_add_stats_status_value::Migration),
         ]
     }
 }

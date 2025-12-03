@@ -510,7 +510,9 @@ async fn get_layer_stat_detail(
 }
 
 /// GET /api/admin/statistics/:stat_id/timeline - Time-series data for charts
-/// This gets the timeline for the layer associated with the given statistic record
+/// This gets the timeline for the layer associated with the given statistic record.
+/// Returns a continuous date range from the first recorded date to today,
+/// filling in days with no traffic with zero values.
 async fn get_layer_timeline(
     State(app_state): State<AppState>,
     Path(stat_id): Path<String>,
@@ -542,23 +544,59 @@ async fn get_layer_timeline(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let layer_name = layer.layer_name.unwrap_or_default();
+    let layer_id_str = stat.layer_id.to_string();
 
-    // Convert to LayerStatDetail format
-    let results: Vec<LayerStatDetail> = stats.into_iter().map(|s| {
-        LayerStatDetail {
-            id: s.id.to_string(),
-            layer_id: s.layer_id.to_string(),
-            layer_name: layer_name.clone(),
-            stat_date: s.stat_date.to_string(),
-            last_accessed_at: s.last_accessed_at.to_rfc3339(),
-            xyz_tile_count: s.xyz_tile_count,
-            cog_download_count: s.cog_download_count,
-            pixel_query_count: s.pixel_query_count,
-            stac_request_count: s.stac_request_count,
-            other_request_count: s.other_request_count,
-            total_requests: s.xyz_tile_count + s.cog_download_count + s.pixel_query_count + s.stac_request_count + s.other_request_count,
+    // Build a map of date -> stats for quick lookup
+    let stats_map: std::collections::HashMap<chrono::NaiveDate, &layer_statistics::Model> = stats
+        .iter()
+        .map(|s| (s.stat_date, s))
+        .collect();
+
+    // Determine date range: from earliest record to today
+    let today = chrono::Utc::now().naive_utc().date();
+    let start_date = stats.first().map(|s| s.stat_date).unwrap_or(today);
+
+    // Generate continuous date range with all days filled in
+    let mut results: Vec<LayerStatDetail> = Vec::new();
+    let mut current_date = start_date;
+
+    while current_date <= today {
+        let date_str = current_date.to_string();
+
+        if let Some(s) = stats_map.get(&current_date) {
+            // We have data for this day
+            results.push(LayerStatDetail {
+                id: s.id.to_string(),
+                layer_id: layer_id_str.clone(),
+                layer_name: layer_name.clone(),
+                stat_date: date_str,
+                last_accessed_at: s.last_accessed_at.to_rfc3339(),
+                xyz_tile_count: s.xyz_tile_count,
+                cog_download_count: s.cog_download_count,
+                pixel_query_count: s.pixel_query_count,
+                stac_request_count: s.stac_request_count,
+                other_request_count: s.other_request_count,
+                total_requests: s.xyz_tile_count + s.cog_download_count + s.pixel_query_count + s.stac_request_count + s.other_request_count,
+            });
+        } else {
+            // No data for this day - fill with zeros
+            results.push(LayerStatDetail {
+                id: format!("synthetic-{}-{}", layer_id_str, date_str),
+                layer_id: layer_id_str.clone(),
+                layer_name: layer_name.clone(),
+                stat_date: date_str,
+                last_accessed_at: String::new(),
+                xyz_tile_count: 0,
+                cog_download_count: 0,
+                pixel_query_count: 0,
+                stac_request_count: 0,
+                other_request_count: 0,
+                total_requests: 0,
+            });
         }
-    }).collect();
+
+        current_date += chrono::Duration::days(1);
+    }
 
     Ok(Json(results))
 }

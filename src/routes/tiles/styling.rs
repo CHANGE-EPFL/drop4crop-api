@@ -105,15 +105,14 @@ pub fn get_color(value: f32, color_stops: &[(f32, Rgba<u8>)]) -> Rgba<u8> {
 }
 
 /// Applies a style to a grayscale image based on a provided style.
-/// In this version, we assume that the input image is an ImageBuffer with u16 pixel values
-/// (i.e. ImageBuffer<Luma<u16>, Vec<u16>>), where each pixel's value is the data value.
-/// If the data value is outside the color stops range, a transparent pixel is returned.
+/// The input image is an ImageBuffer with f32 pixel values to preserve full data range
+/// (many raster layers have values in the millions).
 ///
 /// The `interpolation_type` parameter determines how colors are applied:
 /// - "linear" (default): Smooth gradient interpolation between color stops
 /// - "discrete": Each value falls into a bucket and gets that bucket's color
 pub fn style_layer(
-    img: ImageBuffer<image::Luma<u16>, Vec<u16>>,
+    img: ImageBuffer<image::Luma<f32>, Vec<f32>>,
     style: Option<JsonValue>,
     interpolation_type: Option<&str>,
 ) -> Result<Vec<u8>> {
@@ -167,10 +166,11 @@ pub fn style_layer(
 
     let (width, height) = img.dimensions();
     let img_rgba: RgbaImage = ImageBuffer::from_fn(width, height, |x, y| {
-        // Read the u16 raw value and convert it to f32.
-        let data_value = img.get_pixel(x, y)[0] as f32;
-        // Optionally, if 0 represents no data, return transparent.
-        if data_value == 0.0 {
+        // Read the f32 raw value directly (no truncation)
+        let data_value = img.get_pixel(x, y)[0];
+        // If 0 represents no data, return transparent.
+        // Also handle NaN values as no data
+        if data_value == 0.0 || data_value.is_nan() {
             return Rgba([0, 0, 0, 0]);
         }
 

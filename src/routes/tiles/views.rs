@@ -85,7 +85,7 @@ pub async fn tile_handler(
     }
     let xyz_tile = XYZTile { x, y, z };
     let retry_strategy = FixedInterval::from_millis(200).take(5);
-    let img: ImageBuffer<image::Luma<u16>, Vec<u16>> = RetryIf::spawn(
+    let img: ImageBuffer<image::Luma<f32>, Vec<f32>> = RetryIf::spawn(
         retry_strategy,
         || xyz_tile.get_one(&config, &params.layer),
         |e: &anyhow::Error| {

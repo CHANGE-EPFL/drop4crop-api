@@ -88,6 +88,10 @@ pub struct Model {
     /// Status of the last statistics recalculation (JSON with status, timestamp, error message)
     #[crudcrate(exclude(create, update))]
     pub stats_status: Option<serde_json::Value>,
+    /// Extracted status value from stats_status JSON for filtering (generated column in DB)
+    /// Values: 'success', 'error', 'pending', or NULL (not yet calculated)
+    #[crudcrate(filterable, exclude(create, update))]
+    pub stats_status_value: Option<String>,
     /// File size in bytes (from S3)
     #[crudcrate(sortable, exclude(create, update))]
     pub file_size: Option<i64>,

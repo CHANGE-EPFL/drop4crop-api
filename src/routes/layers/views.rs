@@ -360,43 +360,14 @@ pub async fn upload_file(
                 )
             })?;
 
-            if let Some(existing) = existing_layer {
+            // Track if we're updating an existing layer (to preserve DB record)
+            let existing_layer_id: Option<Uuid> = if let Some(existing) = existing_layer {
                 if overwrite_duplicates {
-                    // Delete existing layer from S3 and database
-                    if let Some(ref filename) = existing.filename {
-                        let s3_key = storage::get_s3_key(&config, filename);
-                        storage::delete_object(&config, &s3_key)
-                            .await
-                            .map_err(|e| {
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(serde_json::json!({
-                                        "message": "Failed to delete existing layer from S3",
-                                        "error": e.to_string()
-                                    })),
-                                )
-                            })?;
-                    }
-
-                    use crate::routes::layers::db::Entity as LayerEntity;
-                    LayerEntity::delete_by_id(existing.id)
-                        .exec(db)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({
-                                    "message": "Failed to delete existing layer from database",
-                                    "error": e.to_string()
-                                })),
-                            )
-                        })?;
-
                     info!(
-                        layer = existing.filename.unwrap_or_else(|| "unknown".to_string()),
-                        "Deleted existing layer"
+                        layer = existing.filename.clone().unwrap_or_else(|| "unknown".to_string()),
+                        "Found existing layer, will update record and replace S3 file"
                     );
-                    debug!(filename, "Continuing with upload of duplicate file");
+                    Some(existing.id)
                 } else {
                     warn!(filename, "Rejecting duplicate file");
                     return Err((
@@ -406,7 +377,9 @@ pub async fn upload_file(
                         })),
                     ));
                 }
-            }
+            } else {
+                None
+            };
 
             // Convert to COG
             debug!("Converting to COG format");
@@ -470,74 +443,122 @@ pub async fn upload_file(
                     )
                 })?;
 
-            // Create layer record in database
+            // Create or update layer record in database
             let layer_name = filename.strip_suffix(".tif").unwrap_or(&filename);
             let cog_file_size = cog_bytes.len() as i64;
-            let stats_status_json = serde_json::json!({
-                "status": "success",
-                "last_run": chrono::Utc::now(),
-                "error": null,
-                "details": format!("Initial upload - min: {}, max: {}, avg: {}, file_size: {} bytes", min_val, max_val, global_avg, cog_file_size)
-            });
-            debug!(layer_name, "Creating layer record");
-            let layer_record = match layer_info {
-                LayerInfo::Climate(info) => {
-                    use crate::routes::layers::db::ActiveModel as LayerActiveModel;
-                    LayerActiveModel {
-                        id: Set(Uuid::new_v4()),
-                        filename: Set(Some(filename.clone())),
-                        layer_name: Set(Some(layer_name.to_string())),
-                        crop: Set(Some(info.crop)),
-                        water_model: Set(Some(info.water_model)),
-                        climate_model: Set(Some(info.climate_model)),
-                        scenario: Set(Some(info.scenario)),
-                        variable: Set(Some(info.variable)),
-                        year: Set(Some(info.year)),
-                        min_value: Set(Some(min_val)),
-                        max_value: Set(Some(max_val)),
-                        global_average: Set(Some(global_avg)),
-                        file_size: Set(Some(cog_file_size)),
-                        stats_status: Set(Some(stats_status_json.clone())),
-                        enabled: Set(true),
-                        is_crop_specific: Set(false),
-                        ..Default::default()
-                    }
-                }
-                LayerInfo::Crop(info) => {
-                    use crate::routes::layers::db::ActiveModel as LayerActiveModel;
-                    LayerActiveModel {
-                        id: Set(Uuid::new_v4()),
-                        filename: Set(Some(filename.clone())),
-                        layer_name: Set(Some(layer_name.to_string())),
-                        crop: Set(Some(info.crop)),
-                        variable: Set(Some(info.variable)),
-                        min_value: Set(Some(min_val)),
-                        max_value: Set(Some(max_val)),
-                        global_average: Set(Some(global_avg)),
-                        file_size: Set(Some(cog_file_size)),
-                        stats_status: Set(Some(stats_status_json.clone())),
-                        enabled: Set(true),
-                        is_crop_specific: Set(true),
-                        ..Default::default()
-                    }
-                }
+            let now = chrono::Utc::now();
+
+            // Different details message for new upload vs reupload
+            let stats_status_json = if existing_layer_id.is_some() {
+                serde_json::json!({
+                    "status": "success",
+                    "last_run": now,
+                    "error": null,
+                    "details": format!("File reuploaded on {} - min: {}, max: {}, avg: {}, file_size: {} bytes",
+                        now.format("%Y-%m-%d %H:%M UTC"), min_val, max_val, global_avg, cog_file_size)
+                })
+            } else {
+                serde_json::json!({
+                    "status": "success",
+                    "last_run": now,
+                    "error": null,
+                    "details": format!("Initial upload - min: {}, max: {}, avg: {}, file_size: {} bytes", min_val, max_val, global_avg, cog_file_size)
+                })
             };
 
-            debug!(filename, "Attempting to save layer to database");
-            let saved_layer = match layer_record.insert(db).await {
-                Ok(layer) => {
-                    info!(filename, "Successfully saved layer to database");
-                    layer
+            let saved_layer = if let Some(existing_id) = existing_layer_id {
+                // Update existing layer record (preserves style_id, enabled, uploaded_at, etc.)
+                use crate::routes::layers::db::ActiveModel as LayerActiveModel;
+                debug!(filename, "Updating existing layer record");
+
+                let update_model = LayerActiveModel {
+                    id: Set(existing_id),
+                    min_value: Set(Some(min_val)),
+                    max_value: Set(Some(max_val)),
+                    global_average: Set(Some(global_avg)),
+                    file_size: Set(Some(cog_file_size)),
+                    stats_status: Set(Some(stats_status_json.clone())),
+                    last_updated: Set(now),
+                    ..Default::default()
+                };
+
+                match update_model.update(db).await {
+                    Ok(layer) => {
+                        info!(filename, "Successfully updated existing layer record");
+                        layer
+                    }
+                    Err(e) => {
+                        error!(filename, error = %e, "Failed to update layer in database");
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "message": "Failed to update layer in database",
+                                "error": e.to_string()
+                            })),
+                        ));
+                    }
                 }
-                Err(e) => {
-                    error!(filename, error = %e, "Failed to save layer to database");
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "message": "Failed to save layer to database",
-                            "error": e.to_string()
-                        })),
-                    ));
+            } else {
+                // Create new layer record
+                debug!(layer_name, "Creating new layer record");
+                let layer_record = match layer_info {
+                    LayerInfo::Climate(info) => {
+                        use crate::routes::layers::db::ActiveModel as LayerActiveModel;
+                        LayerActiveModel {
+                            id: Set(Uuid::new_v4()),
+                            filename: Set(Some(filename.clone())),
+                            layer_name: Set(Some(layer_name.to_string())),
+                            crop: Set(Some(info.crop)),
+                            water_model: Set(Some(info.water_model)),
+                            climate_model: Set(Some(info.climate_model)),
+                            scenario: Set(Some(info.scenario)),
+                            variable: Set(Some(info.variable)),
+                            year: Set(Some(info.year)),
+                            min_value: Set(Some(min_val)),
+                            max_value: Set(Some(max_val)),
+                            global_average: Set(Some(global_avg)),
+                            file_size: Set(Some(cog_file_size)),
+                            stats_status: Set(Some(stats_status_json.clone())),
+                            enabled: Set(true),
+                            is_crop_specific: Set(false),
+                            ..Default::default()
+                        }
+                    }
+                    LayerInfo::Crop(info) => {
+                        use crate::routes::layers::db::ActiveModel as LayerActiveModel;
+                        LayerActiveModel {
+                            id: Set(Uuid::new_v4()),
+                            filename: Set(Some(filename.clone())),
+                            layer_name: Set(Some(layer_name.to_string())),
+                            crop: Set(Some(info.crop)),
+                            variable: Set(Some(info.variable)),
+                            min_value: Set(Some(min_val)),
+                            max_value: Set(Some(max_val)),
+                            global_average: Set(Some(global_avg)),
+                            file_size: Set(Some(cog_file_size)),
+                            stats_status: Set(Some(stats_status_json.clone())),
+                            enabled: Set(true),
+                            is_crop_specific: Set(true),
+                            ..Default::default()
+                        }
+                    }
+                };
+
+                match layer_record.insert(db).await {
+                    Ok(layer) => {
+                        info!(filename, "Successfully saved new layer to database");
+                        layer
+                    }
+                    Err(e) => {
+                        error!(filename, error = %e, "Failed to save layer to database");
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "message": "Failed to save layer to database",
+                                "error": e.to_string()
+                            })),
+                        ));
+                    }
                 }
             };
 

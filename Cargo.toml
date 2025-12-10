@@ -1,6 +1,6 @@
 [package]
 name = "drop4crop-api"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 
 [workspace]
@@ -14,8 +14,8 @@ chrono = "0.4.42"
 crudcrate = "0.7.0"
 # crudcrate = { path = "../crudcrate/crudcrate" }
 dotenvy = "0.15.7"
-gdal = { version = "0.17.0", features = ["bindgen"] }
-gdal-sys = { version = "0.10.0", features = ["bindgen"] }
+gdal = { git = "https://github.com/georust/gdal.git", rev = "1eaed3cccbfe125618305b4eb190ba49827e215c", features = ["bindgen"] }
+gdal-sys = { git = "https://github.com/georust/gdal.git", rev = "1eaed3cccbfe125618305b4eb190ba49827e215c", features = ["bindgen"] }
 geo-types = "0.7.17"
 georaster = "0.2.0"
 geotiff = "0.1.0"

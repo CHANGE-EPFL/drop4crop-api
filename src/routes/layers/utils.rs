@@ -6,7 +6,7 @@ use gdal::{
     {Dataset, DriverManager},
 };
 use std::{ffi::CString, vec::Vec, fs};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use super::models::{ClimateLayerInfo, CropLayerInfo, LayerInfo};
 
 /// Parses a filename to extract layer information
@@ -75,36 +75,110 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
     }
 }
 
-/// Converts a GeoTIFF to Cloud Optimized GeoTIFF format in memory
+/// Sanitizes a raster by replacing infinity values (+inf, -inf) with NaN.
+///
+/// # Why this is needed
+/// Some source rasters contain infinity values (typically from division by zero
+/// during percentage calculations). These cause issues with:
+/// - Statistics calculation (min/max/mean become infinite)
+/// - Visualization (color scales break)
+/// - Analysis tools that don't handle infinity
+///
+/// This function reads the raster, replaces any +inf or -inf with NaN (which is
+/// the standard "no data" representation for floating-point rasters), and writes
+/// the sanitized data back.
+///
+/// Returns the number of infinity values that were replaced, or an error.
+fn sanitize_infinity_values(dataset: &mut Dataset) -> Result<usize> {
+    let band = dataset.rasterband(1)?;
+    let (width, height) = dataset.raster_size();
+
+    // Only process floating-point rasters (infinity doesn't exist in integer types)
+    let data_type = band.band_type();
+    if data_type != gdal::raster::GdalDataType::Float32 && data_type != gdal::raster::GdalDataType::Float64 {
+        return Ok(0);
+    }
+
+    // Read all data as f64 for processing
+    let mut data: Vec<f64> = band.read_as::<f64>((0, 0), (width, height), (width, height), None)?.data().to_vec();
+
+    // Count and replace infinity values
+    let mut inf_count = 0;
+    for val in data.iter_mut() {
+        if val.is_infinite() {
+            inf_count += 1;
+            *val = f64::NAN;
+        }
+    }
+
+    if inf_count > 0 {
+        warn!(
+            count = inf_count,
+            "Found and replaced infinity values with NaN in uploaded raster"
+        );
+
+        // Write sanitized data back
+        let mut band = dataset.rasterband(1)?;
+        let mut buffer = gdal::raster::Buffer::new((width, height), data);
+        band.write((0, 0), (width, height), &mut buffer)?;
+    }
+
+    Ok(inf_count)
+}
+
+/// Converts a GeoTIFF to Cloud Optimized GeoTIFF format in memory.
+///
+/// This function also sanitizes the input by replacing any infinity values
+/// (+inf, -inf) with NaN to prevent issues with statistics and visualization.
 pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
     debug!("Converting to COG format using GDAL");
 
-    // Use temporary files since GDAL Rust bindings don't expose VSI write/read functions
+    // Use temporary files with unique UUIDs to prevent concurrent upload conflicts
+    // (process::id() was causing race conditions when multiple uploads ran simultaneously)
     let temp_dir = std::env::temp_dir();
-    let input_path = temp_dir.join(format!("input_{}.tif", std::process::id()));
-    let output_path = temp_dir.join(format!("output_{}.tif", std::process::id()));
+    let unique_id = uuid::Uuid::new_v4();
+    let input_path = temp_dir.join(format!("input_{}.tif", unique_id));
+    let sanitized_path = temp_dir.join(format!("sanitized_{}.tif", unique_id));
+    let output_path = temp_dir.join(format!("output_{}.tif", unique_id));
 
     // Write input bytes to temporary file
     fs::write(&input_path, input_bytes)?;
 
-    // Open input dataset
-    let dataset = Dataset::open(&input_path)?;
+    // Open input dataset for reading
+    let input_dataset = Dataset::open(&input_path)?;
 
     // Get GeoTIFF driver
     let driver = DriverManager::get_driver_by_name("GTiff")?;
 
+    // Create a writable copy for sanitization
+    // (We need a separate file because GDAL doesn't allow modifying compressed source files)
+    let mut sanitized_dataset = input_dataset.create_copy(
+        &driver,
+        sanitized_path.to_str().unwrap(),
+        &CslStringList::new()
+    )?;
+
+    // Close input dataset (no longer needed)
+    drop(input_dataset);
+
+    // Sanitize infinity values (+inf, -inf -> NaN)
+    // This fixes rasters with bad data from division-by-zero in percentage calculations
+    let _inf_replaced = sanitize_infinity_values(&mut sanitized_dataset)?;
+
     // COG creation options
+    // Note: PREDICTOR=3 is for floating-point data (common in scientific rasters)
+    // PREDICTOR=2 is for integer data only
     let mut creation_options = CslStringList::new();
     creation_options.add_string("TILED=YES")?;
     creation_options.add_string("COPY_SRC_OVERVIEWS=YES")?;
     creation_options.add_string("COMPRESS=LZW")?;
-    creation_options.add_string("PREDICTOR=2")?;
+    creation_options.add_string("PREDICTOR=3")?;
     creation_options.add_string("BLOCKXSIZE=512")?;
     creation_options.add_string("BLOCKYSIZE=512")?;
 
-    // Create COG with proper options
+    // Create COG with proper options from sanitized dataset
     let mut cog_dataset =
-        dataset.create_copy(&driver, output_path.to_str().unwrap(), &creation_options)?;
+        sanitized_dataset.create_copy(&driver, output_path.to_str().unwrap(), &creation_options)?;
 
     // Build overviews for the COG
     let overview_list = &[2, 4, 8, 16];
@@ -112,13 +186,14 @@ pub fn convert_to_cog_in_memory(input_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // Close datasets to flush to disk
     drop(cog_dataset);
-    drop(dataset);
+    drop(sanitized_dataset);
 
     // Read output from file
     let output_bytes = fs::read(&output_path)?;
 
     // Clean up temporary files
     let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&sanitized_path);
     let _ = fs::remove_file(&output_path);
 
     info!("COG conversion completed successfully");

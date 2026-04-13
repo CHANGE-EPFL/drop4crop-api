@@ -1,6 +1,7 @@
 pub mod admin;
 mod countries;
 pub mod layers;
+pub mod projects;
 pub mod styles;
 pub mod tiles;
 pub mod stats_sync;
@@ -319,6 +320,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/layers/xyz", tiles::views::xyz_router(&app_state)) // XYZ tiles
         .nest("/api/layers/cog", layers::views::cog_router(&app_state)) // S3-compatible COG endpoint
+        .nest("/api/projects", projects::views::router(&app_state))
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
         .layer(rate_limit_stack.clone()) // Apply rate limiting to API routes

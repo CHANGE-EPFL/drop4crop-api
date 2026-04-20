@@ -11,7 +11,7 @@ use sea_orm::entity::prelude::*;
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    #[crudcrate(primary_key, exclude(update, create), on_create = Uuid::new_v4())]
+    #[crudcrate(primary_key, filterable, exclude(update, create), on_create = Uuid::new_v4())]
     pub id: Uuid,
     #[sea_orm(unique)]
     pub name: String,

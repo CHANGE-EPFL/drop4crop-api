@@ -163,11 +163,12 @@ impl MigrationTrait for Migration {
                 )).await?;
             }
 
-            // Scenarios
+            // Scenarios — ISIMIP designations, sorted historical-first.
             let scenarios = [
-                ("rcp26", "RCP 2.6", 0),
-                ("rcp60", "RCP 6.0", 1),
-                ("rcp85", "RCP 8.5", 2),
+                ("historical", "Historical", 0),
+                ("rcp26", "RCP 2.6", 1),
+                ("rcp60", "RCP 6.0", 2),
+                ("rcp85", "RCP 8.5", 3),
             ];
             for (slug, name, sort) in &scenarios {
                 db.execute_unprepared(&format!(
@@ -193,6 +194,13 @@ impl MigrationTrait for Migration {
                 ("rg",        "Green",  "R",   "g", "mm",        "Renewability Rates",    11),
                 ("wdb",       "Blue",   "WD",  "b", "years",     "Water Debt",            12),
                 ("wdg",       "Green",  "WD",  "g", "years",     "Water Debt",            13),
+                // Historical-scenario production baseline. Separate slug from
+                // the crop-specific `production` aggregates so both can coexist
+                // in the variable table and be surfaced by their respective
+                // sidebar (climate-series vs crop-specific). Prod layers that
+                // previously used variable='production' with scenario='historical'
+                // must be renamed to 'production_historical' before migrating.
+                ("production_historical", "Production", "Production", "", "ton", "Production", 14),
             ];
             for (slug, name, abbr, sub, unit, group, sort) in &time_variables {
                 let subscript_sql = if sub.is_empty() { "NULL".to_string() } else { format!("'{}'", sub) };

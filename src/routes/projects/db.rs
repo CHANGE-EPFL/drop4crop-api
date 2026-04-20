@@ -28,6 +28,10 @@ pub struct Model {
     pub enabled: bool,
     #[crudcrate(sortable)]
     pub sort_order: i32,
+    /// Timeline config for the public UI year slider. Null means no slider.
+    /// Shape: {"mode":"range","min":2000,"max":2090,"step":10}
+    ///    or: {"mode":"list","values":[2020,2050,2090]}
+    pub year_axis: Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

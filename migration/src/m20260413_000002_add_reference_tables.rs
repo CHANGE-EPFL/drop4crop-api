@@ -211,39 +211,70 @@ impl MigrationTrait for Migration {
                 )).await?;
             }
 
-            // Also insert any DISTINCT values from layer table not already in reference tables
-            db.execute_unprepared(
-                "INSERT INTO crop (id, slug, name, sort_order) \
-                 SELECT uuid_generate_v4(), l.crop, l.crop, 99 \
-                 FROM (SELECT DISTINCT crop FROM layer WHERE crop IS NOT NULL) l \
-                 WHERE NOT EXISTS (SELECT 1 FROM crop c WHERE c.slug = l.crop)"
-            ).await?;
-            db.execute_unprepared(
-                "INSERT INTO water_model (id, slug, name, sort_order) \
-                 SELECT uuid_generate_v4(), l.water_model, l.water_model, 99 \
-                 FROM (SELECT DISTINCT water_model FROM layer WHERE water_model IS NOT NULL) l \
-                 WHERE NOT EXISTS (SELECT 1 FROM water_model w WHERE w.slug = l.water_model)"
-            ).await?;
-            db.execute_unprepared(
-                "INSERT INTO climate_model (id, slug, name, sort_order) \
-                 SELECT uuid_generate_v4(), l.climate_model, l.climate_model, 99 \
-                 FROM (SELECT DISTINCT climate_model FROM layer WHERE climate_model IS NOT NULL) l \
-                 WHERE NOT EXISTS (SELECT 1 FROM climate_model c WHERE c.slug = l.climate_model)"
-            ).await?;
-            db.execute_unprepared(
-                "INSERT INTO scenario (id, slug, name, sort_order) \
-                 SELECT uuid_generate_v4(), l.scenario, l.scenario, 99 \
-                 FROM (SELECT DISTINCT scenario FROM layer WHERE scenario IS NOT NULL) l \
-                 WHERE NOT EXISTS (SELECT 1 FROM scenario s WHERE s.slug = l.scenario)"
-            ).await?;
-            db.execute_unprepared(
-                "INSERT INTO variable (id, slug, name, abbreviation, unit, is_crop_specific, sort_order) \
-                 SELECT uuid_generate_v4(), l.variable, l.variable, '', '', false, 99 \
-                 FROM (SELECT DISTINCT variable FROM layer WHERE variable IS NOT NULL) l \
-                 WHERE NOT EXISTS (SELECT 1 FROM variable v WHERE v.slug = l.variable)"
-            ).await?;
-
             info!("Seeded reference tables");
+
+            // ── Pre-flight safeguard ────────────────────────────────────────
+            // Before dropping the string columns, verify that every distinct
+            // non-null value in layer.<col> has a matching slug in its reference
+            // table. If any value is unmatched, abort the migration with a
+            // detailed error so the operator can add the missing seed entry
+            // rather than silently losing data when the string column is dropped.
+
+            let checks: [(&str, &str); 5] = [
+                ("crop",          "crop"),
+                ("water_model",   "water_model"),
+                ("climate_model", "climate_model"),
+                ("scenario",      "scenario"),
+                ("variable",      "variable"),
+            ];
+
+            let mut missing: Vec<(&str, Vec<String>)> = Vec::new();
+            for (col, ref_table) in checks {
+                let sql = format!(
+                    "SELECT DISTINCT l.{col} AS val \
+                     FROM layer l \
+                     WHERE l.{col} IS NOT NULL \
+                       AND NOT EXISTS (SELECT 1 FROM {ref_table} r WHERE r.slug = l.{col}) \
+                     ORDER BY l.{col}"
+                );
+                let rows = db.query_all(sea_orm::Statement::from_string(
+                    sea_orm::DatabaseBackend::Postgres,
+                    sql,
+                )).await?;
+                if !rows.is_empty() {
+                    let values: Vec<String> = rows.iter()
+                        .filter_map(|r| r.try_get::<String>("", "val").ok())
+                        .collect();
+                    missing.push((col, values));
+                }
+            }
+
+            if !missing.is_empty() {
+                let mut msg = String::from(
+                    "Aborting migration: layer table contains values that do not \
+                     exist in the corresponding reference tables. No data has been \
+                     altered. Add the missing entries to the seed list in \
+                     m20260413_000002_add_reference_tables.rs (`time_variables` / \
+                     `crop_variables` / the `crops`/`water_models`/`climate_models`/\
+                     `scenarios` arrays), or manually insert them into the reference \
+                     table, then re-run the migration.\n\n\
+                     Unmatched values:\n"
+                );
+                for (col, vals) in &missing {
+                    msg.push_str(&format!(
+                        "  layer.{} ({} unknown value{}):\n",
+                        col,
+                        vals.len(),
+                        if vals.len() == 1 { "" } else { "s" }
+                    ));
+                    for v in vals {
+                        msg.push_str(&format!("    - {}\n", v));
+                    }
+                }
+                return Err(DbErr::Custom(msg));
+            }
+
+            info!("Pre-flight check passed: every layer string maps to a reference row");
 
             // ── 3. Add FK columns to layer table ────────────────────────
 

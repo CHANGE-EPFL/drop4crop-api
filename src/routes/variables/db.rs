@@ -23,6 +23,11 @@ pub struct Model {
     pub unit: String,
     #[crudcrate(filterable)]
     pub is_crop_specific: bool,
+    /// Whether this variable varies over time. Controls the year slider in
+    /// the public UI. Default true for time-series (climate) variables; false
+    /// for crop-specific single-snapshot variables.
+    #[crudcrate(filterable, default_value = "true")]
+    pub has_time: bool,
     #[crudcrate(filterable)]
     pub group_name: Option<String>,
     #[crudcrate(sortable)]

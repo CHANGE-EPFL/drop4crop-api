@@ -111,8 +111,12 @@ fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
         (layer, "cog")
     } else if uri_path.contains("/value") {
         // Pixel value query: /api/layers/{id}/value?lat={}&lon={}
+        // Only record if the segment is a UUID; otherwise it's a named endpoint
+        // (e.g. "recalculate-stats") and has no associated layer.
         let parts: Vec<&str> = uri_path.split('/').collect();
-        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers" {
+        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers"
+            && uuid::Uuid::parse_str(parts[3]).is_ok()
+        {
             Some(parts[3])
         } else {
             None
@@ -130,16 +134,16 @@ fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
             return;
         }
     } else if uri_path.starts_with("/api/layers/") && !uri_path.ends_with("/uploads") {
-        // Other layer requests (e.g., GET /api/layers/{id})
+        // Other layer requests (e.g., GET /api/layers/{id}).
+        // Only record if the segment parses as a UUID; this filters out named
+        // admin endpoints like "recalculate-stats", "recalculate-stats-by-ids",
+        // "recalculate-stats/status", etc., which would otherwise be logged
+        // as missing-layer errors by the background stats sync.
         let parts: Vec<&str> = uri_path.split('/').collect();
-        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers" {
-            let segment = parts[3];
-            // Skip non-layer endpoints
-            if matches!(segment, "groups" | "xyz" | "cog" | "uploads") {
-                None
-            } else {
-                Some(segment)
-            }
+        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers"
+            && uuid::Uuid::parse_str(parts[3]).is_ok()
+        {
+            Some(parts[3])
         } else {
             None
         };

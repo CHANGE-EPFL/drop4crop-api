@@ -1,5 +1,5 @@
-FROM rust:1.90.0-bookworm AS chef
-RUN cargo install cargo-chef && \
+FROM rust:1.95.0-bookworm AS chef
+RUN cargo install cargo-chef --locked && \
     apt-get update && apt-get install -y libgdal-dev clang libclang1
 WORKDIR /app
 

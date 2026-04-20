@@ -1,4 +1,4 @@
-FROM rust:1.90.0
+FROM rust:1.95.0
 
 # Add GDAL - use backports to get newer version
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" >> /etc/apt/sources.list && \

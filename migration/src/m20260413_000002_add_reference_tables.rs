@@ -107,6 +107,14 @@ impl MigrationTrait for Migration {
         // ── 2. Seed reference data (PostgreSQL) ─────────────────────────
 
         if is_postgres {
+            // The consolidated schema migration only enables uuid-ossp on a
+            // fresh DB; deployments that were migrated over from the old
+            // Alembic state took the skip-setup branch and never got it.
+            // Declare the dependency explicitly here so the migration is
+            // self-contained.
+            db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+                .await?;
+
             // Crops
             let crops = [
                 ("barley", "Barley", 0),

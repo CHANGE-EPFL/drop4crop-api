@@ -1,9 +1,15 @@
 pub mod admin;
+pub mod climate_models;
 mod countries;
+pub mod crops;
 pub mod layers;
 pub mod projects;
+pub mod scenarios;
+pub mod showcase_items;
 pub mod styles;
 pub mod tiles;
+pub mod variables;
+pub mod water_models;
 pub mod stats_sync;
 
 use crate::{common::state::AppState, config::Config};
@@ -320,7 +326,13 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/layers/xyz", tiles::views::xyz_router(&app_state)) // XYZ tiles
         .nest("/api/layers/cog", layers::views::cog_router(&app_state)) // S3-compatible COG endpoint
+        .nest("/api/crops", crops::views::router(&app_state))
+        .nest("/api/water-models", water_models::views::router(&app_state))
+        .nest("/api/climate-models", climate_models::views::router(&app_state))
+        .nest("/api/scenarios", scenarios::views::router(&app_state))
+        .nest("/api/variables", variables::views::router(&app_state))
         .nest("/api/projects", projects::views::router(&app_state))
+        .nest("/api/showcase-items", showcase_items::views::router(&app_state))
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
         .layer(rate_limit_stack.clone()) // Apply rate limiting to API routes

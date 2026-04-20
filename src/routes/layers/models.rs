@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 #[derive(Deserialize, IntoParams)]
 pub struct UploadQueryParams {
     pub overwrite_duplicates: Option<bool>,
+    /// Optional project UUID to associate the uploaded layer with a project
+    pub project_id: Option<Uuid>,
 }
 
 

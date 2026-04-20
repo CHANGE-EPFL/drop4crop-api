@@ -53,17 +53,17 @@ pub struct Model {
     #[sea_orm(unique)]
     #[crudcrate(filterable, fulltext)]
     pub layer_name: Option<String>,
-    #[crudcrate(filterable, fulltext)]
-    pub crop: Option<String>,
-    #[crudcrate(filterable, fulltext)]
-    pub water_model: Option<String>,
-    #[crudcrate(filterable, fulltext)]
-    pub climate_model: Option<String>,
-    #[crudcrate(filterable, fulltext)]
-    pub scenario: Option<String>,
-    #[crudcrate(filterable, fulltext)]
-    pub variable: Option<String>,
-    #[crudcrate(filterable, fulltext)]
+    #[crudcrate(filterable)]
+    pub crop_id: Option<Uuid>,
+    #[crudcrate(filterable)]
+    pub water_model_id: Option<Uuid>,
+    #[crudcrate(filterable)]
+    pub climate_model_id: Option<Uuid>,
+    #[crudcrate(filterable)]
+    pub scenario_id: Option<Uuid>,
+    #[crudcrate(filterable)]
+    pub variable_id: Option<Uuid>,
+    #[crudcrate(filterable)]
     pub year: Option<i32>,
     #[crudcrate(filterable, sortable)]
     pub last_updated: DateTime<Utc>,
@@ -79,9 +79,9 @@ pub struct Model {
     #[sea_orm(column_type = "Double", nullable)]
     pub max_value: Option<f64>,
     #[crudcrate(filterable)]
-    pub style_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
     #[crudcrate(filterable)]
-    pub is_crop_specific: bool,
+    pub style_id: Option<Uuid>,
     /// Total view count across all statistics (updated automatically by database trigger)
     #[crudcrate(sortable, filterable, exclude(create, update))]
     pub total_views: i64,
@@ -116,6 +116,54 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     Style,
+    #[sea_orm(
+        belongs_to = "crate::routes::projects::db::Entity",
+        from = "Column::ProjectId",
+        to = "crate::routes::projects::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    Project,
+    #[sea_orm(
+        belongs_to = "crate::routes::crops::db::Entity",
+        from = "Column::CropId",
+        to = "crate::routes::crops::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    Crop,
+    #[sea_orm(
+        belongs_to = "crate::routes::water_models::db::Entity",
+        from = "Column::WaterModelId",
+        to = "crate::routes::water_models::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    WaterModel,
+    #[sea_orm(
+        belongs_to = "crate::routes::climate_models::db::Entity",
+        from = "Column::ClimateModelId",
+        to = "crate::routes::climate_models::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    ClimateModel,
+    #[sea_orm(
+        belongs_to = "crate::routes::scenarios::db::Entity",
+        from = "Column::ScenarioId",
+        to = "crate::routes::scenarios::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    Scenario,
+    #[sea_orm(
+        belongs_to = "crate::routes::variables::db::Entity",
+        from = "Column::VariableId",
+        to = "crate::routes::variables::db::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    Variable,
 }
 
 impl Related<super::countries::db::Entity> for Entity {

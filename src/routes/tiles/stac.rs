@@ -6,10 +6,17 @@ use axum::{
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use crate::common::state::AppState;
 use crate::routes::layers::db as layer;
+use crate::routes::crops::db as crop;
+use crate::routes::water_models::db as water_model;
+use crate::routes::climate_models::db as climate_model;
+use crate::routes::scenarios::db as scenario;
+use crate::routes::variables::db as variable;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use stac::{Catalog, Collection, Link};
 use stac_api::{Conformance, ItemCollection, Context};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct SearchParams {
@@ -23,6 +30,8 @@ pub struct SearchParams {
     climate_model: Option<String>,
     scenario: Option<String>,
     variable: Option<String>,
+    /// Optional project slug to scope results to a specific project
+    project: Option<String>,
 }
 
 /// STAC API root endpoint (landing page)
@@ -356,20 +365,83 @@ async fn search_items(
         .find_also_related(crate::routes::styles::db::Entity)
         .filter(layer::Column::Enabled.eq(true));
 
-    if let Some(crop) = &params.crop {
-        query = query.filter(layer::Column::Crop.eq(crop));
+    if let Some(crop_slug) = &params.crop {
+        let crop_id = crop::Entity::find()
+            .filter(crop::Column::Slug.eq(crop_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|m| m.id);
+        if let Some(id) = crop_id {
+            query = query.filter(layer::Column::CropId.eq(id));
+        } else {
+            // Slug not found -- filter will match nothing
+            query = query.filter(layer::Column::CropId.eq(Uuid::nil()));
+        }
     }
-    if let Some(water_model) = &params.water_model {
-        query = query.filter(layer::Column::WaterModel.eq(water_model));
+    if let Some(wm_slug) = &params.water_model {
+        let wm_id = water_model::Entity::find()
+            .filter(water_model::Column::Slug.eq(wm_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|m| m.id);
+        if let Some(id) = wm_id {
+            query = query.filter(layer::Column::WaterModelId.eq(id));
+        } else {
+            query = query.filter(layer::Column::WaterModelId.eq(Uuid::nil()));
+        }
     }
-    if let Some(climate_model) = &params.climate_model {
-        query = query.filter(layer::Column::ClimateModel.eq(climate_model));
+    if let Some(cm_slug) = &params.climate_model {
+        let cm_id = climate_model::Entity::find()
+            .filter(climate_model::Column::Slug.eq(cm_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|m| m.id);
+        if let Some(id) = cm_id {
+            query = query.filter(layer::Column::ClimateModelId.eq(id));
+        } else {
+            query = query.filter(layer::Column::ClimateModelId.eq(Uuid::nil()));
+        }
     }
-    if let Some(scenario) = &params.scenario {
-        query = query.filter(layer::Column::Scenario.eq(scenario));
+    if let Some(sc_slug) = &params.scenario {
+        let sc_id = scenario::Entity::find()
+            .filter(scenario::Column::Slug.eq(sc_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|m| m.id);
+        if let Some(id) = sc_id {
+            query = query.filter(layer::Column::ScenarioId.eq(id));
+        } else {
+            query = query.filter(layer::Column::ScenarioId.eq(Uuid::nil()));
+        }
     }
-    if let Some(variable) = &params.variable {
-        query = query.filter(layer::Column::Variable.eq(variable));
+    if let Some(var_slug) = &params.variable {
+        let var_id = variable::Entity::find()
+            .filter(variable::Column::Slug.eq(var_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|m| m.id);
+        if let Some(id) = var_id {
+            query = query.filter(layer::Column::VariableId.eq(id));
+        } else {
+            query = query.filter(layer::Column::VariableId.eq(Uuid::nil()));
+        }
+    }
+    if let Some(project_slug) = &params.project {
+        let project = crate::routes::projects::db::Entity::find()
+            .filter(crate::routes::projects::db::Column::Slug.eq(project_slug.as_str()))
+            .one(db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(p) = project {
+            query = query.filter(layer::Column::ProjectId.eq(p.id));
+        } else {
+            query = query.filter(layer::Column::ProjectId.eq(Uuid::nil()));
+        }
     }
     if let Some(datetime) = &params.datetime {
         // Extract year from datetime string (e.g., "2010-01-01" -> 2010)
@@ -390,6 +462,47 @@ async fn search_items(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Pre-load all reference tables into lookup maps (id -> slug)
+    let crop_map: HashMap<Uuid, String> = crop::Entity::find()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .map(|m| (m.id, m.slug))
+        .collect();
+
+    let water_model_map: HashMap<Uuid, String> = water_model::Entity::find()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .map(|m| (m.id, m.slug))
+        .collect();
+
+    let climate_model_map: HashMap<Uuid, String> = climate_model::Entity::find()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .map(|m| (m.id, m.slug))
+        .collect();
+
+    let scenario_map: HashMap<Uuid, String> = scenario::Entity::find()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .map(|m| (m.id, m.slug))
+        .collect();
+
+    let variable_map: HashMap<Uuid, String> = variable::Entity::find()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .map(|m| (m.id, m.slug))
+        .collect();
+
     // Convert layers to STAC items
     let features: Vec<Value> = layers
         .iter()
@@ -397,6 +510,23 @@ async fn search_items(
             let unknown = "unknown".to_string();
             let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
             let year = layer_record.year.unwrap_or(2010);
+
+            // Resolve FK UUIDs to slug strings via lookup maps
+            let crop_slug = layer_record.crop_id
+                .and_then(|id| crop_map.get(&id).cloned())
+                .unwrap_or_default();
+            let water_model_slug = layer_record.water_model_id
+                .and_then(|id| water_model_map.get(&id).cloned())
+                .unwrap_or_default();
+            let climate_model_slug = layer_record.climate_model_id
+                .and_then(|id| climate_model_map.get(&id).cloned())
+                .unwrap_or_default();
+            let scenario_slug = layer_record.scenario_id
+                .and_then(|id| scenario_map.get(&id).cloned())
+                .unwrap_or_default();
+            let variable_slug = layer_record.variable_id
+                .and_then(|id| variable_map.get(&id).cloned())
+                .unwrap_or_default();
 
             // Convert style to JSON if present, and get style settings
             let style_json = style_opt.as_ref().and_then(|style| {
@@ -411,6 +541,12 @@ async fn search_items(
             let label_count = style_opt.as_ref().and_then(|style| {
                 style.label_count
             });
+
+            let crop_display = if crop_slug.is_empty() { "unknown".to_string() } else { crop_slug.clone() };
+            let wm_display = if water_model_slug.is_empty() { "unknown".to_string() } else { water_model_slug.clone() };
+            let cm_display = if climate_model_slug.is_empty() { "unknown".to_string() } else { climate_model_slug.clone() };
+            let sc_display = if scenario_slug.is_empty() { "unknown".to_string() } else { scenario_slug.clone() };
+            let var_display = if variable_slug.is_empty() { "unknown".to_string() } else { variable_slug.clone() };
 
             json!({
                 "stac_version": "1.0.0",
@@ -437,24 +573,24 @@ async fn search_items(
                     "start_datetime": format!("{}-01-01T00:00:00Z", year),
                     "end_datetime": format!("{}-12-31T23:59:59Z", year),
                     "title": format!("{} - {} {} {} {} ({})",
-                        layer_record.crop.as_ref().unwrap_or(&"".to_string()),
-                        layer_record.water_model.as_ref().unwrap_or(&"".to_string()),
-                        layer_record.climate_model.as_ref().unwrap_or(&"".to_string()),
-                        layer_record.scenario.as_ref().unwrap_or(&"".to_string()),
+                        crop_display,
+                        wm_display,
+                        cm_display,
+                        sc_display,
                         year,
-                        layer_record.variable.as_ref().unwrap_or(&"".to_string())
+                        var_display
                     ),
                     "description": format!("Agricultural impact data for {} using {} water model and {} climate model under {} scenario",
-                        layer_record.crop.as_ref().unwrap_or(&"unknown".to_string()),
-                        layer_record.water_model.as_ref().unwrap_or(&"unknown".to_string()),
-                        layer_record.climate_model.as_ref().unwrap_or(&"unknown".to_string()),
-                        layer_record.scenario.as_ref().unwrap_or(&"unknown".to_string())
+                        crop_display,
+                        wm_display,
+                        cm_display,
+                        sc_display
                     ),
-                    "crop": layer_record.crop,
-                    "water_model": layer_record.water_model,
-                    "climate_model": layer_record.climate_model,
-                    "scenario": layer_record.scenario,
-                    "variable": layer_record.variable,
+                    "crop": crop_slug,
+                    "water_model": water_model_slug,
+                    "climate_model": climate_model_slug,
+                    "scenario": scenario_slug,
+                    "variable": variable_slug,
                     "year": year,
                     "global_average": layer_record.global_average,
                     "min_value": layer_record.min_value,
@@ -524,7 +660,7 @@ async fn search_items(
                         "raster:bands": [{
                             "data_type": "float32",
                             "spatial_resolution": 0.5,
-                            "unit": layer_record.variable.as_ref().unwrap_or(&"unknown".to_string()),
+                            "unit": var_display,
                             "statistics": {
                                 "minimum": layer_record.min_value.unwrap_or(0.0),
                                 "maximum": layer_record.max_value.unwrap_or(1.0),

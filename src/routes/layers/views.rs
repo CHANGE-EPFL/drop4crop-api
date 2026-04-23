@@ -143,19 +143,128 @@ pub async fn get_groups(
         None
     };
 
-    // Groups reflect what's actually in the layer data so the map UI can dim /
-    // omit chips for axes that have no backing layer. For the project scope
-    // that's "crops with at least one enabled layer owned by the project".
-    // For the global scope it's "crops with any enabled layer anywhere".
+    // When a project is specified, the project configuration (junction tables)
+    // is the source of truth — not what layers happen to exist. This ensures a
+    // newly configured project with zero layers still shows its axes.
+    if let Some(pid) = project_uuid {
+        let db_err = |e: sea_orm::DbErr| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string()));
+
+        // Crops from project_crop junction
+        let crop_junctions = crate::routes::projects::project_crop::Entity::find()
+            .filter(crate::routes::projects::project_crop::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::projects::project_crop::Column::SortOrder)
+            .all(db).await.map_err(db_err)?;
+        let mut crops = Vec::new();
+        for junc in &crop_junctions {
+            if let Some(c) = crate::routes::crops::db::Entity::find_by_id(junc.crop_id)
+                .one(db).await.map_err(db_err)? {
+                crops.push(serde_json::json!({
+                    "id": c.id, "slug": c.slug, "name": c.name,
+                    "sort_order": junc.sort_order,
+                }));
+            }
+        }
+        if !crops.is_empty() { groups.insert("crop".to_string(), crops); }
+
+        // Water models from project_water_model junction
+        let wm_junctions = crate::routes::projects::project_water_model::Entity::find()
+            .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::projects::project_water_model::Column::SortOrder)
+            .all(db).await.map_err(db_err)?;
+        let mut water_models = Vec::new();
+        for junc in &wm_junctions {
+            if let Some(w) = crate::routes::water_models::db::Entity::find_by_id(junc.water_model_id)
+                .one(db).await.map_err(db_err)? {
+                water_models.push(serde_json::json!({
+                    "id": w.id, "slug": w.slug, "name": w.name,
+                    "sort_order": junc.sort_order,
+                }));
+            }
+        }
+        if !water_models.is_empty() { groups.insert("water_model".to_string(), water_models); }
+
+        // Climate models from project_climate_model junction
+        let cm_junctions = crate::routes::projects::project_climate_model::Entity::find()
+            .filter(crate::routes::projects::project_climate_model::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::projects::project_climate_model::Column::SortOrder)
+            .all(db).await.map_err(db_err)?;
+        let mut climate_models = Vec::new();
+        for junc in &cm_junctions {
+            if let Some(c) = crate::routes::climate_models::db::Entity::find_by_id(junc.climate_model_id)
+                .one(db).await.map_err(db_err)? {
+                climate_models.push(serde_json::json!({
+                    "id": c.id, "slug": c.slug, "name": c.name,
+                    "sort_order": junc.sort_order,
+                }));
+            }
+        }
+        if !climate_models.is_empty() { groups.insert("climate_model".to_string(), climate_models); }
+
+        // Scenarios from project_scenario junction
+        let sc_junctions = crate::routes::projects::project_scenario::Entity::find()
+            .filter(crate::routes::projects::project_scenario::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::projects::project_scenario::Column::SortOrder)
+            .all(db).await.map_err(db_err)?;
+        let mut scenarios = Vec::new();
+        for junc in &sc_junctions {
+            if let Some(s) = crate::routes::scenarios::db::Entity::find_by_id(junc.scenario_id)
+                .one(db).await.map_err(db_err)? {
+                scenarios.push(serde_json::json!({
+                    "id": s.id, "slug": s.slug, "name": s.name,
+                    "sort_order": junc.sort_order,
+                }));
+            }
+        }
+        if !scenarios.is_empty() { groups.insert("scenario".to_string(), scenarios); }
+
+        // Variables from project_variable junction (include is_crop_specific and has_time)
+        let var_junctions = crate::routes::projects::project_variable::Entity::find()
+            .filter(crate::routes::projects::project_variable::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::projects::project_variable::Column::SortOrder)
+            .all(db).await.map_err(db_err)?;
+        let mut variables = Vec::new();
+        for junc in &var_junctions {
+            if let Some(v) = crate::routes::variables::db::Entity::find_by_id(junc.variable_id)
+                .one(db).await.map_err(db_err)? {
+                variables.push(serde_json::json!({
+                    "id": v.id, "slug": v.slug, "name": v.name,
+                    "abbreviation": v.abbreviation, "subscript": v.subscript,
+                    "unit": v.unit, "is_crop_specific": v.is_crop_specific,
+                    "has_time": v.has_time, "group_name": v.group_name,
+                    "sort_order": junc.sort_order,
+                }));
+            }
+        }
+        if !variables.is_empty() { groups.insert("variable".to_string(), variables); }
+
+        // Years: still from layer data (no junction table for years)
+        let year_rows = super::db::Entity::find()
+            .filter(super::db::Column::Enabled.eq(true))
+            .filter(super::db::Column::ProjectId.eq(pid))
+            .select_only()
+            .column(super::db::Column::Year)
+            .distinct()
+            .into_json()
+            .all(db)
+            .await
+            .map_err(db_err)?;
+        let years: Vec<JsonValue> = year_rows
+            .into_iter()
+            .filter_map(|mut json| json.as_object_mut()?.remove("year"))
+            .filter(|v| !v.is_null())
+            .collect();
+        if !years.is_empty() { groups.insert("year".to_string(), years); }
+
+        return Ok(Json(groups));
+    }
+
+    // Global scope (no project filter): derive axes from actual layer data
     let crops = {
-        let mut q = crate::routes::crops::db::Entity::find()
+        let q = crate::routes::crops::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Crop.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
             .order_by_asc(crate::routes::crops::db::Column::SortOrder);
-        if let Some(pid) = project_uuid {
-            q = q.filter(super::db::Column::ProjectId.eq(pid));
-        }
         q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
@@ -163,16 +272,12 @@ pub async fn get_groups(
         groups.insert("crop".to_string(), crops);
     }
 
-    // Water models — same "axes present in the layer data" derivation as crops.
     let water_models = {
-        let mut q = crate::routes::water_models::db::Entity::find()
+        let q = crate::routes::water_models::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::WaterModel.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
             .order_by_asc(crate::routes::water_models::db::Column::SortOrder);
-        if let Some(pid) = project_uuid {
-            q = q.filter(super::db::Column::ProjectId.eq(pid));
-        }
         q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
@@ -180,16 +285,12 @@ pub async fn get_groups(
         groups.insert("water_model".to_string(), water_models);
     }
 
-    // Climate models — same "axes present in the layer data" derivation as crops.
     let climate_models = {
-        let mut q = crate::routes::climate_models::db::Entity::find()
+        let q = crate::routes::climate_models::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::ClimateModel.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
             .order_by_asc(crate::routes::climate_models::db::Column::SortOrder);
-        if let Some(pid) = project_uuid {
-            q = q.filter(super::db::Column::ProjectId.eq(pid));
-        }
         q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
@@ -197,16 +298,12 @@ pub async fn get_groups(
         groups.insert("climate_model".to_string(), climate_models);
     }
 
-    // Scenarios — same "axes present in the layer data" derivation as crops.
     let scenarios = {
-        let mut q = crate::routes::scenarios::db::Entity::find()
+        let q = crate::routes::scenarios::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Scenario.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
             .order_by_asc(crate::routes::scenarios::db::Column::SortOrder);
-        if let Some(pid) = project_uuid {
-            q = q.filter(super::db::Column::ProjectId.eq(pid));
-        }
         q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
@@ -214,16 +311,12 @@ pub async fn get_groups(
         groups.insert("scenario".to_string(), scenarios);
     }
 
-    // Variables — same "axes present in the layer data" derivation as crops.
     let variables = {
-        let mut q = crate::routes::variables::db::Entity::find()
+        let q = crate::routes::variables::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Variable.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
             .order_by_asc(crate::routes::variables::db::Column::SortOrder);
-        if let Some(pid) = project_uuid {
-            q = q.filter(super::db::Column::ProjectId.eq(pid));
-        }
         q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
@@ -231,13 +324,8 @@ pub async fn get_groups(
         groups.insert("variable".to_string(), variables);
     }
 
-    // Years: still query distinct integer values from the layer table
-    let mut year_query = super::db::Entity::find()
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        year_query = year_query.filter(super::db::Column::ProjectId.eq(pid));
-    }
-    let year_rows = year_query
+    let year_rows = super::db::Entity::find()
+        .filter(super::db::Column::Enabled.eq(true))
         .select_only()
         .column(super::db::Column::Year)
         .distinct()
@@ -245,7 +333,6 @@ pub async fn get_groups(
         .all(db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-
     let years: Vec<JsonValue> = year_rows
         .into_iter()
         .filter_map(|mut json| json.as_object_mut()?.remove("year"))
@@ -743,8 +830,11 @@ pub async fn upload_file(
                 LayerInfo::Climate(info) => {
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
                     let mut q = LayerEntity::find()
-                        .filter(Column::CropId.eq(crop_uuid))
-                        .filter(Column::Year.eq(info.year));
+                        .filter(Column::CropId.eq(crop_uuid));
+                    q = match info.year {
+                        Some(y) => q.filter(Column::Year.eq(y)),
+                        None => q.filter(Column::Year.is_null()),
+                    };
                     q = match variable_uuid {
                         Some(id) => q.filter(Column::VariableId.eq(id)),
                         None => q.filter(Column::VariableId.is_null()),
@@ -945,7 +1035,7 @@ pub async fn upload_file(
                             climate_model_id: Set(climate_model_uuid),
                             scenario_id: Set(scenario_uuid),
                             variable_id: Set(variable_uuid),
-                            year: Set(Some(info.year)),
+                            year: Set(info.year),
                             min_value: Set(Some(min_val)),
                             max_value: Set(Some(max_val)),
                             global_average: Set(Some(global_avg)),

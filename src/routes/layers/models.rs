@@ -42,7 +42,7 @@ pub struct ClimateLayerInfo {
     pub climate_model: Option<String>,
     pub scenario: Option<String>,
     pub variable: Option<String>,
-    pub year: i32,
+    pub year: Option<i32>,
 }
 
 /// Represents the parsed components of a crop layer filename

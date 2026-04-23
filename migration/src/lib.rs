@@ -14,6 +14,7 @@ mod m20260413_000003_add_showcase_item_table;
 mod m20260413_000004_add_project_scoping;
 mod m20260420_000001_add_time_axis_config;
 mod m20260423_000001_add_project_relation_sort_order;
+mod m20260423_000002_add_tab_config;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260413_000004_add_project_scoping::Migration),
             Box::new(m20260420_000001_add_time_axis_config::Migration),
             Box::new(m20260423_000001_add_project_relation_sort_order::Migration),
+            Box::new(m20260423_000002_add_tab_config::Migration),
         ]
     }
 }

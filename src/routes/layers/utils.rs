@@ -24,7 +24,7 @@ fn parse_nullable_slot(s: &str) -> Option<String> {
 }
 
 /// Parses a filename to extract layer information
-pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
+pub fn parse_filename(_config: &Config, filename: &str) -> Result<LayerInfo> {
     // Remove file extension and convert to lowercase
     let filename_lower = filename.to_lowercase();
     let name_without_ext = filename_lower
@@ -43,9 +43,13 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
                 climate_model: parse_nullable_slot(parts[2]),
                 scenario: parse_nullable_slot(parts[3]),
                 variable: parse_nullable_slot(parts[4]),
-                year: parts[5]
-                    .parse()
-                    .map_err(|_| anyhow!("Invalid year in filename: {}", parts[5]))?,
+                year: if parts[5].eq_ignore_ascii_case("null") || parts[5].eq_ignore_ascii_case("nan") {
+                    None
+                } else {
+                    Some(parts[5]
+                        .parse()
+                        .map_err(|_| anyhow!("Invalid year in filename: {}", parts[5]))?)
+                },
             }))
         }
         7 => {
@@ -68,28 +72,23 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
                 climate_model: parse_nullable_slot(parts[2]),
                 scenario: parse_nullable_slot(parts[3]),
                 variable,
-                year: parts[6]
-                    .parse()
-                    .map_err(|_| anyhow!("Invalid year in filename: {}", parts[6]))?,
+                year: if parts[6].eq_ignore_ascii_case("null") || parts[6].eq_ignore_ascii_case("nan") {
+                    None
+                } else {
+                    Some(parts[6]
+                        .parse()
+                        .map_err(|_| anyhow!("Invalid year in filename: {}", parts[6]))?)
+                },
             }))
         }
         2..=5 => {
-            // Crop layer: crop_variable (variable can contain underscores).
+            // Short form: crop_variable (variable can contain underscores).
             // Only 2..=5 parts so that the 6-part form above always wins — keeping
-            // the long-form position order stable.
+            // the long-form position order stable. Works for crop-specific variables
+            // and also for general variables when a project doesn't use middle axes.
             let crop = parts[0].to_string();
             let variable = parts[1..].join("_");
-
-            // Validate that the variable is in the list of crop variables
-            if config.crop_variables.contains(&variable) {
-                Ok(LayerInfo::Crop(CropLayerInfo { crop, variable }))
-            } else {
-                Err(anyhow!(
-                    "Invalid crop variable '{}'. Must be one of: {:?}",
-                    variable,
-                    config.crop_variables
-                ))
-            }
+            Ok(LayerInfo::Crop(CropLayerInfo { crop, variable }))
         }
         _ => Err(anyhow!(
             "Invalid filename format. Expected either {{crop}}_{{watermodel}}_{{climatemodel}}_{{scenario}}_{{variable}}_{{year}}.tif (sentinels `null` or `nan` allowed in any middle slot) or {{crop}}_{{crop_variable}}.tif"

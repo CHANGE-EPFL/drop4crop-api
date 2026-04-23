@@ -31,8 +31,6 @@
 
 // #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 // pub enum Relation {
-//     #[sea_orm(has_many = "super::layercountrylink::Entity")]
-//     Layercountrylink,
 //     #[sea_orm(
 //         belongs_to = "super::style::Entity",
 //         from = "Column::StyleId",
@@ -43,24 +41,9 @@
 //     Style,
 // }
 
-// impl Related<super::layercountrylink::Entity> for Entity {
-//     fn to() -> RelationDef {
-//         Relation::Layercountrylink.def()
-//     }
-// }
-
 // impl Related<super::style::Entity> for Entity {
 //     fn to() -> RelationDef {
 //         Relation::Style.def()
-//     }
-// }
-
-// impl Related<super::country::Entity> for Entity {
-//     fn to() -> RelationDef {
-//         super::layercountrylink::Relation::Country.def()
-//     }
-//     fn via() -> Option<RelationDef> {
-//         Some(super::layercountrylink::Relation::Layer.def().rev())
 //     }
 // }
 

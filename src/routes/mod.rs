@@ -1,6 +1,5 @@
 pub mod admin;
 pub mod climate_models;
-mod countries;
 pub mod crops;
 pub mod layers;
 pub mod projects;
@@ -326,7 +325,6 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .nest("/api/statistics", admin::views::stats_router(&app_state))
         .nest("/api/cache", admin::views::cache_router(&app_state))
-        .nest("/api/countries", countries::views::router(&app_state))
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/layers/xyz", tiles::views::xyz_router(&app_state)) // XYZ tiles
         .nest("/api/layers/cog", layers::views::cog_router(&app_state)) // S3-compatible COG endpoint

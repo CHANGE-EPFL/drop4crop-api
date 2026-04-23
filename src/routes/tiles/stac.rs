@@ -599,7 +599,6 @@ async fn search_items(
                     "interpolation_type": interpolation_type,
                     "label_display_mode": label_display_mode,
                     "label_count": label_count,
-                    "country_values": null  // Not yet implemented in database
                 },
                 "links": [
                     {

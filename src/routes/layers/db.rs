@@ -106,8 +106,6 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::countries::db::Entity")]
-    Layercountrylink,
     #[sea_orm(
         belongs_to = "crate::routes::styles::db::Entity",
         from = "Column::StyleId",
@@ -166,24 +164,9 @@ pub enum Relation {
     Variable,
 }
 
-impl Related<super::countries::db::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Layercountrylink.def()
-    }
-}
-
 impl Related<crate::routes::styles::db::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Style.def()
-    }
-}
-
-impl Related<crate::routes::countries::db::Entity> for Entity {
-    fn to() -> RelationDef {
-        super::countries::db::Relation::Country.def()
-    }
-    fn via() -> Option<RelationDef> {
-        Some(super::countries::db::Relation::Layer.def().rev())
     }
 }
 

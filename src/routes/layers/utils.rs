@@ -9,6 +9,17 @@ use std::{ffi::CString, vec::Vec, fs};
 use tracing::{debug, info, warn};
 use super::models::{ClimateLayerInfo, CropLayerInfo, LayerInfo};
 
+/// Returns `None` when the slot is the literal `null` sentinel (case-insensitive),
+/// otherwise returns `Some(slug)`. Used for the water_model / climate_model / scenario
+/// slots so that projects without those axes can upload e.g. `barley_null_null_rcp26_vwc_2070.tif`.
+fn parse_slug_slot(s: &str) -> Option<String> {
+    if s.eq_ignore_ascii_case("null") {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 /// Parses a filename to extract layer information
 pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
     // Remove file extension and convert to lowercase
@@ -22,11 +33,12 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
     match parts.len() {
         6 => {
             // Climate layer: crop_watermodel_climatemodel_scenario_variable_year
+            // Middle three slots accept `null` (case-insensitive) to mark the axis as N/A.
             Ok(LayerInfo::Climate(ClimateLayerInfo {
                 crop: parts[0].to_string(),
-                water_model: parts[1].to_string(),
-                climate_model: parts[2].to_string(),
-                scenario: parts[3].to_string(),
+                water_model: parse_slug_slot(parts[1]),
+                climate_model: parse_slug_slot(parts[2]),
+                scenario: parse_slug_slot(parts[3]),
                 variable: parts[4].to_string(),
                 year: parts[5]
                     .parse()
@@ -44,9 +56,9 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
 
             Ok(LayerInfo::Climate(ClimateLayerInfo {
                 crop: parts[0].to_string(),
-                water_model: parts[1].to_string(),
-                climate_model: parts[2].to_string(),
-                scenario: parts[3].to_string(),
+                water_model: parse_slug_slot(parts[1]),
+                climate_model: parse_slug_slot(parts[2]),
+                scenario: parse_slug_slot(parts[3]),
                 variable,
                 year: parts[6]
                     .parse()

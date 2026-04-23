@@ -28,13 +28,17 @@ pub struct DownloadQueryParams {
     pub maxy: Option<f64>,
 }
 
-/// Represents the parsed components of a climate layer filename
+/// Represents the parsed components of a climate layer filename.
+///
+/// `water_model`, `climate_model`, and `scenario` are optional to support projects
+/// that do not use all three axes. A filename slot of `null` (case-insensitive)
+/// parses to `None` and the corresponding FK is stored as NULL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClimateLayerInfo {
     pub crop: String,
-    pub water_model: String,
-    pub climate_model: String,
-    pub scenario: String,
+    pub water_model: Option<String>,
+    pub climate_model: Option<String>,
+    pub scenario: Option<String>,
     pub variable: String,
     pub year: i32,
 }

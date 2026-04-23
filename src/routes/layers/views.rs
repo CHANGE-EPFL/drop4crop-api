@@ -118,100 +118,150 @@ pub async fn get_groups(
         None
     };
 
-    // Crops: join through layer FK, return full objects
-    let mut crop_query = crate::routes::crops::db::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            super::db::Relation::Crop.def().rev(),
-        )
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        crop_query = crop_query.filter(super::db::Column::ProjectId.eq(pid));
+    // Crops: when a project is specified we filter via the project_crop junction
+    // (the admin's allow-list). Otherwise we fall back to "crops that have at
+    // least one enabled layer anywhere".
+    let crops = if let Some(pid) = project_uuid {
+        crate::routes::crops::db::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                crate::routes::projects::project_crop::Relation::Crop.def().rev(),
+            )
+            .filter(crate::routes::projects::project_crop::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::crops::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
+    } else {
+        crate::routes::crops::db::Entity::find()
+            .join(JoinType::InnerJoin, super::db::Relation::Crop.def().rev())
+            .filter(super::db::Column::Enabled.eq(true))
+            .distinct()
+            .order_by_asc(crate::routes::crops::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
     }
-    let crops = crop_query
-        .distinct()
-        .order_by_asc(crate::routes::crops::db::Column::SortOrder)
-        .into_json()
-        .all(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-    groups.insert("crop".to_string(), crops);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
+    if !crops.is_empty() {
+        groups.insert("crop".to_string(), crops);
+    }
 
     // Water models
-    let mut wm_query = crate::routes::water_models::db::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            super::db::Relation::WaterModel.def().rev(),
-        )
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        wm_query = wm_query.filter(super::db::Column::ProjectId.eq(pid));
+    let water_models = if let Some(pid) = project_uuid {
+        crate::routes::water_models::db::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                crate::routes::projects::project_water_model::Relation::WaterModel
+                    .def()
+                    .rev(),
+            )
+            .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::water_models::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
+    } else {
+        crate::routes::water_models::db::Entity::find()
+            .join(JoinType::InnerJoin, super::db::Relation::WaterModel.def().rev())
+            .filter(super::db::Column::Enabled.eq(true))
+            .distinct()
+            .order_by_asc(crate::routes::water_models::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
     }
-    let water_models = wm_query
-        .distinct()
-        .order_by_asc(crate::routes::water_models::db::Column::SortOrder)
-        .into_json()
-        .all(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-    groups.insert("water_model".to_string(), water_models);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
+    if !water_models.is_empty() {
+        groups.insert("water_model".to_string(), water_models);
+    }
 
     // Climate models
-    let mut cm_query = crate::routes::climate_models::db::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            super::db::Relation::ClimateModel.def().rev(),
-        )
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        cm_query = cm_query.filter(super::db::Column::ProjectId.eq(pid));
+    let climate_models = if let Some(pid) = project_uuid {
+        crate::routes::climate_models::db::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                crate::routes::projects::project_climate_model::Relation::ClimateModel
+                    .def()
+                    .rev(),
+            )
+            .filter(crate::routes::projects::project_climate_model::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::climate_models::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
+    } else {
+        crate::routes::climate_models::db::Entity::find()
+            .join(JoinType::InnerJoin, super::db::Relation::ClimateModel.def().rev())
+            .filter(super::db::Column::Enabled.eq(true))
+            .distinct()
+            .order_by_asc(crate::routes::climate_models::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
     }
-    let climate_models = cm_query
-        .distinct()
-        .order_by_asc(crate::routes::climate_models::db::Column::SortOrder)
-        .into_json()
-        .all(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-    groups.insert("climate_model".to_string(), climate_models);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
+    if !climate_models.is_empty() {
+        groups.insert("climate_model".to_string(), climate_models);
+    }
 
     // Scenarios
-    let mut sc_query = crate::routes::scenarios::db::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            super::db::Relation::Scenario.def().rev(),
-        )
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        sc_query = sc_query.filter(super::db::Column::ProjectId.eq(pid));
+    let scenarios = if let Some(pid) = project_uuid {
+        crate::routes::scenarios::db::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                crate::routes::projects::project_scenario::Relation::Scenario
+                    .def()
+                    .rev(),
+            )
+            .filter(crate::routes::projects::project_scenario::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::scenarios::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
+    } else {
+        crate::routes::scenarios::db::Entity::find()
+            .join(JoinType::InnerJoin, super::db::Relation::Scenario.def().rev())
+            .filter(super::db::Column::Enabled.eq(true))
+            .distinct()
+            .order_by_asc(crate::routes::scenarios::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
     }
-    let scenarios = sc_query
-        .distinct()
-        .order_by_asc(crate::routes::scenarios::db::Column::SortOrder)
-        .into_json()
-        .all(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-    groups.insert("scenario".to_string(), scenarios);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
+    if !scenarios.is_empty() {
+        groups.insert("scenario".to_string(), scenarios);
+    }
 
     // Variables
-    let mut var_query = crate::routes::variables::db::Entity::find()
-        .join(
-            JoinType::InnerJoin,
-            super::db::Relation::Variable.def().rev(),
-        )
-        .filter(super::db::Column::Enabled.eq(true));
-    if let Some(pid) = project_uuid {
-        var_query = var_query.filter(super::db::Column::ProjectId.eq(pid));
+    let variables = if let Some(pid) = project_uuid {
+        crate::routes::variables::db::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                crate::routes::projects::project_variable::Relation::Variable
+                    .def()
+                    .rev(),
+            )
+            .filter(crate::routes::projects::project_variable::Column::ProjectId.eq(pid))
+            .order_by_asc(crate::routes::variables::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
+    } else {
+        crate::routes::variables::db::Entity::find()
+            .join(JoinType::InnerJoin, super::db::Relation::Variable.def().rev())
+            .filter(super::db::Column::Enabled.eq(true))
+            .distinct()
+            .order_by_asc(crate::routes::variables::db::Column::SortOrder)
+            .into_json()
+            .all(db)
+            .await
     }
-    let variables = var_query
-        .distinct()
-        .order_by_asc(crate::routes::variables::db::Column::SortOrder)
-        .into_json()
-        .all(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
-    groups.insert("variable".to_string(), variables);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
+    if !variables.is_empty() {
+        groups.insert("variable".to_string(), variables);
+    }
 
     // Years: still query distinct integer values from the layer table
     let mut year_query = super::db::Entity::find()
@@ -233,7 +283,9 @@ pub async fn get_groups(
         .filter_map(|mut json| json.as_object_mut()?.remove("year"))
         .filter(|v| !v.is_null())
         .collect();
-    groups.insert("year".to_string(), years);
+    if !years.is_empty() {
+        groups.insert("year".to_string(), years);
+    }
 
     Ok(Json(groups))
 }
@@ -462,51 +514,87 @@ pub async fn upload_file(
             let variable_uuid = variable_record.id;
             let _is_crop_specific = variable_record.is_crop_specific;
 
+            // Slots left as `null` in the filename (case-insensitive) become `None` here and
+            // the corresponding FK column is stored as NULL. Real slugs are resolved to UUIDs
+            // via the reference tables; an unknown slug is a BAD_REQUEST.
             let (water_model_uuid, climate_model_uuid, scenario_uuid) = if let LayerInfo::Climate(info) = &layer_info {
-                let wm = crate::routes::water_models::db::Entity::find()
-                    .filter(crate::routes::water_models::db::Column::Slug.eq(&info.water_model))
-                    .one(db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                    .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown water_model slug: {}", info.water_model)}))))?
-                    .id;
-                let cm = crate::routes::climate_models::db::Entity::find()
-                    .filter(crate::routes::climate_models::db::Column::Slug.eq(&info.climate_model))
-                    .one(db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                    .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown climate_model slug: {}", info.climate_model)}))))?
-                    .id;
-                let sc = crate::routes::scenarios::db::Entity::find()
-                    .filter(crate::routes::scenarios::db::Column::Slug.eq(&info.scenario))
-                    .one(db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                    .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown scenario slug: {}", info.scenario)}))))?
-                    .id;
-                (Some(wm), Some(cm), Some(sc))
+                let wm = if let Some(slug) = &info.water_model {
+                    Some(crate::routes::water_models::db::Entity::find()
+                        .filter(crate::routes::water_models::db::Column::Slug.eq(slug))
+                        .one(db)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
+                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown water_model slug: {}", slug)}))))?
+                        .id)
+                } else {
+                    None
+                };
+                let cm = if let Some(slug) = &info.climate_model {
+                    Some(crate::routes::climate_models::db::Entity::find()
+                        .filter(crate::routes::climate_models::db::Column::Slug.eq(slug))
+                        .one(db)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
+                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown climate_model slug: {}", slug)}))))?
+                        .id)
+                } else {
+                    None
+                };
+                let sc = if let Some(slug) = &info.scenario {
+                    Some(crate::routes::scenarios::db::Entity::find()
+                        .filter(crate::routes::scenarios::db::Column::Slug.eq(slug))
+                        .one(db)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
+                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown scenario slug: {}", slug)}))))?
+                        .id)
+                } else {
+                    None
+                };
+                (wm, cm, sc)
             } else {
                 (None, None, None)
             };
 
-            // Check for duplicate layer
+            // Check for duplicate layer — scoped to the current project (project_id filter),
+            // and matching NULL columns with .is_null() rather than .eq(None) since the latter
+            // would serialize as `= NULL` which is never true in SQL.
             debug!("Checking for duplicate layers");
             let duplicate_query = match &layer_info {
                 LayerInfo::Climate(info) => {
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
-                    LayerEntity::find()
+                    let mut q = LayerEntity::find()
                         .filter(Column::CropId.eq(crop_uuid))
                         .filter(Column::VariableId.eq(variable_uuid))
-                        .filter(Column::WaterModelId.eq(water_model_uuid.unwrap()))
-                        .filter(Column::ClimateModelId.eq(climate_model_uuid.unwrap()))
-                        .filter(Column::ScenarioId.eq(scenario_uuid.unwrap()))
-                        .filter(Column::Year.eq(info.year))
+                        .filter(Column::Year.eq(info.year));
+                    q = match water_model_uuid {
+                        Some(id) => q.filter(Column::WaterModelId.eq(id)),
+                        None => q.filter(Column::WaterModelId.is_null()),
+                    };
+                    q = match climate_model_uuid {
+                        Some(id) => q.filter(Column::ClimateModelId.eq(id)),
+                        None => q.filter(Column::ClimateModelId.is_null()),
+                    };
+                    q = match scenario_uuid {
+                        Some(id) => q.filter(Column::ScenarioId.eq(id)),
+                        None => q.filter(Column::ScenarioId.is_null()),
+                    };
+                    q = match params.project_id {
+                        Some(pid) => q.filter(Column::ProjectId.eq(pid)),
+                        None => q.filter(Column::ProjectId.is_null()),
+                    };
+                    q
                 }
                 LayerInfo::Crop(_info) => {
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
-                    LayerEntity::find()
+                    let mut q = LayerEntity::find()
                         .filter(Column::CropId.eq(crop_uuid))
-                        .filter(Column::VariableId.eq(variable_uuid))
+                        .filter(Column::VariableId.eq(variable_uuid));
+                    q = match params.project_id {
+                        Some(pid) => q.filter(Column::ProjectId.eq(pid)),
+                        None => q.filter(Column::ProjectId.is_null()),
+                    };
+                    q
                 }
             };
 

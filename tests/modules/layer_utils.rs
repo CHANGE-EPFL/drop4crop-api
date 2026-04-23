@@ -20,11 +20,31 @@ fn test_parse_climate_filename() {
     match result {
         LayerInfo::Climate(info) => {
             assert_eq!(info.crop, "wheat");
-            assert_eq!(info.water_model, "lpjml");
-            assert_eq!(info.climate_model, "gfdl-esm4");
-            assert_eq!(info.scenario, "historical");
+            assert_eq!(info.water_model.as_deref(), Some("lpjml"));
+            assert_eq!(info.climate_model.as_deref(), Some("gfdl-esm4"));
+            assert_eq!(info.scenario.as_deref(), Some("historical"));
             assert_eq!(info.variable, "yield");
             assert_eq!(info.year, 2020);
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_parse_climate_filename_with_null_sentinels() {
+    let config = Config::for_tests();
+    // Case-insensitive `null` in any of the middle slots means "N/A for this project".
+    let result =
+        parse_filename(&config, "barley_NULL_null_rcp26_vwc_2070.tif").unwrap();
+
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "barley");
+            assert!(info.water_model.is_none(), "uppercase NULL should be None");
+            assert!(info.climate_model.is_none(), "lowercase null should be None");
+            assert_eq!(info.scenario.as_deref(), Some("rcp26"));
+            assert_eq!(info.variable, "vwc");
+            assert_eq!(info.year, 2070);
         }
         _ => panic!("Expected climate layer info"),
     }

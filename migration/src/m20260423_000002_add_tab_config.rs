@@ -15,10 +15,40 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // Change the default for variable.has_time from true to false so new
+        // variables are timeless unless explicitly marked otherwise.
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Variable::Table)
+                    .modify_column(
+                        ColumnDef::new(Variable::HasTime)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Variable::Table)
+                    .modify_column(
+                        ColumnDef::new(Variable::HasTime)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
         manager
             .alter_table(
                 Table::alter()
@@ -36,4 +66,10 @@ impl MigrationTrait for Migration {
 enum Project {
     Table,
     TabConfig,
+}
+
+#[derive(DeriveIden)]
+enum Variable {
+    Table,
+    HasTime,
 }

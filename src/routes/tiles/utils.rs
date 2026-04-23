@@ -50,10 +50,19 @@ impl XYZTile {
     /// Heavy GDAL operations run in a blocking thread.
     ///
     /// Uses f32 to preserve full precision for data values that may be in the millions.
-    pub async fn get_one(&self, config: &crate::config::Config, layer_id: &str) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
+    ///
+    /// `project_id` is the owning project of the layer — required so the S3
+    /// lookup hits `{s3_prefix}/{project_id}/{layer_id}.tif`. Pass `None`
+    /// only for legacy unscoped layers.
+    pub async fn get_one(
+        &self,
+        config: &crate::config::Config,
+        project_id: Option<uuid::Uuid>,
+        layer_id: &str,
+    ) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
         // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
-        let object = storage::get_object(config, &filename).await?;
+        let object = storage::get_object(config, project_id, &filename).await?;
         let x = self.x;
         let y = self.y;
         let z = self.z;

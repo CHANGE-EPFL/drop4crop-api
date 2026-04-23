@@ -159,7 +159,7 @@ async fn process_layer(config: &Config, db: &DatabaseConnection, worker_id: &str
     };
 
     // Fetch from S3
-    let object = match storage::get_object_direct(config, &filename).await {
+    let object = match storage::get_object_direct(config, layer.project_id, &filename).await {
         Ok(o) => o,
         Err(e) => {
             let error_msg = format!("S3 fetch failed: {}", e);

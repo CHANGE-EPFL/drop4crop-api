@@ -9,11 +9,14 @@ use std::{ffi::CString, vec::Vec, fs};
 use tracing::{debug, info, warn};
 use super::models::{ClimateLayerInfo, CropLayerInfo, LayerInfo};
 
-/// Returns `None` when the slot is the literal `null` sentinel (case-insensitive),
-/// otherwise returns `Some(slug)`. Used for the water_model / climate_model / scenario
-/// slots so that projects without those axes can upload e.g. `barley_null_null_rcp26_vwc_2070.tif`.
-fn parse_slug_slot(s: &str) -> Option<String> {
-    if s.eq_ignore_ascii_case("null") {
+/// Returns `None` when the slot is the sentinel `null` or `nan` (case-insensitive),
+/// otherwise returns `Some(slug)`. The canonical 6-part climate filename is
+/// `{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif`; projects
+/// that don't use a given axis use the sentinel rather than shifting positions —
+/// that way scripted renames / generators don't depend on which project the file
+/// is destined for. All four middle slots accept the sentinel.
+fn parse_nullable_slot(s: &str) -> Option<String> {
+    if s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("nan") {
         None
     } else {
         Some(s.to_string())
@@ -33,13 +36,13 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
     match parts.len() {
         6 => {
             // Climate layer: crop_watermodel_climatemodel_scenario_variable_year
-            // Middle three slots accept `null` (case-insensitive) to mark the axis as N/A.
+            // All four middle slots accept `null` / `nan` (case-insensitive).
             Ok(LayerInfo::Climate(ClimateLayerInfo {
                 crop: parts[0].to_string(),
-                water_model: parse_slug_slot(parts[1]),
-                climate_model: parse_slug_slot(parts[2]),
-                scenario: parse_slug_slot(parts[3]),
-                variable: parts[4].to_string(),
+                water_model: parse_nullable_slot(parts[1]),
+                climate_model: parse_nullable_slot(parts[2]),
+                scenario: parse_nullable_slot(parts[3]),
+                variable: parse_nullable_slot(parts[4]),
                 year: parts[5]
                     .parse()
                     .map_err(|_| anyhow!("Invalid year in filename: {}", parts[5]))?,
@@ -47,26 +50,33 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
         }
         7 => {
             // Climate layer with percentage unit: crop_watermodel_climatemodel_scenario_variable_unit_year
+            // If the variable slot is a sentinel, `_perc` has nothing to attach to — reject.
             let unit = parts[5];
-            let variable = if unit == "perc" {
-                format!("{}_perc", parts[4])
-            } else {
+            if unit != "perc" {
                 return Err(anyhow!("Unsupported unit in filename: {}", unit));
+            }
+            let variable = match parse_nullable_slot(parts[4]) {
+                Some(base) => Some(format!("{}_perc", base)),
+                None => return Err(anyhow!(
+                    "Cannot use `_perc` suffix with a null/nan variable slot"
+                )),
             };
 
             Ok(LayerInfo::Climate(ClimateLayerInfo {
                 crop: parts[0].to_string(),
-                water_model: parse_slug_slot(parts[1]),
-                climate_model: parse_slug_slot(parts[2]),
-                scenario: parse_slug_slot(parts[3]),
+                water_model: parse_nullable_slot(parts[1]),
+                climate_model: parse_nullable_slot(parts[2]),
+                scenario: parse_nullable_slot(parts[3]),
                 variable,
                 year: parts[6]
                     .parse()
                     .map_err(|_| anyhow!("Invalid year in filename: {}", parts[6]))?,
             }))
         }
-        2..=6 => {
-            // Crop layer: crop_variable (variable can contain underscores)
+        2..=5 => {
+            // Crop layer: crop_variable (variable can contain underscores).
+            // Only 2..=5 parts so that the 6-part form above always wins — keeping
+            // the long-form position order stable.
             let crop = parts[0].to_string();
             let variable = parts[1..].join("_");
 
@@ -82,7 +92,7 @@ pub fn parse_filename(config: &Config, filename: &str) -> Result<LayerInfo> {
             }
         }
         _ => Err(anyhow!(
-            "Invalid filename format. Expected either {{crop}}_{{watermodel}}_{{climatemodel}}_{{scenario}}_{{variable}}_{{year}}.tif or {{crop}}_{{crop_variable}}.tif"
+            "Invalid filename format. Expected either {{crop}}_{{watermodel}}_{{climatemodel}}_{{scenario}}_{{variable}}_{{year}}.tif (sentinels `null` or `nan` allowed in any middle slot) or {{crop}}_{{crop_variable}}.tif"
         )),
     }
 }

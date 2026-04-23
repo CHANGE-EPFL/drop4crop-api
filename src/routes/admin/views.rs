@@ -877,6 +877,7 @@ async fn warm_layer_cache(
     Path(layer_name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let config = &app_state.config;
+    let db = &app_state.db;
 
     // Add .tif extension if not present
     let filename = if layer_name.ends_with(".tif") {
@@ -885,8 +886,22 @@ async fn warm_layer_cache(
         format!("{}.tif", layer_name)
     };
 
+    // Resolve the layer's project_id so the cache warm targets the correct
+    // project-scoped S3 object. A stem without an extension may have been
+    // passed; strip it for the lookup.
+    let layer_name_stem = layer_name.trim_end_matches(".tif");
+    let project_id = crate::routes::layers::db::Entity::find()
+        .filter(crate::routes::layers::db::Column::LayerName.eq(layer_name_stem))
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(layer_name, error = %e, "DB lookup failed for warm cache");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .and_then(|l| l.project_id);
+
     // Use the storage module to fetch and cache the layer
-    match crate::routes::tiles::storage::get_object(&config, &filename).await {
+    match crate::routes::tiles::storage::get_object(&config, project_id, &filename).await {
         Ok(data) => {
             info!(layer_name, size = data.len(), "Warmed cache for layer");
             Ok(Json(json!({

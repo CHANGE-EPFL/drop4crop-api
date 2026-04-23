@@ -7,6 +7,7 @@ pub struct Model {
     pub project_id: Uuid,
     #[sea_orm(primary_key, auto_increment = false)]
     pub scenario_id: Uuid,
+    pub sort_order: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

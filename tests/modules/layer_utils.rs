@@ -23,7 +23,7 @@ fn test_parse_climate_filename() {
             assert_eq!(info.water_model.as_deref(), Some("lpjml"));
             assert_eq!(info.climate_model.as_deref(), Some("gfdl-esm4"));
             assert_eq!(info.scenario.as_deref(), Some("historical"));
-            assert_eq!(info.variable, "yield");
+            assert_eq!(info.variable.as_deref(), Some("yield"));
             assert_eq!(info.year, 2020);
         }
         _ => panic!("Expected climate layer info"),
@@ -43,11 +43,63 @@ fn test_parse_climate_filename_with_null_sentinels() {
             assert!(info.water_model.is_none(), "uppercase NULL should be None");
             assert!(info.climate_model.is_none(), "lowercase null should be None");
             assert_eq!(info.scenario.as_deref(), Some("rcp26"));
-            assert_eq!(info.variable, "vwc");
+            assert_eq!(info.variable.as_deref(), Some("vwc"));
             assert_eq!(info.year, 2070);
         }
         _ => panic!("Expected climate layer info"),
     }
+}
+
+#[test]
+fn test_parse_climate_filename_with_nan_sentinel() {
+    let config = Config::for_tests();
+    // `nan` (case-insensitive) is an accepted alias for `null` in any middle slot.
+    let result =
+        parse_filename(&config, "barley_NaN_nan_NAN_nan_2080.tif").unwrap();
+
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "barley");
+            assert!(info.water_model.is_none());
+            assert!(info.climate_model.is_none());
+            assert!(info.scenario.is_none());
+            assert!(info.variable.is_none(), "variable slot accepts nan too");
+            assert_eq!(info.year, 2080);
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_parse_climate_filename_with_null_variable_slot() {
+    let config = Config::for_tests();
+    // Full canonical 6-part form with only crop + year populated — valid for a
+    // project whose axis set is just crops and a timeline.
+    let result =
+        parse_filename(&config, "barley_null_null_null_null_2010.tif").unwrap();
+
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "barley");
+            assert!(info.water_model.is_none());
+            assert!(info.climate_model.is_none());
+            assert!(info.scenario.is_none());
+            assert!(info.variable.is_none());
+            assert_eq!(info.year, 2010);
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_parse_percentage_rejects_null_variable_slot() {
+    let config = Config::for_tests();
+    // `_perc` has nothing to attach to if the variable slot is a sentinel.
+    let result = parse_filename(
+        &config,
+        "rice_lpjml_gfdl-esm4_historical_null_perc_2020.tif",
+    );
+    assert!(result.is_err());
 }
 
 #[test]
@@ -76,7 +128,7 @@ fn test_parse_percentage_filename() {
     match result {
         LayerInfo::Climate(info) => {
             assert_eq!(info.crop, "rice");
-            assert_eq!(info.variable, "yield_perc");
+            assert_eq!(info.variable.as_deref(), Some("yield_perc"));
             assert_eq!(info.year, 2020);
         }
         _ => panic!("Expected climate layer info"),

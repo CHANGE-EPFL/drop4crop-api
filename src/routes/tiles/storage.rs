@@ -37,14 +37,39 @@ async fn get_s3_client(config: &crate::config::Config) -> Result<Client> {
     Ok(Client::from_conf(client_config))
 }
 
+/// Builds the project-scoped S3 key stem for a layer.
+///
+/// Layers with a `project_id` land under `{project_id}/{filename}` in the bucket
+/// so two projects can legitimately share a filename without clobbering each
+/// other. S3 has no concept of "folders" — a PUT to `{prefix}/{pid}/{file}`
+/// just creates that object; the prefix is implicit, so we never need to
+/// separately `mkdir` the project subpath.
+///
+/// Legacy rows without a `project_id` keep the flat `{filename}` layout.
+pub fn s3_key_stem(project_id: Option<Uuid>, filename: &str) -> String {
+    match project_id {
+        Some(pid) => format!("{}/{}", pid, filename),
+        None => filename.to_string(),
+    }
+}
+
 /// Asynchronously fetches an object by first checking the Redis cache. If the file is not cached,
 /// it attempts to set a downloading flag (with a TTL) and spawns a background task to fetch it from S3.
 /// Meanwhile, callers loop waiting for the cache to be filled.
-pub async fn get_object(config: &crate::config::Config, object_id: &str) -> Result<Vec<u8>> {
+///
+/// The `(project_id, filename)` pair is combined via [`s3_key_stem`] so the same
+/// filename in two different projects maps to two distinct cache keys and S3 objects.
+pub async fn get_object(
+    config: &crate::config::Config,
+    project_id: Option<Uuid>,
+    filename: &str,
+) -> Result<Vec<u8>> {
+    let stem = s3_key_stem(project_id, filename);
+
     // Create the keys for the cache and downloading state.
-    let cache_key = super::cache::build_cache_key(config, object_id);
+    let cache_key = super::cache::build_cache_key(config, &stem);
     // Create a key to indicate that a download is in progress.
-    let downloading_key = super::cache::build_downloading_key(config, object_id);
+    let downloading_key = super::cache::build_downloading_key(config, &stem);
 
     let client = super::cache::get_redis_client(config);
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
@@ -70,10 +95,16 @@ pub async fn get_object(config: &crate::config::Config, object_id: &str) -> Resu
         // We are the downloader. Spawn a background task.
         let cache_key_clone = cache_key.clone();
         let downloading_key_clone = downloading_key.clone();
+        let stem_clone = stem.clone();
         let config_clone = config.clone();
         task::spawn(async move {
-            if let Err(e) =
-                download_and_cache(&config_clone, &cache_key_clone, &downloading_key_clone).await
+            if let Err(e) = download_and_cache(
+                &config_clone,
+                &cache_key_clone,
+                &downloading_key_clone,
+                &stem_clone,
+            )
+            .await
             {
                 error!(cache_key = %cache_key_clone, error = %e, "Error downloading");
             }
@@ -130,11 +161,16 @@ pub async fn get_object(config: &crate::config::Config, object_id: &str) -> Resu
                 );
                 let cache_key_clone = cache_key.clone();
                 let downloading_key_clone = downloading_key.clone();
+                let stem_clone = stem.clone();
                 let config_clone = config.clone();
                 task::spawn(async move {
-                    if let Err(e) =
-                        download_and_cache(&config_clone, &cache_key_clone, &downloading_key_clone)
-                            .await
+                    if let Err(e) = download_and_cache(
+                        &config_clone,
+                        &cache_key_clone,
+                        &downloading_key_clone,
+                        &stem_clone,
+                    )
+                    .await
                     {
                         error!(cache_key = %cache_key_clone, error = %e, "Error re-downloading");
                     }
@@ -146,9 +182,13 @@ pub async fn get_object(config: &crate::config::Config, object_id: &str) -> Resu
 
 /// Fetches an object directly from S3, bypassing the Redis cache.
 /// Use this for operations like statistics recalculation where we don't want to pollute the cache.
-pub async fn get_object_direct(config: &crate::config::Config, object_id: &str) -> Result<Vec<u8>> {
+pub async fn get_object_direct(
+    config: &crate::config::Config,
+    project_id: Option<Uuid>,
+    filename: &str,
+) -> Result<Vec<u8>> {
     let client = get_s3_client(config).await?;
-    let s3_key = get_s3_key(config, object_id);
+    let s3_key = get_s3_key(config, project_id, filename);
 
     debug!(s3_key, "Fetching object directly from S3 (bypassing cache)");
 
@@ -168,11 +208,12 @@ pub async fn get_object_direct(config: &crate::config::Config, object_id: &str) 
 /// Does NOT use caching since range requests are typically for different byte ranges each time
 pub async fn get_object_range(
     config: &crate::config::Config,
-    object_id: &str,
+    project_id: Option<Uuid>,
+    filename: &str,
     range_header: &str,
 ) -> Result<Vec<u8>> {
     let client = get_s3_client(config).await?;
-    let s3_key = get_s3_key(config, object_id);
+    let s3_key = get_s3_key(config, project_id, filename);
 
     // S3 GetObject supports the Range header directly
     let response = client
@@ -189,19 +230,21 @@ pub async fn get_object_range(
 
 /// Downloads the object from S3 and pushes it to the cache. On completion (or error), it removes
 /// the downloading flag so that waiting threads can act accordingly.
+///
+/// `stem` is the already-computed `{project_id}/{filename}` (or bare `{filename}`)
+/// stem — passed explicitly so we don't try to recover it by splitting the
+/// cache key (which contains the app-name/deployment prefix too).
 async fn download_and_cache(
     config: &crate::config::Config,
     cache_key: &str,
     downloading_key: &str,
+    stem: &str,
 ) -> Result<()> {
     debug!(cache_key, "Downloading object from S3");
     let client = get_s3_client(config).await?;
 
-    // Extract the filename from cache_key (remove app-deployment prefix)
-    let filename = cache_key.split('/').next_back().unwrap_or(cache_key);
-
-    // Use the same S3 key format as uploads/deletes for consistency
-    let s3_key = get_s3_key(config, filename);
+    // Reuse the same prefix-joined key format that uploads/deletes use.
+    let s3_key = format!("{}/{}", config.s3_prefix, stem);
     debug!(s3_key, cache_key, "Using S3 key");
 
     let response = client
@@ -298,9 +341,19 @@ pub async fn delete_object(config: &crate::config::Config, key: &str) -> Result<
     }
 }
 
-/// Gets the S3 key for a given filename based on configuration.
-pub fn get_s3_key(config: &crate::config::Config, filename: &str) -> String {
-    format!("{}/{}", config.s3_prefix, filename)
+/// Gets the full S3 key (prefix + stem) for a layer identified by
+/// `(project_id, filename)`. This is the single function every read/write
+/// site should go through — one place that knows how the bucket is laid out.
+pub fn get_s3_key(
+    config: &crate::config::Config,
+    project_id: Option<Uuid>,
+    filename: &str,
+) -> String {
+    format!(
+        "{}/{}",
+        config.s3_prefix,
+        s3_key_stem(project_id, filename)
+    )
 }
 
 pub async fn delete_s3_object_by_db_id(
@@ -310,7 +363,7 @@ pub async fn delete_s3_object_by_db_id(
 ) -> Result<()> {
     use crate::routes::layers::db::Layer;
 
-    // Query the layer to get the filename
+    // Query the layer to get the filename and its owning project (if any).
     let layer: Layer = Layer::get_one(db, *id).await?;
 
     match layer.filename {
@@ -319,7 +372,7 @@ pub async fn delete_s3_object_by_db_id(
             Err(anyhow::anyhow!("Layer not found"))
         }
         Some(filename) => {
-            let s3_key = get_s3_key(config, &filename);
+            let s3_key = get_s3_key(config, layer.project_id, &filename);
             debug!(layer_id = %id, s3_key, "Deleting S3 object for layer");
             delete_object(config, &s3_key).await?;
             info!(layer_id = %id, s3_key, "Deleted S3 object for layer");

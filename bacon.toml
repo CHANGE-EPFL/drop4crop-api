@@ -75,7 +75,7 @@ on_success = "back" # so that we don't open the browser at each change
 [jobs.run]
 command = [
     "cargo", "run",
-    # put launch parameters for your program behind a `--` separator
+    "--bin", "drop4crop-api",
 ]
 need_stdout = true
 allow_warnings = true
@@ -93,7 +93,7 @@ on_change_strategy = "kill_then_restart"
 [jobs.run-long]
 command = [
     "cargo", "run",
-    # put launch parameters for your program behind a `--` separator
+    "--bin", "drop4crop-api",
 ]
 need_stdout = true
 allow_warnings = true

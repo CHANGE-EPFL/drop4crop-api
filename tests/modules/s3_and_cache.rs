@@ -113,7 +113,8 @@ async fn test_upload_file_to_s3() {
 
     // Upload with valid climate layer filename format
     // Format: {crop}_{watermodel}_{climatemodel}_{scenario}_{variable}_{year}.tif
-    let filename = "maize_rainfed_gfdl-esm4_ssp245_yield_2099.tif";
+    // Slugs must exist in the reference tables (seeded by migration)
+    let filename = "maize_cwatm_gfdl-esm2m_rcp26_vwc_2099.tif";
 
     let response = client
         .post_multipart("/api/layers/uploads", filename, geotiff_data)
@@ -125,12 +126,12 @@ async fn test_upload_file_to_s3() {
     let data = response.json();
     assert!(data.is_object(), "Response should be a JSON object");
 
-    // Verify filename was parsed correctly
-    assert_eq!(data["crop"], "maize", "Crop should be 'maize'");
-    assert_eq!(data["water_model"], "rainfed", "Water model should be 'rainfed'");
-    assert_eq!(data["climate_model"], "gfdl-esm4", "Climate model should be 'gfdl-esm4'");
-    assert_eq!(data["scenario"], "ssp245", "Scenario should be 'ssp245'");
-    assert_eq!(data["variable"], "yield", "Variable should be 'yield'");
+    // Verify FK fields were resolved (layer stores UUIDs, not slug strings)
+    assert!(data["crop_id"].is_string(), "crop_id should be a UUID");
+    assert!(data["water_model_id"].is_string(), "water_model_id should be a UUID");
+    assert!(data["climate_model_id"].is_string(), "climate_model_id should be a UUID");
+    assert!(data["scenario_id"].is_string(), "scenario_id should be a UUID");
+    assert!(data["variable_id"].is_string(), "variable_id should be a UUID");
     assert_eq!(data["year"], 2099, "Year should be 2099");
 
     // Verify the layer was created in the database
@@ -140,7 +141,7 @@ async fn test_upload_file_to_s3() {
 
     let layer_data = get_response.json();
     assert_eq!(layer_data["id"], layer_id, "Layer ID should match");
-    assert_eq!(layer_data["layer_name"], "maize_rainfed_gfdl-esm4_ssp245_yield_2099", "Layer name should match");
+    assert_eq!(layer_data["layer_name"], "maize_cwatm_gfdl-esm2m_rcp26_vwc_2099", "Layer name should match");
 }
 
 #[tokio::test]
@@ -196,9 +197,8 @@ async fn test_upload_crop_variable_layer() {
     response.assert_success();
 
     let data = response.json();
-    assert_eq!(data["crop"], "wheat", "Crop should be 'wheat'");
-    assert_eq!(data["variable"], "yield", "Variable should be 'yield'");
-    assert_eq!(data["is_crop_specific"], true, "Should be marked as crop-specific");
+    assert!(data["crop_id"].is_string(), "crop_id should be a UUID");
+    assert!(data["variable_id"].is_string(), "variable_id should be a UUID");
 }
 
 // ============================================================================
@@ -222,7 +222,7 @@ async fn test_tile_caching_with_redis() {
 
     // Prerequisite: Upload a layer first (or use existing test data)
     // For this test, we'll use an existing layer from fixtures (maize_yield_2020)
-    let layer_name = "maize_yield_2020";
+    let layer_name = "maize_cwatm_gfdl-esm2m_rcp26_vwc_2020";
 
     // First request - should generate tile and cache it
     let tile_url = format!("/api/layers/xyz/0/0/0?layer={}", layer_name);

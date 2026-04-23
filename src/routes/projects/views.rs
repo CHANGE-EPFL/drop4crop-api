@@ -115,6 +115,7 @@ pub async fn get_project_config(
     // Query each junction table and load the full reference entities
     let crop_junctions = super::project_crop::Entity::find()
         .filter(super::project_crop::Column::ProjectId.eq(project_id))
+        .order_by_asc(super::project_crop::Column::SortOrder)
         .all(db)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
@@ -130,13 +131,14 @@ pub async fn get_project_config(
                 "id": c.id,
                 "slug": c.slug,
                 "name": c.name,
-                "sort_order": c.sort_order,
+                "sort_order": junc.sort_order,
             }));
         }
     }
 
     let wm_junctions = super::project_water_model::Entity::find()
         .filter(super::project_water_model::Column::ProjectId.eq(project_id))
+        .order_by_asc(super::project_water_model::Column::SortOrder)
         .all(db)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
@@ -152,13 +154,14 @@ pub async fn get_project_config(
                 "id": w.id,
                 "slug": w.slug,
                 "name": w.name,
-                "sort_order": w.sort_order,
+                "sort_order": junc.sort_order,
             }));
         }
     }
 
     let cm_junctions = super::project_climate_model::Entity::find()
         .filter(super::project_climate_model::Column::ProjectId.eq(project_id))
+        .order_by_asc(super::project_climate_model::Column::SortOrder)
         .all(db)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
@@ -175,13 +178,14 @@ pub async fn get_project_config(
                 "id": c.id,
                 "slug": c.slug,
                 "name": c.name,
-                "sort_order": c.sort_order,
+                "sort_order": junc.sort_order,
             }));
         }
     }
 
     let sc_junctions = super::project_scenario::Entity::find()
         .filter(super::project_scenario::Column::ProjectId.eq(project_id))
+        .order_by_asc(super::project_scenario::Column::SortOrder)
         .all(db)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
@@ -197,13 +201,14 @@ pub async fn get_project_config(
                 "id": s.id,
                 "slug": s.slug,
                 "name": s.name,
-                "sort_order": s.sort_order,
+                "sort_order": junc.sort_order,
             }));
         }
     }
 
     let var_junctions = super::project_variable::Entity::find()
         .filter(super::project_variable::Column::ProjectId.eq(project_id))
+        .order_by_asc(super::project_variable::Column::SortOrder)
         .all(db)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
@@ -224,7 +229,7 @@ pub async fn get_project_config(
                 "unit": v.unit,
                 "is_crop_specific": v.is_crop_specific,
                 "group_name": v.group_name,
-                "sort_order": v.sort_order,
+                "sort_order": junc.sort_order,
             }));
         }
     }
@@ -281,11 +286,12 @@ pub async fn set_project_crops(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    // Insert new junction rows
-    for crop_id in &crop_ids {
+    // Insert new junction rows — list position becomes the per-project sort_order.
+    for (idx, crop_id) in crop_ids.iter().enumerate() {
         let model = super::project_crop::ActiveModel {
             project_id: Set(id),
             crop_id: Set(*crop_id),
+            sort_order: Set(idx as i32),
         };
         model
             .insert(db)
@@ -334,10 +340,11 @@ pub async fn set_project_water_models(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    for wm_id in &water_model_ids {
+    for (idx, wm_id) in water_model_ids.iter().enumerate() {
         let model = super::project_water_model::ActiveModel {
             project_id: Set(id),
             water_model_id: Set(*wm_id),
+            sort_order: Set(idx as i32),
         };
         model
             .insert(db)
@@ -388,10 +395,11 @@ pub async fn set_project_climate_models(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    for cm_id in &climate_model_ids {
+    for (idx, cm_id) in climate_model_ids.iter().enumerate() {
         let model = super::project_climate_model::ActiveModel {
             project_id: Set(id),
             climate_model_id: Set(*cm_id),
+            sort_order: Set(idx as i32),
         };
         model
             .insert(db)
@@ -442,10 +450,11 @@ pub async fn set_project_scenarios(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    for sc_id in &scenario_ids {
+    for (idx, sc_id) in scenario_ids.iter().enumerate() {
         let model = super::project_scenario::ActiveModel {
             project_id: Set(id),
             scenario_id: Set(*sc_id),
+            sort_order: Set(idx as i32),
         };
         model
             .insert(db)
@@ -494,10 +503,11 @@ pub async fn set_project_variables(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    for var_id in &variable_ids {
+    for (idx, var_id) in variable_ids.iter().enumerate() {
         let model = super::project_variable::ActiveModel {
             project_id: Set(id),
             variable_id: Set(*var_id),
+            sort_order: Set(idx as i32),
         };
         model
             .insert(db)

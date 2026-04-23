@@ -35,80 +35,79 @@ pub const STYLE_FIXTURES: &[&str] = &[
 ];
 
 // Layer fixtures (PostgreSQL format with UUID casting and timestamps)
+// Reference entities (crop, water_model, etc.) are seeded by the migration;
+// layer rows use subqueries to resolve FK UUIDs from slugs.
 pub const LAYER_FIXTURES: &[&str] = &[
-    // Layer 1: Maize yield data
+    // Layer 1: Climate layer — maize / cwatm / gfdl-esm2m / rcp26 / vwc / 2020
     r#"INSERT INTO layer (
-        id, layer_name, crop, water_model, climate_model, scenario, variable, year,
+        id, layer_name, crop_id, water_model_id, climate_model_id, scenario_id, variable_id, year,
         last_updated, enabled, uploaded_at, global_average, filename,
-        min_value, max_value, style_id, is_crop_specific
+        min_value, max_value, style_id
     ) VALUES (
         '650e8400-e29b-41d4-a716-446655440001'::uuid,
-        'maize_yield_2020',
-        'maize',
-        'rainfed',
-        'GFDL-ESM4',
-        'ssp245',
-        'yield',
+        'maize_cwatm_gfdl-esm2m_rcp26_vwc_2020',
+        (SELECT id FROM crop WHERE slug = 'maize'),
+        (SELECT id FROM water_model WHERE slug = 'cwatm'),
+        (SELECT id FROM climate_model WHERE slug = 'gfdl-esm2m'),
+        (SELECT id FROM scenario WHERE slug = 'rcp26'),
+        (SELECT id FROM variable WHERE slug = 'vwc'),
         2020,
         '2024-01-15T10:30:00+00:00'::timestamptz,
         true,
         '2024-01-15T10:00:00+00:00'::timestamptz,
         4.5,
-        'maize_yield_2020.tif',
+        'maize_cwatm_gfdl-esm2m_rcp26_vwc_2020.tif',
         0.5,
         8.2,
-        '550e8400-e29b-41d4-a716-446655440001'::uuid,
-        true
+        '550e8400-e29b-41d4-a716-446655440001'::uuid
     )"#,
 
-    // Layer 2: Wheat temperature data
+    // Layer 2: Climate layer — wheat / h08 / hadgem2-es / rcp85 / vwcb / 2025
     r#"INSERT INTO layer (
-        id, layer_name, crop, water_model, climate_model, scenario, variable, year,
+        id, layer_name, crop_id, water_model_id, climate_model_id, scenario_id, variable_id, year,
         last_updated, enabled, uploaded_at, global_average, filename,
-        min_value, max_value, style_id, is_crop_specific
+        min_value, max_value, style_id
     ) VALUES (
         '650e8400-e29b-41d4-a716-446655440002'::uuid,
-        'wheat_temp_2025',
-        'wheat',
-        'irrigated',
-        'UKESM1-0-LL',
-        'ssp585',
-        'temperature',
+        'wheat_h08_hadgem2-es_rcp85_vwcb_2025',
+        (SELECT id FROM crop WHERE slug = 'wheat'),
+        (SELECT id FROM water_model WHERE slug = 'h08'),
+        (SELECT id FROM climate_model WHERE slug = 'hadgem2-es'),
+        (SELECT id FROM scenario WHERE slug = 'rcp85'),
+        (SELECT id FROM variable WHERE slug = 'vwcb'),
         2025,
         '2024-02-20T14:15:00+00:00'::timestamptz,
         true,
         '2024-02-20T14:00:00+00:00'::timestamptz,
         22.3,
-        'wheat_temp_2025.tif',
+        'wheat_h08_hadgem2-es_rcp85_vwcb_2025.tif',
         -5.0,
         45.0,
-        '550e8400-e29b-41d4-a716-446655440002'::uuid,
-        true
+        '550e8400-e29b-41d4-a716-446655440002'::uuid
     )"#,
 
-    // Layer 3: Rice precipitation
+    // Layer 3: Climate layer — rice / lpjml / miroc5 / rcp60 / wf / 2030 (disabled)
     r#"INSERT INTO layer (
-        id, layer_name, crop, water_model, climate_model, scenario, variable, year,
+        id, layer_name, crop_id, water_model_id, climate_model_id, scenario_id, variable_id, year,
         last_updated, enabled, uploaded_at, global_average, filename,
-        min_value, max_value, style_id, is_crop_specific
+        min_value, max_value, style_id
     ) VALUES (
         '650e8400-e29b-41d4-a716-446655440003'::uuid,
-        'rice_precip_2030',
-        'rice',
-        'rainfed',
-        'MIROC6',
-        'ssp126',
-        'precipitation',
+        'rice_lpjml_miroc5_rcp60_wf_2030',
+        (SELECT id FROM crop WHERE slug = 'rice'),
+        (SELECT id FROM water_model WHERE slug = 'lpjml'),
+        (SELECT id FROM climate_model WHERE slug = 'miroc5'),
+        (SELECT id FROM scenario WHERE slug = 'rcp60'),
+        (SELECT id FROM variable WHERE slug = 'wf'),
         2030,
         '2024-03-10T09:45:00+00:00'::timestamptz,
         false,
         '2024-03-10T09:30:00+00:00'::timestamptz,
         850.5,
-        'rice_precip_2030.tif',
+        'rice_lpjml_miroc5_rcp60_wf_2030.tif',
         0.0,
         2500.0,
-        NULL,
-        true
+        NULL
     )"#,
 ];
 

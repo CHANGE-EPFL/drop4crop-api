@@ -83,11 +83,30 @@ pub async fn tile_handler(
         // Invalid tile coordinate - this is expected for out-of-bounds requests
         return Err(StatusCode::NOT_FOUND);
     }
+    // Resolve the layer row first — we need `project_id` to hit the correct
+    // project-scoped S3 subpath, and we already need this record downstream
+    // for style resolution.
+    let layer_record = match layer::Entity::find()
+        .filter(layer::Column::LayerName.eq(&params.layer))
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database query error");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+        Some(rec) => rec,
+        None => {
+            debug!(layer = %params.layer, "No layer found");
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
+    let project_id = layer_record.project_id;
+
     let xyz_tile = XYZTile { x, y, z };
     let retry_strategy = FixedInterval::from_millis(200).take(5);
     let img: ImageBuffer<image::Luma<f32>, Vec<f32>> = RetryIf::spawn(
         retry_strategy,
-        || xyz_tile.get_one(&config, &params.layer),
+        || xyz_tile.get_one(&config, project_id, &params.layer),
         |e: &anyhow::Error| {
             error!(
                 layer = %params.layer,
@@ -108,22 +127,6 @@ pub async fn tile_handler(
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-    // Find the layer record by layer name.
-    let layer_record = match layer::Entity::find()
-        .filter(layer::Column::LayerName.eq(&params.layer))
-        .one(db)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Database query error");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })? {
-        Some(rec) => rec,
-        None => {
-            debug!(layer = %params.layer, "No layer found");
-            return Err(StatusCode::NOT_FOUND);
-        }
-    };
 
     // Load the related style record(s).
     let related_styles = layer_record

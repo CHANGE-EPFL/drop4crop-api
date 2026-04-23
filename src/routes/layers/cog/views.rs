@@ -49,7 +49,8 @@ async fn get_layer_data(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
 
-    // Verify layer exists in database
+    // Verify layer exists in database — also need its project_id so the S3
+    // lookup hits the correct project-scoped subpath.
     use crate::routes::layers::db::{Column, Entity as LayerEntity};
     let layer = LayerEntity::find()
         .filter(Column::Filename.eq(&filename))
@@ -63,16 +64,17 @@ async fn get_layer_data(
                     "error": e.to_string()
                 })),
             )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "message": "Layer not found"
+                })),
+            )
         })?;
 
-    if layer.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "message": "Layer not found"
-            })),
-        ));
-    }
+    let project_id = layer.project_id;
 
     // Check for Range header (HTTP Range Request for COG streaming)
     let range_header = headers.get(header::RANGE);
@@ -80,7 +82,7 @@ async fn get_layer_data(
     // Fetch the file from S3
     let data = if let Some(range) = range_header {
         // Parse range header and fetch only requested bytes from S3
-        storage::get_object_range(&config, &filename, range.to_str().unwrap_or(""))
+        storage::get_object_range(&config, project_id, &filename, range.to_str().unwrap_or(""))
             .await
             .map_err(|e| {
                 (
@@ -93,7 +95,7 @@ async fn get_layer_data(
             })?
     } else {
         // Fetch entire file
-        storage::get_object(&config, &filename).await.map_err(|e| {
+        storage::get_object(&config, project_id, &filename).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({

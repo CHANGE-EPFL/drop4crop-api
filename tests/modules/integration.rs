@@ -29,7 +29,8 @@ async fn create_test_app() -> Router {
     // Create test config
     let config = Config {
         db_uri: Some("sqlite::memory:".to_string()),
-        tile_cache_uri: "redis://localhost:6379/0".to_string(),
+        tile_cache_uri: std::env::var("TILE_CACHE_URI")
+            .unwrap_or_else(|_| "redis://:defaultpassword@tile-cache:6379/0".to_string()),
         tile_cache_ttl: 86400,
         keycloak_client_id: "test-client".to_string(),
         keycloak_url: "".to_string(), // Empty to skip Keycloak in tests
@@ -112,7 +113,8 @@ async fn test_styles_create() {
     let new_style = json!({
         "name": "test_gradient",
         "style": {"type": "raster", "colormap": "rainbow"},
-        "interpolation_type": "linear"
+        "interpolation_type": "linear",
+        "label_display_mode": "auto"
     });
 
     let response = client.post("/api/styles", &new_style).await;
@@ -194,15 +196,15 @@ async fn test_layers_get_list_with_filter() {
     let router = create_test_app().await;
     let client = TestClient::new(router);
 
-    // Filter by crop (URL-encoded JSON)
-    let response = client.get("/api/layers?filter=%7B%22crop%22%3A%22maize%22%7D").await;
+    // Filter by year (integer column, straightforward to filter)
+    let response = client.get("/api/layers?filter=%7B%22year%22%3A2020%7D").await;
     response.assert_success();
 
     let data = response.json();
     assert!(data.is_array());
     let layers = data.as_array().unwrap();
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0]["crop"], "maize");
+    assert_eq!(layers[0]["year"], 2020);
 }
 
 #[tokio::test]
@@ -228,8 +230,8 @@ async fn test_layers_get_one() {
 
     let data = response.json();
     assert_eq!(data["id"], LAYER_1_ID);
-    assert_eq!(data["crop"], "maize");
-    assert_eq!(data["layer_name"], "maize_yield_2020");
+    assert!(data["crop_id"].is_string(), "crop_id should be a UUID");
+    assert_eq!(data["layer_name"], "maize_cwatm_gfdl-esm2m_rcp26_vwc_2020");
 }
 
 #[tokio::test]
@@ -254,21 +256,15 @@ async fn test_layers_create() {
     let client = TestClient::new(router);
 
     let new_layer = json!({
-        "layer_name": "soybean_test_2024",
-        "crop": "soybean",
-        "water_model": "rainfed",
-        "climate_model": "CESM2",
-        "scenario": "ssp370",
-        "variable": "yield",
+        "layer_name": "test_layer_2024",
         "year": 2024,
         "last_updated": "2024-06-01T10:00:00+00:00",
         "enabled": true,
         "uploaded_at": "2024-06-01T10:00:00+00:00",
         "global_average": 3.2,
-        "filename": "soybean_test_2024.tif",
+        "filename": "test_layer_2024.tif",
         "min_value": 0.0,
-        "max_value": 10.0,
-        "is_crop_specific": true
+        "max_value": 10.0
     });
 
     let response = client.post("/api/layers", &new_layer).await;
@@ -276,7 +272,6 @@ async fn test_layers_create() {
 
     let data = response.json();
     assert!(data["id"].is_string());
-    assert_eq!(data["crop"], "soybean");
     assert_eq!(data["year"], 2024);
 }
 
@@ -342,7 +337,7 @@ async fn test_layers_groups() {
     let data = response.json();
     assert!(data.is_object());
 
-    // Check that it has the expected keys (singular form in API)
+    // Groups now returns full reference-table objects (with id, slug, name, etc.)
     assert!(data["crop"].is_array());
     assert!(data["water_model"].is_array());
     assert!(data["climate_model"].is_array());
@@ -350,10 +345,13 @@ async fn test_layers_groups() {
     assert!(data["variable"].is_array());
     assert!(data["year"].is_array());
 
-    // Check values
+    // Each crop entry is a reference-table object with a slug field
     let crops = data["crop"].as_array().unwrap();
-    assert!(crops.contains(&json!("maize")));
-    assert!(crops.contains(&json!("wheat")));
+    let crop_slugs: Vec<&str> = crops.iter()
+        .filter_map(|c| c["slug"].as_str())
+        .collect();
+    assert!(crop_slugs.contains(&"maize"), "Should contain maize");
+    assert!(crop_slugs.contains(&"wheat"), "Should contain wheat");
     // Note: rice layer is disabled so it won't appear in results
 }
 

@@ -1,6 +1,6 @@
 use super::db::Layer;
 use super::models::{
-    GetPixelValueParams, LayerInfo, PixelValueResponse, UploadQueryParams,
+    GetPixelValueParams, LayerInfo, PixelValueResponse, UploadError, UploadQueryParams,
 };
 use super::utils::{
     convert_to_cog_in_memory, get_global_average_of_raster, get_min_max_of_raster,
@@ -35,6 +35,31 @@ use uuid::Uuid;
 pub struct GroupsQueryParams {
     /// Optional project slug to filter layers by project
     pub project: Option<String>,
+}
+
+/// Renders an `UploadError` into the `(StatusCode, Json<Value>)` shape the handler returns.
+/// Serialization into `Value` can't fail for this struct but we degrade gracefully just in case.
+fn upload_err_json(
+    status: StatusCode,
+    err: UploadError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let body = serde_json::to_value(&err).unwrap_or_else(|_| {
+        serde_json::json!({
+            "code": "internal",
+            "message": err.message,
+        })
+    });
+    (status, Json(body))
+}
+
+/// Converts a SeaORM database error into the handler's error shape.
+/// Defined at file scope (not as a closure) so it's a plain function pointer
+/// that can be passed to `map_err` many times without being moved.
+fn db_upload_err(e: sea_orm::DbErr) -> (StatusCode, Json<serde_json::Value>) {
+    upload_err_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        UploadError::new("internal", "Database error").with_error(e.to_string()),
+    )
 }
 
 pub fn router(state: &AppState) -> OpenApiRouter {
@@ -118,145 +143,88 @@ pub async fn get_groups(
         None
     };
 
-    // Crops: when a project is specified we filter via the project_crop junction
-    // (the admin's allow-list). Otherwise we fall back to "crops that have at
-    // least one enabled layer anywhere".
-    let crops = if let Some(pid) = project_uuid {
-        crate::routes::crops::db::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                crate::routes::projects::project_crop::Relation::Crop.def().rev(),
-            )
-            .filter(crate::routes::projects::project_crop::Column::ProjectId.eq(pid))
-            .order_by_asc(crate::routes::crops::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
-    } else {
-        crate::routes::crops::db::Entity::find()
+    // Groups reflect what's actually in the layer data so the map UI can dim /
+    // omit chips for axes that have no backing layer. For the project scope
+    // that's "crops with at least one enabled layer owned by the project".
+    // For the global scope it's "crops with any enabled layer anywhere".
+    let crops = {
+        let mut q = crate::routes::crops::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Crop.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
-            .order_by_asc(crate::routes::crops::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
+            .order_by_asc(crate::routes::crops::db::Column::SortOrder);
+        if let Some(pid) = project_uuid {
+            q = q.filter(super::db::Column::ProjectId.eq(pid));
+        }
+        q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
     if !crops.is_empty() {
         groups.insert("crop".to_string(), crops);
     }
 
-    // Water models
-    let water_models = if let Some(pid) = project_uuid {
-        crate::routes::water_models::db::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                crate::routes::projects::project_water_model::Relation::WaterModel
-                    .def()
-                    .rev(),
-            )
-            .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(pid))
-            .order_by_asc(crate::routes::water_models::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
-    } else {
-        crate::routes::water_models::db::Entity::find()
+    // Water models — same "axes present in the layer data" derivation as crops.
+    let water_models = {
+        let mut q = crate::routes::water_models::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::WaterModel.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
-            .order_by_asc(crate::routes::water_models::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
+            .order_by_asc(crate::routes::water_models::db::Column::SortOrder);
+        if let Some(pid) = project_uuid {
+            q = q.filter(super::db::Column::ProjectId.eq(pid));
+        }
+        q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
     if !water_models.is_empty() {
         groups.insert("water_model".to_string(), water_models);
     }
 
-    // Climate models
-    let climate_models = if let Some(pid) = project_uuid {
-        crate::routes::climate_models::db::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                crate::routes::projects::project_climate_model::Relation::ClimateModel
-                    .def()
-                    .rev(),
-            )
-            .filter(crate::routes::projects::project_climate_model::Column::ProjectId.eq(pid))
-            .order_by_asc(crate::routes::climate_models::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
-    } else {
-        crate::routes::climate_models::db::Entity::find()
+    // Climate models — same "axes present in the layer data" derivation as crops.
+    let climate_models = {
+        let mut q = crate::routes::climate_models::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::ClimateModel.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
-            .order_by_asc(crate::routes::climate_models::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
+            .order_by_asc(crate::routes::climate_models::db::Column::SortOrder);
+        if let Some(pid) = project_uuid {
+            q = q.filter(super::db::Column::ProjectId.eq(pid));
+        }
+        q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
     if !climate_models.is_empty() {
         groups.insert("climate_model".to_string(), climate_models);
     }
 
-    // Scenarios
-    let scenarios = if let Some(pid) = project_uuid {
-        crate::routes::scenarios::db::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                crate::routes::projects::project_scenario::Relation::Scenario
-                    .def()
-                    .rev(),
-            )
-            .filter(crate::routes::projects::project_scenario::Column::ProjectId.eq(pid))
-            .order_by_asc(crate::routes::scenarios::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
-    } else {
-        crate::routes::scenarios::db::Entity::find()
+    // Scenarios — same "axes present in the layer data" derivation as crops.
+    let scenarios = {
+        let mut q = crate::routes::scenarios::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Scenario.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
-            .order_by_asc(crate::routes::scenarios::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
+            .order_by_asc(crate::routes::scenarios::db::Column::SortOrder);
+        if let Some(pid) = project_uuid {
+            q = q.filter(super::db::Column::ProjectId.eq(pid));
+        }
+        q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
     if !scenarios.is_empty() {
         groups.insert("scenario".to_string(), scenarios);
     }
 
-    // Variables
-    let variables = if let Some(pid) = project_uuid {
-        crate::routes::variables::db::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                crate::routes::projects::project_variable::Relation::Variable
-                    .def()
-                    .rev(),
-            )
-            .filter(crate::routes::projects::project_variable::Column::ProjectId.eq(pid))
-            .order_by_asc(crate::routes::variables::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
-    } else {
-        crate::routes::variables::db::Entity::find()
+    // Variables — same "axes present in the layer data" derivation as crops.
+    let variables = {
+        let mut q = crate::routes::variables::db::Entity::find()
             .join(JoinType::InnerJoin, super::db::Relation::Variable.def().rev())
             .filter(super::db::Column::Enabled.eq(true))
             .distinct()
-            .order_by_asc(crate::routes::variables::db::Column::SortOrder)
-            .into_json()
-            .all(db)
-            .await
+            .order_by_asc(crate::routes::variables::db::Column::SortOrder);
+        if let Some(pid) = project_uuid {
+            q = q.filter(super::db::Column::ProjectId.eq(pid));
+        }
+        q.into_json().all(db).await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
     if !variables.is_empty() {
@@ -311,11 +279,24 @@ pub async fn get_pixel_value(
     State(app_state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let config = &app_state.config;
+    let db = &app_state.db;
     // Build the filename for the TIFF.
     let filename = format!("{}.tif", layer_id);
 
+    // Resolve the layer row so we know which project owns the file — the S3
+    // object lives under that project's subpath (see `storage::s3_key_stem`).
+    let project_id = super::db::Entity::find()
+        .filter(super::db::Column::LayerName.eq(&layer_id))
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(filename, error = %e, "DB lookup failed for pixel value");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .and_then(|l| l.project_id);
+
     // Fetch the object using your existing S3 integration (with caching).
-    let object = storage::get_object(&config, &filename).await.map_err(|e| {
+    let object = storage::get_object(&config, project_id, &filename).await.map_err(|e| {
         error!(filename, error = %e, "Error fetching object for pixel value");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -480,74 +461,272 @@ pub async fn upload_file(
             debug!("Parsing filename");
             let layer_info = parse_filename(&config, &filename).map_err(|e| {
                 error!(filename, error = %e, "Error parsing filename");
-                (
+                upload_err_json(
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "message": "Invalid filename format",
-                        "error": e.to_string()
-                    })),
+                    UploadError::new("parse_error", "Invalid filename format")
+                        .with_error(e.to_string()),
                 )
             })?;
             debug!("Successfully parsed filename");
 
-            // Resolve slugs to UUIDs from reference tables
+            // Resolve slugs to UUIDs from reference tables.
+            // In the 6-part climate form every middle slot (including variable) can be a
+            // `null`/`nan` sentinel; in the 2-part crop form the variable is required.
             debug!("Resolving slugs to UUIDs");
-            let (crop_slug, variable_slug) = match &layer_info {
-                LayerInfo::Climate(info) => (info.crop.clone(), info.variable.clone()),
-                LayerInfo::Crop(info) => (info.crop.clone(), info.variable.clone()),
+            let crop_slug = match &layer_info {
+                LayerInfo::Climate(info) => info.crop.clone(),
+                LayerInfo::Crop(info) => info.crop.clone(),
+            };
+            let variable_slug: Option<String> = match &layer_info {
+                LayerInfo::Climate(info) => info.variable.clone(),
+                LayerInfo::Crop(info) => Some(info.variable.clone()),
             };
 
+            // Resolve each slug to a UUID via the reference tables. Missing rows return
+            // `slug_unknown`. When `project_id` is present, also verify the resolved UUID
+            // is attached to that project's junction table — a globally-known slug that
+            // isn't attached returns `slug_not_in_project`. The frontend routes both codes
+            // into the resolution panel.
             let crop_uuid = crate::routes::crops::db::Entity::find()
                 .filter(crate::routes::crops::db::Column::Slug.eq(&crop_slug))
                 .one(db)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown crop slug: {}", crop_slug)}))))?
+                .map_err(db_upload_err)?
+                .ok_or_else(|| {
+                    upload_err_json(
+                        StatusCode::BAD_REQUEST,
+                        UploadError::with_slug(
+                            "slug_unknown",
+                            "crop",
+                            &crop_slug,
+                            format!("Unknown crop slug: {}", crop_slug),
+                        ),
+                    )
+                })?
                 .id;
 
-            let variable_record = crate::routes::variables::db::Entity::find()
-                .filter(crate::routes::variables::db::Column::Slug.eq(&variable_slug))
-                .one(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown variable slug: {}", variable_slug)}))))?;
-            let variable_uuid = variable_record.id;
-            let _is_crop_specific = variable_record.is_crop_specific;
+            if let Some(pid) = params.project_id {
+                let attached = crate::routes::projects::project_crop::Entity::find()
+                    .filter(crate::routes::projects::project_crop::Column::ProjectId.eq(pid))
+                    .filter(crate::routes::projects::project_crop::Column::CropId.eq(crop_uuid))
+                    .one(db)
+                    .await
+                    .map_err(db_upload_err)?;
+                if attached.is_none() {
+                    return Err(upload_err_json(
+                        StatusCode::BAD_REQUEST,
+                        UploadError::with_slug(
+                            "slug_not_in_project",
+                            "crop",
+                            &crop_slug,
+                            format!("Crop '{}' is not attached to this project", crop_slug),
+                        ),
+                    ));
+                }
+            }
+
+            let (variable_uuid, _is_crop_specific): (Option<Uuid>, bool) =
+                if let Some(vslug) = &variable_slug {
+                    let variable_record = crate::routes::variables::db::Entity::find()
+                        .filter(crate::routes::variables::db::Column::Slug.eq(vslug))
+                        .one(db)
+                        .await
+                        .map_err(db_upload_err)?
+                        .ok_or_else(|| {
+                            upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_unknown",
+                                    "variable",
+                                    vslug,
+                                    format!("Unknown variable slug: {}", vslug),
+                                ),
+                            )
+                        })?;
+                    if let Some(pid) = params.project_id {
+                        let attached = crate::routes::projects::project_variable::Entity::find()
+                            .filter(
+                                crate::routes::projects::project_variable::Column::ProjectId
+                                    .eq(pid),
+                            )
+                            .filter(
+                                crate::routes::projects::project_variable::Column::VariableId
+                                    .eq(variable_record.id),
+                            )
+                            .one(db)
+                            .await
+                            .map_err(db_upload_err)?;
+                        if attached.is_none() {
+                            return Err(upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_not_in_project",
+                                    "variable",
+                                    vslug,
+                                    format!(
+                                        "Variable '{}' is not attached to this project",
+                                        vslug
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                    (Some(variable_record.id), variable_record.is_crop_specific)
+                } else {
+                    (None, false)
+                };
 
             // Slots left as `null` in the filename (case-insensitive) become `None` here and
             // the corresponding FK column is stored as NULL. Real slugs are resolved to UUIDs
-            // via the reference tables; an unknown slug is a BAD_REQUEST.
+            // and, when a project is set, checked against the project's junction tables.
             let (water_model_uuid, climate_model_uuid, scenario_uuid) = if let LayerInfo::Climate(info) = &layer_info {
                 let wm = if let Some(slug) = &info.water_model {
-                    Some(crate::routes::water_models::db::Entity::find()
+                    let id = crate::routes::water_models::db::Entity::find()
                         .filter(crate::routes::water_models::db::Column::Slug.eq(slug))
                         .one(db)
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown water_model slug: {}", slug)}))))?
-                        .id)
+                        .map_err(db_upload_err)?
+                        .ok_or_else(|| {
+                            upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_unknown",
+                                    "water_model",
+                                    slug,
+                                    format!("Unknown water_model slug: {}", slug),
+                                ),
+                            )
+                        })?
+                        .id;
+                    if let Some(pid) = params.project_id {
+                        let attached = crate::routes::projects::project_water_model::Entity::find()
+                            .filter(
+                                crate::routes::projects::project_water_model::Column::ProjectId
+                                    .eq(pid),
+                            )
+                            .filter(
+                                crate::routes::projects::project_water_model::Column::WaterModelId
+                                    .eq(id),
+                            )
+                            .one(db)
+                            .await
+                            .map_err(db_upload_err)?;
+                        if attached.is_none() {
+                            return Err(upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_not_in_project",
+                                    "water_model",
+                                    slug,
+                                    format!(
+                                        "Water model '{}' is not attached to this project",
+                                        slug
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                    Some(id)
                 } else {
                     None
                 };
                 let cm = if let Some(slug) = &info.climate_model {
-                    Some(crate::routes::climate_models::db::Entity::find()
+                    let id = crate::routes::climate_models::db::Entity::find()
                         .filter(crate::routes::climate_models::db::Column::Slug.eq(slug))
                         .one(db)
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown climate_model slug: {}", slug)}))))?
-                        .id)
+                        .map_err(db_upload_err)?
+                        .ok_or_else(|| {
+                            upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_unknown",
+                                    "climate_model",
+                                    slug,
+                                    format!("Unknown climate_model slug: {}", slug),
+                                ),
+                            )
+                        })?
+                        .id;
+                    if let Some(pid) = params.project_id {
+                        let attached = crate::routes::projects::project_climate_model::Entity::find()
+                            .filter(
+                                crate::routes::projects::project_climate_model::Column::ProjectId
+                                    .eq(pid),
+                            )
+                            .filter(
+                                crate::routes::projects::project_climate_model::Column::ClimateModelId
+                                    .eq(id),
+                            )
+                            .one(db)
+                            .await
+                            .map_err(db_upload_err)?;
+                        if attached.is_none() {
+                            return Err(upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_not_in_project",
+                                    "climate_model",
+                                    slug,
+                                    format!(
+                                        "Climate model '{}' is not attached to this project",
+                                        slug
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                    Some(id)
                 } else {
                     None
                 };
                 let sc = if let Some(slug) = &info.scenario {
-                    Some(crate::routes::scenarios::db::Entity::find()
+                    let id = crate::routes::scenarios::db::Entity::find()
                         .filter(crate::routes::scenarios::db::Column::Slug.eq(slug))
                         .one(db)
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-                        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": format!("Unknown scenario slug: {}", slug)}))))?
-                        .id)
+                        .map_err(db_upload_err)?
+                        .ok_or_else(|| {
+                            upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_unknown",
+                                    "scenario",
+                                    slug,
+                                    format!("Unknown scenario slug: {}", slug),
+                                ),
+                            )
+                        })?
+                        .id;
+                    if let Some(pid) = params.project_id {
+                        let attached = crate::routes::projects::project_scenario::Entity::find()
+                            .filter(
+                                crate::routes::projects::project_scenario::Column::ProjectId
+                                    .eq(pid),
+                            )
+                            .filter(
+                                crate::routes::projects::project_scenario::Column::ScenarioId
+                                    .eq(id),
+                            )
+                            .one(db)
+                            .await
+                            .map_err(db_upload_err)?;
+                        if attached.is_none() {
+                            return Err(upload_err_json(
+                                StatusCode::BAD_REQUEST,
+                                UploadError::with_slug(
+                                    "slug_not_in_project",
+                                    "scenario",
+                                    slug,
+                                    format!(
+                                        "Scenario '{}' is not attached to this project",
+                                        slug
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                    Some(id)
                 } else {
                     None
                 };
@@ -565,8 +744,11 @@ pub async fn upload_file(
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
                     let mut q = LayerEntity::find()
                         .filter(Column::CropId.eq(crop_uuid))
-                        .filter(Column::VariableId.eq(variable_uuid))
                         .filter(Column::Year.eq(info.year));
+                    q = match variable_uuid {
+                        Some(id) => q.filter(Column::VariableId.eq(id)),
+                        None => q.filter(Column::VariableId.is_null()),
+                    };
                     q = match water_model_uuid {
                         Some(id) => q.filter(Column::WaterModelId.eq(id)),
                         None => q.filter(Column::WaterModelId.is_null()),
@@ -586,10 +768,13 @@ pub async fn upload_file(
                     q
                 }
                 LayerInfo::Crop(_info) => {
+                    // 2-part crop form always has a real variable, so `variable_uuid` is Some here.
                     use crate::routes::layers::db::{Column, Entity as LayerEntity};
-                    let mut q = LayerEntity::find()
-                        .filter(Column::CropId.eq(crop_uuid))
-                        .filter(Column::VariableId.eq(variable_uuid));
+                    let mut q = LayerEntity::find().filter(Column::CropId.eq(crop_uuid));
+                    q = match variable_uuid {
+                        Some(id) => q.filter(Column::VariableId.eq(id)),
+                        None => q.filter(Column::VariableId.is_null()),
+                    };
                     q = match params.project_id {
                         Some(pid) => q.filter(Column::ProjectId.eq(pid)),
                         None => q.filter(Column::ProjectId.is_null()),
@@ -598,15 +783,7 @@ pub async fn upload_file(
                 }
             };
 
-            let existing_layer = duplicate_query.one(db).await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "message": "Database error",
-                        "error": e.to_string()
-                    })),
-                )
-            })?;
+            let existing_layer = duplicate_query.one(db).await.map_err(db_upload_err)?;
 
             // Track if we're updating an existing layer (to preserve DB record)
             let existing_layer_id: Option<Uuid> = if let Some(existing) = existing_layer {
@@ -618,11 +795,15 @@ pub async fn upload_file(
                     Some(existing.id)
                 } else {
                     warn!(filename, "Rejecting duplicate file");
-                    return Err((
+                    return Err(upload_err_json(
                         StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "message": format!("Layer already exists for {}. Delete layer first to re-upload, or set overwrite_duplicates=true", filename)
-                        })),
+                        UploadError::new(
+                            "duplicate",
+                            format!(
+                                "Layer already exists for {}. Delete layer first to re-upload, or set overwrite_duplicates=true",
+                                filename
+                            ),
+                        ),
                     ));
                 }
             } else {
@@ -677,8 +858,11 @@ pub async fn upload_file(
                 ));
             }
 
-            // Upload to S3
-            let s3_key = storage::get_s3_key(&config, &filename);
+            // Upload to S3 under the project's subpath, so the same filename
+            // in two different projects doesn't collide on a single object.
+            // S3 PUTs create the key unconditionally — there is no separate
+            // "folder" to ensure exists.
+            let s3_key = storage::get_s3_key(&config, params.project_id, &filename);
             storage::upload_object(&config, &s3_key, &cog_bytes)
                 .await
                 .map_err(|e| {
@@ -760,7 +944,7 @@ pub async fn upload_file(
                             water_model_id: Set(water_model_uuid),
                             climate_model_id: Set(climate_model_uuid),
                             scenario_id: Set(scenario_uuid),
-                            variable_id: Set(Some(variable_uuid)),
+                            variable_id: Set(variable_uuid),
                             year: Set(Some(info.year)),
                             min_value: Set(Some(min_val)),
                             max_value: Set(Some(max_val)),
@@ -779,7 +963,7 @@ pub async fn upload_file(
                             filename: Set(Some(filename.clone())),
                             layer_name: Set(Some(layer_name.to_string())),
                             crop_id: Set(Some(crop_uuid)),
-                            variable_id: Set(Some(variable_uuid)),
+                            variable_id: Set(variable_uuid),
                             min_value: Set(Some(min_val)),
                             max_value: Set(Some(max_val)),
                             global_average: Set(Some(global_avg)),
@@ -916,7 +1100,7 @@ pub async fn recalculate_layer_stats(
     })?;
 
     // Fetch the file directly from S3 (bypassing cache to avoid polluting Redis)
-    let object = storage::get_object_direct(&config, &filename).await.map_err(|e| {
+    let object = storage::get_object_direct(&config, layer.project_id, &filename).await.map_err(|e| {
         error!(filename, error = %e, "Error fetching object from S3");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1506,7 +1690,7 @@ pub async fn recalculate_stats_by_ids(
         };
 
         // Fetch directly from S3 (bypassing cache to avoid polluting Redis)
-        let object = match storage::get_object_direct(&config, &filename).await {
+        let object = match storage::get_object_direct(&config, layer.project_id, &filename).await {
             Ok(o) => o,
             Err(e) => {
                 let error_msg = format!("Failed to fetch from S3: {}", e);

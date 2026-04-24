@@ -16,6 +16,7 @@ mod m20260420_000001_add_time_axis_config;
 mod m20260423_000001_add_project_relation_sort_order;
 mod m20260423_000002_add_tab_config;
 mod m20260423_000003_drop_country_tables;
+mod m20260424_000001_add_historical_year;
 
 pub struct Migrator;
 
@@ -39,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260423_000001_add_project_relation_sort_order::Migration),
             Box::new(m20260423_000002_add_tab_config::Migration),
             Box::new(m20260423_000003_drop_country_tables::Migration),
+            Box::new(m20260424_000001_add_historical_year::Migration),
         ]
     }
 }

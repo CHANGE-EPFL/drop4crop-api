@@ -32,6 +32,9 @@ pub struct Model {
     /// Shape: {"mode":"range","min":2000,"max":2090,"step":10}
     ///    or: {"mode":"list","values":[2020,2050,2090]}
     pub year_axis: Option<serde_json::Value>,
+    /// When set, this year uses the "historical" scenario instead of the
+    /// user-selected scenario. Null disables the override.
+    pub historical_year: Option<i32>,
     pub tab_config: Option<serde_json::Value>,
 }
 

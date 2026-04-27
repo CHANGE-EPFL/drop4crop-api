@@ -49,6 +49,7 @@ pub fn cache_router(state: &AppState) -> OpenApiRouter {
     let mut router = OpenApiRouter::new()
         .route("/info", get(get_cache_info))
         .route("/keys", get(get_cache_keys))
+        .route("/aggregated", get(get_cache_aggregated))
         .route("/clear", post(clear_all_cache))
         .route("/layers/{layer_name}", delete(clear_layer_cache))
         .route("/layers/{layer_name}/warm", post(warm_layer_cache))
@@ -154,6 +155,19 @@ struct CachedLayer {
     ttl_seconds: Option<i64>,
     ttl_hours: Option<f64>,
     cached_since: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AggregatedCacheEntry {
+    layer_name: String,
+    layer_id: Option<uuid::Uuid>,
+    total_size_bytes: usize,
+    total_size_mb: f64,
+    cog_cached: bool,
+    cog_size_mb: f64,
+    cog_ttl_hours: Option<f64>,
+    png_tile_count: usize,
+    png_tile_size_mb: f64,
 }
 
 /// GET /api/admin/stats/summary - Dashboard overview
@@ -780,6 +794,102 @@ async fn get_cache_keys(
     }
 
     Ok(Json(cached_layers))
+}
+
+/// GET /api/admin/cache/aggregated - Aggregated cache data grouped by layer
+async fn get_cache_aggregated(
+    State(app_state): State<AppState>,
+) -> Result<Json<Vec<AggregatedCacheEntry>>, StatusCode> {
+    let db = &app_state.db;
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
+
+    let mut con = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
+    let all_keys = scan_keys(&mut con, &cache_pattern)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let prefix = format!("{}-{}/", config.app_name, config.deployment);
+    let keys: Vec<String> = all_keys
+        .into_iter()
+        .filter(|k| !k.contains("/stats:") && !k.ends_with(":downloading"))
+        .collect();
+
+    let mut entries: Vec<AggregatedCacheEntry> = Vec::new();
+
+    for key in &keys {
+        let stem = key.strip_prefix(&prefix).unwrap_or(key);
+
+        // Strip project UUID prefix if present, then strip .tif
+        let filename_part = if let Some(slash_pos) = stem.find('/') {
+            let maybe_uuid = &stem[..slash_pos];
+            if uuid::Uuid::parse_str(maybe_uuid).is_ok() {
+                &stem[slash_pos + 1..]
+            } else {
+                stem
+            }
+        } else {
+            stem
+        };
+        let layer_name = filename_part.trim_end_matches(".tif").to_string();
+
+        let size_bytes: usize = redis::cmd("STRLEN")
+            .arg(key)
+            .query_async(&mut con)
+            .await
+            .unwrap_or(0);
+
+        let ttl_seconds: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query_async(&mut con)
+            .await
+            .unwrap_or(-2);
+
+        let cog_ttl_hours = if ttl_seconds > 0 {
+            Some(ttl_seconds as f64 / 3600.0)
+        } else {
+            None
+        };
+
+        entries.push(AggregatedCacheEntry {
+            layer_name,
+            layer_id: None,
+            total_size_bytes: size_bytes,
+            total_size_mb: size_bytes as f64 / (1024.0 * 1024.0),
+            cog_cached: size_bytes > 0,
+            cog_size_mb: size_bytes as f64 / (1024.0 * 1024.0),
+            cog_ttl_hours,
+            png_tile_count: 0,
+            png_tile_size_mb: 0.0,
+        });
+    }
+
+    // Batch-resolve layer_ids from database
+    use crate::routes::layers::db as layer;
+    let layer_names: Vec<String> = entries.iter().map(|e| e.layer_name.clone()).collect();
+    let layers = layer::Entity::find()
+        .filter(layer::Column::LayerName.is_in(layer_names))
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let layer_map: HashMap<String, uuid::Uuid> = layers
+        .into_iter()
+        .filter_map(|l| l.layer_name.map(|name| (name, l.id)))
+        .collect();
+
+    for entry in &mut entries {
+        entry.layer_id = layer_map.get(&entry.layer_name).copied();
+    }
+
+    entries.sort_by(|a, b| b.total_size_bytes.cmp(&a.total_size_bytes));
+
+    Ok(Json(entries))
 }
 
 /// POST /api/admin/cache/clear - Clear all cache

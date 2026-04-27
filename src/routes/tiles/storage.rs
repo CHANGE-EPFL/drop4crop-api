@@ -72,7 +72,13 @@ pub async fn get_object(
     let downloading_key = super::cache::build_downloading_key(config, &stem);
 
     let client = super::cache::get_redis_client(config);
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = match client.get_multiplexed_async_connection().await {
+        Ok(con) => con,
+        Err(e) => {
+            tracing::warn!(error = %e, cache_key, "Redis unavailable, falling back to S3");
+            return get_object_direct(config, project_id, filename).await;
+        }
+    };
 
     // Check if the object is already in the cache and reset its TTL on access.
     // This ensures frequently accessed layers stay cached longer.

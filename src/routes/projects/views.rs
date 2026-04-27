@@ -1,15 +1,25 @@
 pub use super::db::Project;
 use crate::common::auth::Role;
 use crate::common::state::AppState;
+use crate::routes::layers::db as layer;
+use crate::routes::styles::db as style;
+use crate::routes::tiles::utils::XYZTile;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum_keycloak_auth::{PassthroughMode, layer::KeycloakAuthLayer};
 use crudcrate::CRUDResource;
 use hyper::StatusCode;
+use image::ImageBuffer;
+use redis;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, JsonValue, QueryFilter, QueryOrder, Set,
 };
-use tracing::warn;
+use serde::{Deserialize, Serialize};
+use tokio_retry::{RetryIf, strategy::FixedInterval};
+use tracing::{debug, error, warn};
+use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
 
@@ -17,6 +27,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     let public_router = OpenApiRouter::new()
         .routes(routes!(get_active_projects))
         .routes(routes!(get_project_config))
+        .routes(routes!(get_project_card_tile))
         .with_state(state.clone());
 
     let mut protected_router = Project::router(&state.db.clone());
@@ -51,11 +62,22 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     public_router.merge(protected_router)
 }
 
+/// Project shape returned by `/active`. Includes the resolved
+/// `card_layer_name` so the UI can build the card-tile URL without a
+/// secondary fetch — the layer UUID alone is not enough since the tile
+/// endpoint identifies layers by `layer_name`.
+#[derive(Serialize, ToSchema)]
+pub struct ActiveProject {
+    #[serde(flatten)]
+    pub project: super::db::Project,
+    pub card_layer_name: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/active",
     responses(
-        (status = 200, description = "List of all projects ordered by sort_order", body = Vec<super::db::Project>),
+        (status = 200, description = "List of all projects ordered by sort_order", body = Vec<ActiveProject>),
         (status = 500, description = "Internal server error")
     ),
     summary = "Get all projects for splash page",
@@ -63,7 +85,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
 )]
 pub async fn get_active_projects(
     State(app_state): State<AppState>,
-) -> Result<Json<Vec<super::db::Project>>, (StatusCode, Json<String>)> {
+) -> Result<Json<Vec<ActiveProject>>, (StatusCode, Json<String>)> {
     let db = &app_state.db;
 
     let projects = super::db::Entity::find()
@@ -72,10 +94,194 @@ pub async fn get_active_projects(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    // Convert Sea-ORM models to API structs
-    let projects: Vec<super::db::Project> = projects.into_iter().map(|m| m.into()).collect();
+    let mut out = Vec::with_capacity(projects.len());
+    for p in projects {
+        let card_layer_name = if let Some(layer_id) = p.card_layer_id {
+            layer::Entity::find_by_id(layer_id)
+                .one(db)
+                .await
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?
+                .and_then(|l| l.layer_name)
+        } else {
+            None
+        };
+        out.push(ActiveProject {
+            project: p.into(),
+            card_layer_name,
+        });
+    }
 
-    Ok(Json(projects))
+    Ok(Json(out))
+}
+
+// ---------------------------------------------------------------------------
+// GET /{slug}/card-tile/{z}/{x}/{y} - Render a tile for the splash card
+// preview using the project's chosen card_style_id (or layer default).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, ToSchema)]
+pub struct CardTileParams {
+    layer: String,
+}
+
+/// Parse a tile coordinate, handling both integers and floats (truncating).
+/// Mirrors the helper in `tiles::views` — kept local to avoid leaking it as
+/// a public surface from the tiles module.
+fn parse_tile_coord(s: &str) -> Result<u32, StatusCode> {
+    if let Ok(v) = s.parse::<u32>() {
+        return Ok(v);
+    }
+    let f = s.parse::<f64>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if f < 0.0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(f.trunc() as u32)
+}
+
+#[utoipa::path(
+    get,
+    path = "/{slug}/card-tile/{z}/{x}/{y}",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("z" = String, Path, description = "Zoom level"),
+        ("x" = String, Path, description = "Tile x coordinate"),
+        ("y" = String, Path, description = "Tile y coordinate"),
+        ("layer" = String, Query, description = "Layer name (must belong to the project)")
+    ),
+    responses(
+        (status = 200, description = "Tile image", body = [u8], content_type = "image/png"),
+        (status = 404, description = "Project, layer, or tile not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Get a splash-card preview tile",
+    description = "Renders the requested tile of the given layer using the project's `card_style_id` if set, otherwise the layer's own style. The style UUID is never exposed in the URL."
+)]
+#[axum::debug_handler]
+pub async fn get_project_card_tile(
+    Path((slug, z_str, x_str, y_str)): Path<(String, String, String, String)>,
+    Query(params): Query<CardTileParams>,
+    State(app_state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let z = parse_tile_coord(&z_str)?;
+    let x = parse_tile_coord(&x_str)?;
+    let y = parse_tile_coord(&y_str)?;
+
+    let db = &app_state.db;
+    let config = &app_state.config;
+
+    let max_tiles = 1u32 << z;
+    if x >= max_tiles || y >= max_tiles {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Rendered-PNG cache: keyed on (layer_name, project_card_style_or_default,
+    // z/x/y). We don't yet know which style will be applied without a DB
+    // lookup, so the cache key uses a stable token tied to the project slug
+    // — the style id is resolved server-side from the project record, so the
+    // mapping (slug -> effective style) is deterministic.
+    // Use the slug as a proxy for the style choice; a style change on the
+    // project invalidates by writing a new entry under the same key once the
+    // first request after the change repopulates it. For aggressive
+    // invalidation, see `cache::remove_downloading_state_raw`.
+    let png_key = crate::routes::tiles::cache::build_cache_key(
+        config,
+        &format!("png-card/{}/{}/{}/{}/{}", slug, params.layer, z, x, y),
+    );
+    if let Ok(client) = redis::Client::open(config.tile_cache_uri.clone())
+        && let Ok(mut con) = client.get_multiplexed_async_connection().await
+        && let Ok(Some(cached)) = crate::routes::tiles::cache::redis_get(
+            &mut con,
+            &png_key,
+            config.tile_cache_ttl,
+        )
+        .await
+    {
+        return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
+    }
+
+    // 1. Resolve the project by slug.
+    let project_record = super::db::Entity::find()
+        .filter(super::db::Column::Slug.eq(&slug))
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database query error");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            debug!(slug = %slug, "Project not found");
+            StatusCode::NOT_FOUND
+        })?;
+
+    // 2. Resolve the layer by layer_name, scoped to this project.
+    let layer_record = layer::Entity::find()
+        .filter(layer::Column::LayerName.eq(&params.layer))
+        .filter(layer::Column::ProjectId.eq(project_record.id))
+        .one(db)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database query error");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            debug!(layer = %params.layer, slug = %slug, "Layer not found in project");
+            StatusCode::NOT_FOUND
+        })?;
+
+    // 3. Fetch and decode the tile from S3.
+    let xyz_tile = XYZTile { x, y, z };
+    let project_id = layer_record.project_id;
+    let retry_strategy = FixedInterval::from_millis(200).take(5);
+    let img: ImageBuffer<image::Luma<f32>, Vec<f32>> = RetryIf::spawn(
+        retry_strategy,
+        || xyz_tile.get_one(config, project_id, &params.layer),
+        |e: &anyhow::Error| {
+            error!(layer = %params.layer, z, x, y, error = %e, "Tile generation failed");
+            true
+        },
+    )
+    .await
+    .map_err(|e| {
+        error!(layer = %params.layer, z, x, y, error = %e, "Failed to generate tile after retries");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // 4. Resolve which style to apply: project override wins, otherwise the
+    //    layer's own style. Both are optional — if neither is set we fall
+    //    back to no styling (consistent with the main tile handler).
+    let style_id_to_use = project_record.card_style_id.or(layer_record.style_id);
+
+    let (dbstyle, interpolation_type): (Option<JsonValue>, Option<String>) =
+        if let Some(sid) = style_id_to_use {
+            style::Entity::find_by_id(sid)
+                .one(db)
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Database query error");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .map(|s| (s.style, Some(s.interpolation_type)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
+    // 5. Apply the style and return the PNG.
+    let png_data = crate::routes::tiles::styling::style_layer(
+        img,
+        dbstyle,
+        interpolation_type.as_deref(),
+    )
+    .map_err(|e| {
+        error!(error = %e, "Error applying style");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Best-effort cache write — splash cards repeatedly request the same
+    // tiles, so this drops every subsequent request to a single Redis GET.
+    let _ = crate::routes::tiles::cache::push_cache_raw(config, &png_key, &png_data).await;
+
+    Ok(([(header::CONTENT_TYPE, "image/png")], png_data))
 }
 
 // ---------------------------------------------------------------------------

@@ -36,6 +36,11 @@ pub struct Model {
     /// user-selected scenario. Null disables the override.
     pub historical_year: Option<i32>,
     pub tab_config: Option<serde_json::Value>,
+    /// Layer rendered as an overlay on the splash card preview map.
+    pub card_layer_id: Option<Uuid>,
+    /// Optional style override applied to `card_layer_id` on the splash card
+    /// preview. Falls back to the layer's own `style_id` when null.
+    pub card_style_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

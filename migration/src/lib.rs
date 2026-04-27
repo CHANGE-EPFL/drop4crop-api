@@ -17,6 +17,7 @@ mod m20260423_000001_add_project_relation_sort_order;
 mod m20260423_000002_add_tab_config;
 mod m20260423_000003_drop_country_tables;
 mod m20260424_000001_add_historical_year;
+mod m20260427_000001_add_project_card_overlay;
 
 pub struct Migrator;
 
@@ -41,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260423_000002_add_tab_config::Migration),
             Box::new(m20260423_000003_drop_country_tables::Migration),
             Box::new(m20260424_000001_add_historical_year::Migration),
+            Box::new(m20260427_000001_add_project_card_overlay::Migration),
         ]
     }
 }

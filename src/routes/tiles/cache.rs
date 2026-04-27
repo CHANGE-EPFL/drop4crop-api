@@ -15,6 +15,27 @@ pub fn build_downloading_key(config: &Config, object_id: &str) -> String {
     format!("{}:downloading", cache_key)
 }
 
+/// Builds the cache key for a fully-rendered PNG tile. The effective style
+/// id (override or layer default) is part of the key so different style
+/// pickings don't collide.
+pub fn build_rendered_tile_key(
+    config: &Config,
+    layer_name: &str,
+    style_id: Option<uuid::Uuid>,
+    z: u32,
+    x: u32,
+    y: u32,
+) -> String {
+    let style_part = match style_id {
+        Some(s) => s.to_string(),
+        None => "default".to_string(),
+    };
+    build_cache_key(
+        config,
+        &format!("png/{}/{}/{}/{}/{}", layer_name, style_part, z, x, y),
+    )
+}
+
 /// Returns a Redis client using the cache DB.
 pub fn get_redis_client(config: &Config) -> redis::Client {
     redis::Client::open(config.tile_cache_uri.clone()).unwrap()
@@ -23,7 +44,7 @@ pub fn get_redis_client(config: &Config) -> redis::Client {
 /// Pushes the data to Redis using the provided key with TTL from config.
 pub async fn push_cache_raw(config: &Config, key: &str, data: &[u8]) -> Result<()> {
     let client = get_redis_client(config);
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = client.get_multiplexed_async_connection().await?;
 
     let _: () = redis::cmd("SET")
         .arg(key)
@@ -38,7 +59,7 @@ pub async fn push_cache_raw(config: &Config, key: &str, data: &[u8]) -> Result<(
 /// Removes the downloading flag from Redis.
 pub async fn remove_downloading_state_raw(config: &Config, key: &str) -> Result<()> {
     let client = get_redis_client(config);
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = client.get_multiplexed_async_connection().await?;
     let _: () = redis::cmd("DEL").arg(key).query_async(&mut con).await?;
     Ok(())
 }

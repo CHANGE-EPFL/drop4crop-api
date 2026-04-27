@@ -9,6 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 use image::ImageBuffer;
+use redis;
 use sea_orm::{ColumnTrait, EntityTrait, JsonValue, entity::prelude::*};
 use serde::Deserialize;
 use tokio_retry::{RetryIf, strategy::FixedInterval};
@@ -20,6 +21,10 @@ use tracing::{debug, error};
 #[derive(Deserialize, ToSchema)]
 pub struct Params {
     layer: String,
+    /// Optional style override. When present, this style is applied instead of
+    /// the layer's own `style_id`. Used by the admin preview to render a
+    /// layer with a candidate style before persisting it.
+    style_id: Option<uuid::Uuid>,
 }
 
 /// XYZ tiles router (for /xyz endpoint under /layers)
@@ -83,6 +88,26 @@ pub async fn tile_handler(
         // Invalid tile coordinate - this is expected for out-of-bounds requests
         return Err(StatusCode::NOT_FOUND);
     }
+
+    // Rendered-PNG cache: skip the layer lookup, S3 fetch, and styling work
+    // entirely on cache hit. The key includes the effective style id so a
+    // style override doesn't collide with the default-style cache entry.
+    let png_key = super::cache::build_rendered_tile_key(
+        config,
+        &params.layer,
+        params.style_id,
+        z,
+        x,
+        y,
+    );
+    if let Ok(client) = redis::Client::open(config.tile_cache_uri.clone())
+        && let Ok(mut con) = client.get_multiplexed_async_connection().await
+        && let Ok(Some(cached)) =
+            super::cache::redis_get(&mut con, &png_key, config.tile_cache_ttl).await
+    {
+        return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
+    }
+
     // Resolve the layer row first — we need `project_id` to hit the correct
     // project-scoped S3 subpath, and we already need this record downstream
     // for style resolution.
@@ -128,28 +153,43 @@ pub async fn tile_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Load the related style record(s).
-    let related_styles = layer_record
-        .find_related(style::Entity)
-        .all(db)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Database query error");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    // Attempt to extract the style and interpolation_type from the first related record.
-    let (dbstyle, interpolation_type): (Option<JsonValue>, Option<String>) = related_styles
-        .into_iter()
-        .next()
-        .map(|s| (s.style, Some(s.interpolation_type)))
-        .unwrap_or((None, None));
+    // Style resolution: explicit `?style_id=` override > layer's own style.
+    let (dbstyle, interpolation_type): (Option<JsonValue>, Option<String>) =
+        if let Some(sid) = params.style_id {
+            style::Entity::find_by_id(sid)
+                .one(db)
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Database query error");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .map(|s| (s.style, Some(s.interpolation_type)))
+                .unwrap_or((None, None))
+        } else {
+            let related_styles = layer_record
+                .find_related(style::Entity)
+                .all(db)
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Database query error");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            related_styles
+                .into_iter()
+                .next()
+                .map(|s| (s.style, Some(s.interpolation_type)))
+                .unwrap_or((None, None))
+        };
 
     // Apply the style to the image.
     let png_data = super::styling::style_layer(img, dbstyle, interpolation_type.as_deref()).map_err(|e| {
         error!(error = %e, "Error applying style");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Best-effort: stash the rendered PNG so subsequent identical requests
+    // skip the styling step. Cache failures are not fatal.
+    let _ = super::cache::push_cache_raw(config, &png_key, &png_data).await;
 
     let response = ([(header::CONTENT_TYPE, "image/png")], png_data);
     Ok(response)

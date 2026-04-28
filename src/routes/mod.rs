@@ -9,6 +9,7 @@ pub mod styles;
 pub mod tiles;
 pub mod variables;
 pub mod water_models;
+pub mod site_settings;
 pub mod stats_sync;
 
 use crate::{common::state::AppState, config::Config};
@@ -335,6 +336,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/variables", variables::views::router(&app_state))
         .nest("/api/projects", projects::views::router(&app_state))
         .nest("/api/showcase-items", showcase_items::views::router(&app_state))
+        .nest("/api/site-settings", site_settings::views::router(&app_state))
         .nest("/api/styles", styles::views::router(&app_state))
         .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB to match Uppy configuration
         .layer(rate_limit_stack.clone()) // Apply rate limiting to API routes

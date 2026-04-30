@@ -17,8 +17,8 @@ pub struct Model {
     #[crudcrate(filterable, fulltext)]
     pub slug: String,
     #[crudcrate(filterable, fulltext)]
-    pub name: String,
-    pub abbreviation: String,
+    pub name: Option<String>,
+    pub abbreviation: Option<String>,
     pub subscript: Option<String>,
     pub unit: String,
     #[crudcrate(filterable)]

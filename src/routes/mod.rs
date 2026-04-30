@@ -45,6 +45,47 @@ struct IpRateInfo {
     last_reset: DateTime<Utc>,
 }
 
+struct TileRequestAggregator {
+    ok_count: u64,
+    err_count: u64,
+    last_flush: DateTime<Utc>,
+}
+
+impl TileRequestAggregator {
+    fn new() -> Self {
+        Self {
+            ok_count: 0,
+            err_count: 0,
+            last_flush: Utc::now(),
+        }
+    }
+
+    fn record(&mut self, status: u16) {
+        if status < 400 {
+            self.ok_count += 1;
+        } else {
+            self.err_count += 1;
+        }
+    }
+
+    fn flush_if_due(&mut self) -> Option<(u64, u64, f64)> {
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(self.last_flush);
+        let total = self.ok_count + self.err_count;
+        let time_due = elapsed >= Duration::seconds(30) && total > 0;
+        let volume_due = total >= 10_000;
+        if time_due || volume_due {
+            let result = (self.ok_count, self.err_count, elapsed.num_milliseconds() as f64 / 1000.0);
+            self.ok_count = 0;
+            self.err_count = 0;
+            self.last_flush = now;
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
 impl RateLimitTracker {
     fn new() -> Self {
         Self {
@@ -163,10 +204,17 @@ fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
     }
 }
 
+fn is_tile_request(path: &str) -> bool {
+    path.starts_with("/api/layers/xyz/")
+        || path.starts_with("/api/site-settings/globe-tile/")
+        || path.contains("/card-tile/")
+}
+
 async fn log_request_ip(
     axum::extract::State(tracker): axum::extract::State<Arc<Mutex<RateLimitTracker>>>,
     axum::extract::State(rate_limit_config): axum::extract::State<RateLimitConfig>,
     axum::extract::State(config): axum::extract::State<Config>,
+    axum::extract::State(tile_agg): axum::extract::State<Arc<Mutex<TileRequestAggregator>>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -175,14 +223,11 @@ async fn log_request_ip(
     let uri_path = request.uri().path().to_string();
     let query_string = request.uri().query().unwrap_or("");
 
-    // Extract the real IP from the request extensions (set by RealIpLayer)
     let ip_opt = request.extensions().get::<RealIp>().map(|r| r.ip());
 
-    // Use single rate limit for all endpoints
     let per_ip_limit = rate_limit_config.per_ip;
     let global_limit = rate_limit_config.global;
 
-    // Record request and get counts
     let (global_count, ip_count) = if let Some(ip) = ip_opt {
         let mut tracker = tracker.lock().unwrap();
         tracker.cleanup_old_entries();
@@ -191,33 +236,33 @@ async fn log_request_ip(
         (0, 0)
     };
 
-    // Track statistics for layer access
     track_layer_statistics(&uri_path, query_string, &config);
 
-    // Execute the request
     let response = next.run(request).await;
     let status = response.status().as_u16();
 
-    if let Some(ip) = ip_opt {
-        // Check if over limit (0 means infinite)
-        // Show "X" only if over limit, otherwise blank
-        let global_status = if global_limit != 0 && global_count > global_limit.into() {
-            "X"
-        } else {
-            " "
-        };
-
-        let ip_status = if per_ip_limit != 0 && ip_count > per_ip_limit.into() {
-            "X"
-        } else {
-            " "
-        };
-
-        // Format limits (0 = ∞)
+    if is_tile_request(&uri_path) {
+        // Aggregate tile requests — log summary every 30s instead of per-request
+        let mut agg = tile_agg.lock().unwrap();
+        agg.record(status);
+        if let Some((ok, err, secs)) = agg.flush_if_due() {
+            info!(
+                ok_count = ok,
+                err_count = err,
+                period_secs = format!("{:.0}", secs),
+                "Tile requests"
+            );
+        }
+        // Always log tile errors individually
+        if status >= 400 {
+            info!(status, method = %method, uri = %uri_path, "Tile request error");
+        }
+    } else if let Some(ip) = ip_opt {
+        let global_status = if global_limit != 0 && global_count > global_limit.into() { "X" } else { " " };
+        let ip_status = if per_ip_limit != 0 && ip_count > per_ip_limit.into() { "X" } else { " " };
         let global_limit_str = if global_limit == 0 { "∞   ".to_string() } else { format!("{:4}", global_limit) };
         let ip_limit_str = if per_ip_limit == 0 { "∞  ".to_string() } else { format!("{:3}", per_ip_limit) };
 
-        // Format: [YYYY-MM-DD HH:MM:SS | IP_ADDRESS | G:COUNT/LIMIT X | IP:COUNT/LIMIT X | CODE]
         info!(
             timestamp = %start_time.format("%Y-%m-%d %H:%M:%S"),
             ip = %format!("{}", ip),
@@ -298,6 +343,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         global: config.rate_limit_global,
     };
     let rate_limit_tracker = Arc::new(Mutex::new(RateLimitTracker::new()));
+    let tile_aggregator = Arc::new(Mutex::new(TileRequestAggregator::new()));
 
     // Build rate-limited middleware stack
     // Middleware order (outer to inner):
@@ -306,14 +352,15 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
     //   3. GovernorLayer - Applies rate limiting based on IP
     let rate_limit_stack = ServiceBuilder::new()
         .layer(RealIpLayer::default())
-        .layer(middleware::from_fn_with_state((rate_limit_tracker.clone(), rate_limit_config.clone(), config.clone()),
-            |axum::extract::State((tracker, rate_limit_config, config)): axum::extract::State<(Arc<Mutex<RateLimitTracker>>, RateLimitConfig, Config)>,
+        .layer(middleware::from_fn_with_state((rate_limit_tracker.clone(), rate_limit_config.clone(), config.clone(), tile_aggregator.clone()),
+            |axum::extract::State((tracker, rate_limit_config, config, tile_agg)): axum::extract::State<(Arc<Mutex<RateLimitTracker>>, RateLimitConfig, Config, Arc<Mutex<TileRequestAggregator>>)>,
              request: Request,
              next: Next| async move {
                 log_request_ip(
                     axum::extract::State(tracker),
                     axum::extract::State(rate_limit_config),
                     axum::extract::State(config),
+                    axum::extract::State(tile_agg),
                     request,
                     next
                 ).await

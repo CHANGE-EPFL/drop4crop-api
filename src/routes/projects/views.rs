@@ -32,6 +32,39 @@ pub fn router(state: &AppState) -> OpenApiRouter {
 
     let mut protected_router = Project::router(&state.db.clone());
 
+    // Cache invalidation: when a project's card settings change, clear card tiles.
+    {
+        let config = state.config.clone();
+        let db = state.db.clone();
+        protected_router =
+            protected_router.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let config = config.clone();
+                let db = db.clone();
+                async move {
+                    let method = req.method().clone();
+                    let path = req.uri().path().to_string();
+                    let response = next.run(req).await;
+
+                    let is_mutating = matches!(
+                        method,
+                        axum::http::Method::PUT | axum::http::Method::DELETE
+                    );
+                    if response.status().is_success() && is_mutating {
+                        if let Some(project_id) = path.rsplit('/').find_map(|s| uuid::Uuid::parse_str(s).ok()) {
+                            tokio::spawn(async move {
+                                if let Ok(Some(project)) = super::db::Entity::find_by_id(project_id).one(&db).await {
+                                    let _ = crate::routes::tiles::cache::invalidate_card_tiles(&config, &project.slug).await;
+                                    crate::routes::tiles::warming::warm_card_tiles_for_project(&config, &db, &project).await;
+                                }
+                            });
+                        }
+                    }
+
+                    response
+                }
+            }));
+    }
+
     let protected_custom_routes = OpenApiRouter::new()
         .routes(routes!(set_project_crops))
         .routes(routes!(set_project_water_models))

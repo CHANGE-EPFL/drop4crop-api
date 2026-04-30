@@ -151,6 +151,16 @@ pub async fn update_site_settings(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?;
 
+    // Invalidate and re-warm globe tiles when settings change
+    let config = app_state.config.clone();
+    let db_clone = app_state.db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::routes::tiles::cache::invalidate_globe_tiles(&config).await {
+            error!(error = %e, "Failed to invalidate globe tiles");
+        }
+        crate::routes::tiles::warming::warm_globe_tiles(&config, &db_clone).await;
+    });
+
     load_settings(db).await.map(Json)
 }
 

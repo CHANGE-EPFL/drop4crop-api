@@ -659,7 +659,7 @@ async fn get_cache_info(
 
             // Count cached layers (exclude stats and internal keys)
             let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
-            let all_keys: Vec<String> = scan_keys(&mut con, &cache_pattern).await.unwrap_or_default();
+            let all_keys: Vec<String> = crate::routes::tiles::cache::scan_keys(&mut con, &cache_pattern).await.unwrap_or_default();
             let cached_layers_count = all_keys.iter()
                 .filter(|k| !k.contains("/stats:") && !k.ends_with(":downloading"))
                 .count();
@@ -704,7 +704,7 @@ async fn get_cache_keys(
     // Match actual cache key pattern: {app}-{deployment}/{filename}
     // Exclude stats and lock keys
     let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
-    let all_keys = scan_keys(&mut con, &cache_pattern)
+    let all_keys = crate::routes::tiles::cache::scan_keys(&mut con, &cache_pattern)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -797,6 +797,12 @@ async fn get_cache_keys(
 }
 
 /// GET /api/admin/cache/aggregated - Aggregated cache data grouped by layer
+///
+/// Parses Redis cache keys into four categories and groups by layer name:
+///   COG file:   `{prefix}/{layer}.tif`  or  `{prefix}/{project_uuid}/{layer}.tif`
+///   XYZ tile:   `{prefix}/png/{layer}/{style_id}/{z}/{x}/{y}`
+///   Globe tile: `{prefix}/png-globe/{layer}/{z}/{x}/{y}`
+///   Card tile:  `{prefix}/png-card/{project_slug}/{layer}/{z}/{x}/{y}`
 async fn get_cache_aggregated(
     State(app_state): State<AppState>,
 ) -> Result<Json<Vec<AggregatedCacheEntry>>, StatusCode> {
@@ -810,7 +816,7 @@ async fn get_cache_aggregated(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
-    let all_keys = scan_keys(&mut con, &cache_pattern)
+    let all_keys = crate::routes::tiles::cache::scan_keys(&mut con, &cache_pattern)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -820,23 +826,11 @@ async fn get_cache_aggregated(
         .filter(|k| !k.contains("/stats:") && !k.ends_with(":downloading"))
         .collect();
 
-    let mut entries: Vec<AggregatedCacheEntry> = Vec::new();
+    // Accumulator: layer_name → (cog_size, cog_ttl, png_count, png_size)
+    let mut map: HashMap<String, (usize, Option<f64>, usize, usize)> = HashMap::new();
 
     for key in &keys {
         let stem = key.strip_prefix(&prefix).unwrap_or(key);
-
-        // Strip project UUID prefix if present, then strip .tif
-        let filename_part = if let Some(slash_pos) = stem.find('/') {
-            let maybe_uuid = &stem[..slash_pos];
-            if uuid::Uuid::parse_str(maybe_uuid).is_ok() {
-                &stem[slash_pos + 1..]
-            } else {
-                stem
-            }
-        } else {
-            stem
-        };
-        let layer_name = filename_part.trim_end_matches(".tif").to_string();
 
         let size_bytes: usize = redis::cmd("STRLEN")
             .arg(key)
@@ -850,24 +844,72 @@ async fn get_cache_aggregated(
             .await
             .unwrap_or(-2);
 
-        let cog_ttl_hours = if ttl_seconds > 0 {
+        let ttl_hours = if ttl_seconds > 0 {
             Some(ttl_seconds as f64 / 3600.0)
         } else {
             None
         };
 
-        entries.push(AggregatedCacheEntry {
-            layer_name,
-            layer_id: None,
-            total_size_bytes: size_bytes,
-            total_size_mb: size_bytes as f64 / (1024.0 * 1024.0),
-            cog_cached: size_bytes > 0,
-            cog_size_mb: size_bytes as f64 / (1024.0 * 1024.0),
-            cog_ttl_hours,
-            png_tile_count: 0,
-            png_tile_size_mb: 0.0,
-        });
+        // Parse key to determine type and extract layer name
+        if let Some(rest) = stem.strip_prefix("png/") {
+            // XYZ tile: png/{layer}/{style_id}/{z}/{x}/{y}
+            if let Some(layer_name) = rest.split('/').next() {
+                let entry = map.entry(layer_name.to_string()).or_insert((0, None, 0, 0));
+                entry.2 += 1;
+                entry.3 += size_bytes;
+            }
+        } else if let Some(rest) = stem.strip_prefix("png-globe/") {
+            // Globe tile: png-globe/{layer}/{z}/{x}/{y}
+            if let Some(layer_name) = rest.split('/').next() {
+                let entry = map.entry(layer_name.to_string()).or_insert((0, None, 0, 0));
+                entry.2 += 1;
+                entry.3 += size_bytes;
+            }
+        } else if let Some(rest) = stem.strip_prefix("png-card/") {
+            // Card tile: png-card/{project_slug}/{layer}/{z}/{x}/{y}
+            let parts: Vec<&str> = rest.splitn(3, '/').collect();
+            if parts.len() >= 2 {
+                let layer_name = parts[1];
+                let entry = map.entry(layer_name.to_string()).or_insert((0, None, 0, 0));
+                entry.2 += 1;
+                entry.3 += size_bytes;
+            }
+        } else {
+            // COG file: {layer}.tif  or  {project_uuid}/{layer}.tif
+            let filename_part = if let Some(slash_pos) = stem.find('/') {
+                let maybe_uuid = &stem[..slash_pos];
+                if uuid::Uuid::parse_str(maybe_uuid).is_ok() {
+                    &stem[slash_pos + 1..]
+                } else {
+                    stem
+                }
+            } else {
+                stem
+            };
+            let layer_name = filename_part.trim_end_matches(".tif").to_string();
+            let entry = map.entry(layer_name).or_insert((0, None, 0, 0));
+            entry.0 = size_bytes;
+            entry.1 = ttl_hours;
+        }
     }
+
+    let mut entries: Vec<AggregatedCacheEntry> = map
+        .into_iter()
+        .map(|(layer_name, (cog_size, cog_ttl, png_count, png_size))| {
+            let total = cog_size + png_size;
+            AggregatedCacheEntry {
+                layer_name,
+                layer_id: None,
+                total_size_bytes: total,
+                total_size_mb: total as f64 / (1024.0 * 1024.0),
+                cog_cached: cog_size > 0,
+                cog_size_mb: cog_size as f64 / (1024.0 * 1024.0),
+                cog_ttl_hours: cog_ttl,
+                png_tile_count: png_count,
+                png_tile_size_mb: png_size as f64 / (1024.0 * 1024.0),
+            }
+        })
+        .collect();
 
     // Batch-resolve layer_ids from database
     use crate::routes::layers::db as layer;
@@ -906,7 +948,7 @@ async fn clear_all_cache(
 
     // Match actual cache key pattern and filter out stats/lock keys
     let cache_pattern = format!("{}-{}/*", config.app_name, config.deployment);
-    let all_keys = scan_keys(&mut con, &cache_pattern)
+    let all_keys = crate::routes::tiles::cache::scan_keys(&mut con, &cache_pattern)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -925,8 +967,15 @@ async fn clear_all_cache(
 
     info!(count = keys.len(), "Cleared cache keys");
 
+    // Re-warm important tiles after clearing
+    let warm_config = app_state.config.clone();
+    let warm_db = app_state.db.clone();
+    tokio::spawn(async move {
+        crate::routes::tiles::warming::warm_all_important_tiles(&warm_config, &warm_db).await;
+    });
+
     Ok(Json(json!({
-        "message": format!("Cleared {} cached layers", keys.len()),
+        "message": format!("Cleared {} cached layers, re-warming important tiles", keys.len()),
         "keys_cleared": keys.len()
     })))
 }
@@ -1166,7 +1215,7 @@ async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<Li
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let stats_pattern = format!("{}-{}/stats:{}:*", config.app_name, config.deployment, today);
 
-    let keys = scan_keys(&mut con, &stats_pattern)
+    let keys = crate::routes::tiles::cache::scan_keys(&mut con, &stats_pattern)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1236,33 +1285,4 @@ fn parse_live_stats_key(key: &str, config: &crate::config::Config) -> Option<(St
     } else {
         None
     }
-}
-
-/// Helper function to scan Redis keys
-async fn scan_keys(
-    con: &mut redis::aio::MultiplexedConnection,
-    pattern: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut keys = Vec::new();
-    let mut cursor = 0u64;
-
-    loop {
-        let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(con)
-            .await?;
-
-        keys.extend(batch);
-        cursor = new_cursor;
-
-        if cursor == 0 {
-            break;
-        }
-    }
-
-    Ok(keys)
 }

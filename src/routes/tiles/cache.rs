@@ -1,7 +1,7 @@
 use crate::config::Config;
 use anyhow::Result;
 use redis;
-use tracing::error;
+use tracing::{error, info};
 
 /// Builds the cache key based on the app configuration and object ID.
 pub fn build_cache_key(config: &Config, object_id: &str) -> String {
@@ -105,6 +105,103 @@ pub fn build_stats_key(config: &Config, layer_id: &str, stat_type: &str) -> Stri
     let prefix = format!("{}-{}", config.app_name, config.deployment);
     let today = chrono::Utc::now().format("%Y-%m-%d");
     format!("{}/stats:{}:{}:{}", prefix, today, layer_id, stat_type)
+}
+
+/// Scans Redis for all keys matching the given glob pattern.
+pub async fn scan_keys(
+    con: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
+) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut cursor = 0u64;
+
+    loop {
+        let (new_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query_async(con)
+            .await?;
+
+        keys.extend(batch);
+        cursor = new_cursor;
+
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    Ok(keys)
+}
+
+/// Deletes all cache keys matching the given glob pattern.
+/// Returns the number of keys deleted. Skips stats and downloading keys.
+pub async fn delete_keys_by_pattern(config: &Config, pattern: &str) -> Result<usize> {
+    let client = get_redis_client(config);
+    let mut con = client.get_multiplexed_async_connection().await?;
+
+    let keys = scan_keys(&mut con, pattern).await?;
+    let keys: Vec<String> = keys
+        .into_iter()
+        .filter(|k| !k.contains("/stats:") && !k.ends_with(":downloading"))
+        .collect();
+
+    let count = keys.len();
+    if !keys.is_empty() {
+        let _: () = redis::cmd("DEL")
+            .arg(&keys)
+            .query_async(&mut con)
+            .await?;
+    }
+
+    if count > 0 {
+        info!(count, pattern, "Invalidated cache keys");
+    }
+
+    Ok(count)
+}
+
+/// Invalidates all rendered tiles that used a particular style.
+pub async fn invalidate_style_tiles(config: &Config, style_id: uuid::Uuid) -> Result<usize> {
+    let pattern = format!("{}-{}/*/{}/{}/*", config.app_name, config.deployment, "png*", style_id);
+    delete_keys_by_pattern(config, &pattern).await
+}
+
+/// Invalidates all globe tiles.
+pub async fn invalidate_globe_tiles(config: &Config) -> Result<usize> {
+    let pattern = format!("{}-{}/png-globe/*", config.app_name, config.deployment);
+    delete_keys_by_pattern(config, &pattern).await
+}
+
+/// Invalidates all card tiles for a specific project slug.
+pub async fn invalidate_card_tiles(config: &Config, project_slug: &str) -> Result<usize> {
+    let pattern = format!(
+        "{}-{}/png-card/{}/*",
+        config.app_name, config.deployment, project_slug
+    );
+    delete_keys_by_pattern(config, &pattern).await
+}
+
+/// Invalidates all rendered tiles for a specific layer.
+pub async fn invalidate_layer_tiles(config: &Config, layer_name: &str) -> Result<usize> {
+    let pattern = format!(
+        "{}-{}/png/{}/*",
+        config.app_name, config.deployment, layer_name
+    );
+    delete_keys_by_pattern(config, &pattern).await
+}
+
+/// Removes the TTL on a cache key, making it persistent (never expires).
+pub async fn persist_key(config: &Config, key: &str) -> Result<()> {
+    let client = get_redis_client(config);
+    let mut con = client.get_multiplexed_async_connection().await?;
+    let _: () = redis::cmd("PERSIST")
+        .arg(key)
+        .query_async(&mut con)
+        .await?;
+    Ok(())
 }
 
 /// Increments a statistics counter in Redis asynchronously.

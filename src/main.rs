@@ -14,7 +14,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,drop4crop_api=debug".into()),
+                .unwrap_or_else(|_| "info,drop4crop_api=debug,sqlx=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -57,6 +57,23 @@ async fn main() {
     // Spawn background worker for distributed layer recalculation jobs
     info!("Starting distributed recalculation worker (polling every 5 seconds)...");
     tokio::spawn(routes::layers::worker::start_worker(config.clone(), db.clone()));
+
+    // Warm important tiles in the background (globe, project cards, showcase items)
+    {
+        let warm_config = config.clone();
+        let warm_db = db.clone();
+        tokio::spawn(async move {
+            routes::tiles::warming::warm_all_important_tiles(&warm_config, &warm_db).await;
+        });
+    }
+
+    // Periodic watchdog: checks every 5 minutes that important tiles are still cached
+    info!("Starting cache warming watchdog (every 300 seconds)...");
+    tokio::spawn(routes::tiles::warming::spawn_warming_watchdog(
+        config.clone(),
+        db.clone(),
+        300,
+    ));
 
     let addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
     info!("Server listening on {}", addr);

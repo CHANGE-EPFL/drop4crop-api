@@ -84,6 +84,61 @@ pub fn router(state: &AppState) -> OpenApiRouter {
     protected_router = protected_router
         .merge(protected_custom_routes);
 
+    // Cache invalidation: when a layer is updated, clear its rendered tiles
+    // and any globe/card tiles that reference it.
+    {
+        let config = state.config.clone();
+        let db = state.db.clone();
+        protected_router =
+            protected_router.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let config = config.clone();
+                let db = db.clone();
+                async move {
+                    let method = req.method().clone();
+                    let path = req.uri().path().to_string();
+                    let response = next.run(req).await;
+
+                    let is_mutating = matches!(
+                        method,
+                        axum::http::Method::PUT | axum::http::Method::DELETE
+                    );
+                    if response.status().is_success() && is_mutating {
+                        if let Some(layer_id) = path.rsplit('/').find_map(|s| uuid::Uuid::parse_str(s).ok()) {
+                            tokio::spawn(async move {
+                                if let Ok(Some(layer)) = super::db::Entity::find_by_id(layer_id).one(&db).await {
+                                    if let Some(ref name) = layer.layer_name {
+                                        let _ = crate::routes::tiles::cache::invalidate_layer_tiles(&config, name).await;
+
+                                        // Check if this layer is used as globe layer
+                                        if let Ok(Some(settings)) = crate::routes::site_settings::db::Entity::find().one(&db).await {
+                                            if settings.globe_layer_id == Some(layer_id) {
+                                                let _ = crate::routes::tiles::cache::invalidate_globe_tiles(&config).await;
+                                                crate::routes::tiles::warming::warm_globe_tiles(&config, &db).await;
+                                            }
+                                        }
+
+                                        // Check if this layer is used as any project's card layer
+                                        if let Ok(projects) = crate::routes::projects::db::Entity::find()
+                                            .filter(crate::routes::projects::db::Column::CardLayerId.eq(layer_id))
+                                            .all(&db)
+                                            .await
+                                        {
+                                            for project in &projects {
+                                                let _ = crate::routes::tiles::cache::invalidate_card_tiles(&config, &project.slug).await;
+                                                crate::routes::tiles::warming::warm_card_tiles_for_project(&config, &db, project).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    response
+                }
+            }));
+    }
+
     if let Some(instance) = state.keycloak_auth_instance.clone() {
         protected_router = protected_router.layer(
             KeycloakAuthLayer::<Role>::builder()

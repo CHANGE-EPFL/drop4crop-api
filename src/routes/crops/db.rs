@@ -42,7 +42,8 @@ impl crudcrate::CRUDOperations for CropOperations {
         db: &sea_orm::DatabaseConnection,
         entity: &mut Self::Resource,
     ) -> Result<(), ApiError> {
-        entity.layer_count = Some(fetch_layer_count(db, "crop_id", entity.id).await?);
+        entity.layer_count =
+            Some(crate::common::layer_counts::fetch_layer_count(db, "crop_id", entity.id).await?);
         Ok(())
     }
 
@@ -51,65 +52,11 @@ impl crudcrate::CRUDOperations for CropOperations {
         db: &sea_orm::DatabaseConnection,
         entities: &mut Vec<<Self::Resource as crudcrate::CRUDResource>::ListModel>,
     ) -> Result<(), ApiError> {
-        if entities.is_empty() {
-            return Ok(());
-        }
         let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
-        let map = fetch_layer_counts(db, "crop_id", &ids).await?;
+        let map = crate::common::layer_counts::fetch_layer_counts(db, "crop_id", &ids).await?;
         for e in entities.iter_mut() {
             e.layer_count = Some(map.get(&e.id).copied().unwrap_or(0));
         }
         Ok(())
     }
-}
-
-async fn fetch_layer_count(
-    db: &sea_orm::DatabaseConnection,
-    fk: &str,
-    id: Uuid,
-) -> Result<i64, ApiError> {
-    let sql = format!("SELECT COUNT(*)::bigint AS cnt FROM layer WHERE {fk} = $1");
-    let row = db
-        .query_one(sea_orm::Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            &sql,
-            [id.into()],
-        ))
-        .await
-        .map_err(ApiError::database)?;
-    Ok(row.and_then(|r| r.try_get::<i64>("", "cnt").ok()).unwrap_or(0))
-}
-
-async fn fetch_layer_counts(
-    db: &sea_orm::DatabaseConnection,
-    fk: &str,
-    ids: &[Uuid],
-) -> Result<std::collections::HashMap<Uuid, i64>, ApiError> {
-    let placeholders = (1..=ids.len())
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT {fk} AS fk, COUNT(*)::bigint AS cnt FROM layer \
-         WHERE {fk} IN ({placeholders}) GROUP BY {fk}"
-    );
-    let values: Vec<sea_orm::Value> = ids.iter().map(|id| (*id).into()).collect();
-    let rows = db
-        .query_all(sea_orm::Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            &sql,
-            values,
-        ))
-        .await
-        .map_err(ApiError::database)?;
-    let mut map = std::collections::HashMap::with_capacity(rows.len());
-    for row in rows {
-        if let (Ok(id), Ok(cnt)) = (
-            row.try_get::<Uuid>("", "fk"),
-            row.try_get::<i64>("", "cnt"),
-        ) {
-            map.insert(id, cnt);
-        }
-    }
-    Ok(map)
 }

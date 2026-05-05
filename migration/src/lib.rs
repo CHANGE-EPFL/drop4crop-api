@@ -20,6 +20,8 @@ mod m20260424_000001_add_historical_year;
 mod m20260427_000001_add_project_card_overlay;
 mod m20260428_000001_add_project_globe_overlay;
 mod m20260430_000001_variable_optional_fields_and_indexes;
+mod m20260501_000001_add_project_use_card_as_extent;
+mod m20260501_000002_add_variable_group_table;
 
 pub struct Migrator;
 
@@ -47,6 +49,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260427_000001_add_project_card_overlay::Migration),
             Box::new(m20260428_000001_add_project_globe_overlay::Migration),
             Box::new(m20260430_000001_variable_optional_fields_and_indexes::Migration),
+            Box::new(m20260501_000001_add_project_use_card_as_extent::Migration),
+            Box::new(m20260501_000002_add_variable_group_table::Migration),
         ]
     }
 }

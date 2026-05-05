@@ -208,7 +208,8 @@ pub async fn warm_card_tiles_for_project(
     }
 }
 
-/// Warm showcase item tiles for a project at the project's default zoom.
+/// Warm showcase item tiles at z3 and z4 (the zoom levels users see on
+/// initial page load depending on viewport width).
 async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
     let items = match showcase::Entity::find()
         .filter(showcase::Column::Enabled.eq(true))
@@ -230,36 +231,31 @@ async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
             None => continue,
         };
 
-        let project = match project::Entity::find_by_id(item.project_id).one(db).await {
-            Ok(Some(p)) => p,
-            _ => continue,
-        };
-
         // Warm COG
         let filename = format!("{}.tif", layer_name);
         let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
         let style_id = layer_record.style_id;
-        let z = project.zoom_level.max(1) as u32;
-        let (cx, cy) = lat_lon_to_tile(project.latitude, project.longitude, z);
 
         let mut warmed = 0u32;
-        for (x, y) in tiles_around(cx, cy, z, 1) {
-            let key = cache::build_rendered_tile_key(config, &layer_name, style_id, z, x, y);
-            if render_and_cache_tile(
-                config,
-                layer_record.project_id,
-                &layer_name,
-                style_id,
-                db,
-                z,
-                x,
-                y,
-                &key,
-            )
-            .await
-            {
-                warmed += 1;
+        for z in 3..=4 {
+            for (x, y) in tiles_for_zoom(z) {
+                let key = cache::build_rendered_tile_key(config, &layer_name, style_id, z, x, y);
+                if render_and_cache_tile(
+                    config,
+                    layer_record.project_id,
+                    &layer_name,
+                    style_id,
+                    db,
+                    z,
+                    x,
+                    y,
+                    &key,
+                )
+                .await
+                {
+                    warmed += 1;
+                }
             }
         }
 

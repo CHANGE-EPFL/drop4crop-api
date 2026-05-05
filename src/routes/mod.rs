@@ -7,6 +7,7 @@ pub mod scenarios;
 pub mod showcase_items;
 pub mod styles;
 pub mod tiles;
+pub mod variable_groups;
 pub mod variables;
 pub mod water_models;
 pub mod site_settings;
@@ -380,6 +381,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/water-models", water_models::views::router(&app_state))
         .nest("/api/climate-models", climate_models::views::router(&app_state))
         .nest("/api/scenarios", scenarios::views::router(&app_state))
+        .nest("/api/variable-groups", variable_groups::views::router(&app_state))
         .nest("/api/variables", variables::views::router(&app_state))
         .nest("/api/projects", projects::views::router(&app_state))
         .nest("/api/showcase-items", showcase_items::views::router(&app_state))

@@ -41,6 +41,8 @@ pub struct Model {
     /// Optional style override applied to `card_layer_id` on the splash card
     /// preview. Falls back to the layer's own `style_id` when null.
     pub card_style_id: Option<Uuid>,
+    #[crudcrate(filterable, default_value = "false")]
+    pub use_card_as_extent: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

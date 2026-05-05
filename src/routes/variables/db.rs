@@ -14,22 +14,24 @@ pub struct Model {
     #[crudcrate(primary_key, filterable, exclude(update, create), on_create = Uuid::new_v4())]
     pub id: Uuid,
     #[sea_orm(unique)]
-    #[crudcrate(filterable, fulltext)]
+    #[crudcrate(filterable, fulltext, sortable)]
     pub slug: String,
-    #[crudcrate(filterable, fulltext)]
+    #[crudcrate(filterable, fulltext, sortable)]
     pub name: Option<String>,
     pub abbreviation: Option<String>,
     pub subscript: Option<String>,
     pub unit: String,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, sortable)]
     pub is_crop_specific: bool,
     /// Whether this variable varies over time. Controls the year slider in
     /// the public UI. Default true for time-series (climate) variables; false
     /// for crop-specific single-snapshot variables.
-    #[crudcrate(filterable, default_value = "true")]
+    #[crudcrate(filterable, default_value = "true", sortable)]
     pub has_time: bool,
-    #[crudcrate(filterable)]
+    #[crudcrate(filterable, sortable)]
     pub group_name: Option<String>,
+    #[crudcrate(filterable)]
+    pub group_id: Option<Uuid>,
     #[crudcrate(sortable)]
     pub sort_order: i32,
 }

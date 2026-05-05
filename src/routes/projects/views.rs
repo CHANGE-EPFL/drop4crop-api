@@ -452,6 +452,15 @@ pub async fn get_project_config(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
+    let all_groups: std::collections::HashMap<uuid::Uuid, crate::routes::variable_groups::db::Model> =
+        crate::routes::variable_groups::db::Entity::find()
+            .all(db)
+            .await
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?
+            .into_iter()
+            .map(|g| (g.id, g))
+            .collect();
+
     let mut variables = Vec::new();
     for junc in &var_junctions {
         if let Some(v) = crate::routes::variables::db::Entity::find_by_id(junc.variable_id)
@@ -459,6 +468,36 @@ pub async fn get_project_config(
             .await
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?
         {
+            let (tier1_group, tier1_help_text, tier1_sort_order, group_name, group_help_text, group_sort_order) =
+                if let Some(gid) = v.group_id {
+                    if let Some(group) = all_groups.get(&gid) {
+                        if let Some(pid) = group.parent_id {
+                            let parent = all_groups.get(&pid);
+                            (
+                                parent.map(|p| p.name.as_str()),
+                                parent.and_then(|p| p.help_text.as_deref()),
+                                parent.map(|p| p.sort_order).unwrap_or(0),
+                                Some(group.name.as_str()),
+                                group.help_text.as_deref(),
+                                group.sort_order,
+                            )
+                        } else {
+                            (
+                                Some(group.name.as_str()),
+                                group.help_text.as_deref(),
+                                group.sort_order,
+                                None,
+                                None,
+                                0,
+                            )
+                        }
+                    } else {
+                        (None, None, 0, v.group_name.as_deref(), None, 0)
+                    }
+                } else {
+                    (None, None, 0, v.group_name.as_deref(), None, 0)
+                };
+
             variables.push(serde_json::json!({
                 "id": v.id,
                 "slug": v.slug,
@@ -467,8 +506,15 @@ pub async fn get_project_config(
                 "subscript": v.subscript,
                 "unit": v.unit,
                 "is_crop_specific": v.is_crop_specific,
-                "group_name": v.group_name,
+                "has_time": v.has_time,
+                "group_name": group_name,
+                "group_help_text": group_help_text,
+                "group_sort_order": group_sort_order,
+                "tier1_group": tier1_group,
+                "tier1_help_text": tier1_help_text,
+                "tier1_sort_order": tier1_sort_order,
                 "sort_order": junc.sort_order,
+                "enabled": true,
             }));
         }
     }

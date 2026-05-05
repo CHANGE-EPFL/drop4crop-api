@@ -15,7 +15,7 @@ use std::ffi::CString;
 fn test_parse_climate_filename() {
     let config = Config::for_tests();
     let result =
-        parse_filename(&config, "wheat_lpjml_gfdl-esm4_historical_yield_2020.tif").unwrap();
+        parse_filename(&config, "wheat_lpjml_gfdl-esm4_historical_yield_2020.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -35,7 +35,7 @@ fn test_parse_climate_filename_with_null_sentinels() {
     let config = Config::for_tests();
     // Case-insensitive `null` in any of the middle slots means "N/A for this project".
     let result =
-        parse_filename(&config, "barley_NULL_null_rcp26_vwc_2070.tif").unwrap();
+        parse_filename(&config, "barley_NULL_null_rcp26_vwc_2070.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -55,7 +55,7 @@ fn test_parse_climate_filename_with_nan_sentinel() {
     let config = Config::for_tests();
     // `nan` (case-insensitive) is an accepted alias for `null` in any middle slot.
     let result =
-        parse_filename(&config, "barley_NaN_nan_NAN_nan_2080.tif").unwrap();
+        parse_filename(&config, "barley_NaN_nan_NAN_nan_2080.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -76,7 +76,7 @@ fn test_parse_climate_filename_with_null_variable_slot() {
     // Full canonical 6-part form with only crop + year populated — valid for a
     // project whose axis set is just crops and a timeline.
     let result =
-        parse_filename(&config, "barley_null_null_null_null_2010.tif").unwrap();
+        parse_filename(&config, "barley_null_null_null_null_2010.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -95,7 +95,7 @@ fn test_parse_climate_filename_with_null_variable_slot() {
 fn test_parse_climate_filename_with_null_year() {
     let config = Config::for_tests();
     let result =
-        parse_filename(&config, "barley_null_null_null_null_null.tif").unwrap();
+        parse_filename(&config, "barley_null_null_null_null_null.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -114,7 +114,7 @@ fn test_parse_climate_filename_with_null_year() {
 fn test_parse_climate_filename_with_nan_year() {
     let config = Config::for_tests();
     let result =
-        parse_filename(&config, "barley_null_null_null_wf_nan.tif").unwrap();
+        parse_filename(&config, "barley_null_null_null_wf_nan.tif", None).unwrap();
 
     match result {
         LayerInfo::Climate(info) => {
@@ -133,6 +133,7 @@ fn test_parse_percentage_rejects_null_variable_slot() {
     let result = parse_filename(
         &config,
         "rice_lpjml_gfdl-esm4_historical_null_perc_2020.tif",
+        None,
     );
     assert!(result.is_err());
 }
@@ -140,7 +141,7 @@ fn test_parse_percentage_rejects_null_variable_slot() {
 #[test]
 fn test_parse_crop_filename() {
     let config = Config::for_tests();
-    let result = parse_filename(&config, "soy_mirca_area_total.tif").unwrap();
+    let result = parse_filename(&config, "soy_mirca_area_total.tif", None).unwrap();
 
     match result {
         LayerInfo::Crop(info) => {
@@ -157,6 +158,7 @@ fn test_parse_percentage_filename() {
     let result = parse_filename(
         &config,
         "rice_lpjml_gfdl-esm4_historical_yield_perc_2020.tif",
+        None,
     )
     .unwrap();
 
@@ -173,8 +175,116 @@ fn test_parse_percentage_filename() {
 #[test]
 fn test_parse_invalid_filename() {
     let config = Config::for_tests();
-    let result = parse_filename(&config, "invalid.txt");
+    let result = parse_filename(&config, "invalid.txt", None);
     assert!(result.is_err());
+}
+
+// ============================================================================
+// PROJECT-AWARE MINIMISED FORM TESTS
+// ============================================================================
+
+#[test]
+fn test_parse_minimised_no_middles_with_year() {
+    let config = Config::for_tests();
+    // Project uses crop + variable + year only — no water/climate/scenario.
+    // Minimised form is `{crop}_{variable}_{year}.tif`.
+    let axes = drop4crop_api::routes::layers::utils::ProjectAxes {
+        water_model: false,
+        climate_model: false,
+        scenario: false,
+        year: true,
+    };
+    let result = parse_filename(&config, "barley_deltae_2000.tif", Some(axes)).unwrap();
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "barley");
+            assert!(info.water_model.is_none());
+            assert!(info.climate_model.is_none());
+            assert!(info.scenario.is_none());
+            assert_eq!(info.variable.as_deref(), Some("deltae"));
+            assert_eq!(info.year, Some(2000));
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_parse_minimised_water_and_year_only() {
+    let config = Config::for_tests();
+    // Project uses crop + water_model + variable + year — climate/scenario null.
+    // Minimised form is `{crop}_{water_model}_{variable}_{year}.tif` (4 parts).
+    let axes = drop4crop_api::routes::layers::utils::ProjectAxes {
+        water_model: true,
+        climate_model: false,
+        scenario: false,
+        year: true,
+    };
+    let result = parse_filename(&config, "wheat_lpjml_yield_2020.tif", Some(axes)).unwrap();
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "wheat");
+            assert_eq!(info.water_model.as_deref(), Some("lpjml"));
+            assert!(info.climate_model.is_none());
+            assert!(info.scenario.is_none());
+            assert_eq!(info.variable.as_deref(), Some("yield"));
+            assert_eq!(info.year, Some(2020));
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_parse_minimised_scenario_only_no_year() {
+    let config = Config::for_tests();
+    // Project uses crop + scenario + variable; no year, no water/climate.
+    // Minimised form is `{crop}_{scenario}_{variable}.tif` (3 parts).
+    let axes = drop4crop_api::routes::layers::utils::ProjectAxes {
+        water_model: false,
+        climate_model: false,
+        scenario: true,
+        year: false,
+    };
+    let result = parse_filename(&config, "rice_rcp26_yield.tif", Some(axes)).unwrap();
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "rice");
+            assert!(info.water_model.is_none());
+            assert!(info.climate_model.is_none());
+            assert_eq!(info.scenario.as_deref(), Some("rcp26"));
+            assert_eq!(info.variable.as_deref(), Some("yield"));
+            assert!(info.year.is_none());
+        }
+        _ => panic!("Expected climate layer info"),
+    }
+}
+
+#[test]
+fn test_minimised_does_not_shadow_canonical_6_part() {
+    let config = Config::for_tests();
+    // 6-part canonical form should still parse the same way regardless of axes.
+    let axes = drop4crop_api::routes::layers::utils::ProjectAxes {
+        water_model: false,
+        climate_model: false,
+        scenario: false,
+        year: true,
+    };
+    let result = parse_filename(
+        &config,
+        "wheat_lpjml_gfdl-esm4_historical_yield_2020.tif",
+        Some(axes),
+    )
+    .unwrap();
+    match result {
+        LayerInfo::Climate(info) => {
+            assert_eq!(info.crop, "wheat");
+            assert_eq!(info.water_model.as_deref(), Some("lpjml"));
+            assert_eq!(info.climate_model.as_deref(), Some("gfdl-esm4"));
+            assert_eq!(info.scenario.as_deref(), Some("historical"));
+            assert_eq!(info.variable.as_deref(), Some("yield"));
+            assert_eq!(info.year, Some(2020));
+        }
+        _ => panic!("Expected climate layer info"),
+    }
 }
 
 // ============================================================================

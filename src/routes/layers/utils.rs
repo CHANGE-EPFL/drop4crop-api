@@ -23,8 +23,40 @@ fn parse_nullable_slot(s: &str) -> Option<String> {
     }
 }
 
-/// Parses a filename to extract layer information
-pub fn parse_filename(_config: &Config, filename: &str) -> Result<LayerInfo> {
+/// Which axes the project uses. Drives project-specific minimised filename
+/// parsing — only the axes that are `true` here appear in the minimised form.
+/// When `None` is passed to `parse_filename`, only the canonical 6/7-part forms
+/// and the crop-specific 2-part form are accepted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProjectAxes {
+    pub water_model: bool,
+    pub climate_model: bool,
+    pub scenario: bool,
+    pub year: bool,
+}
+
+fn is_year_like(s: &str) -> bool {
+    s.len() == 4 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+fn parse_year_slot(s: &str) -> Result<Option<i32>> {
+    if s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("nan") {
+        Ok(None)
+    } else {
+        s.parse::<i32>()
+            .map(Some)
+            .map_err(|_| anyhow!("Invalid year in filename: {}", s))
+    }
+}
+
+/// Parses a filename to extract layer information. When `axes` is supplied, also
+/// accepts the project-specific minimised form where the literal `null`/`nan`
+/// slots for axes the project doesn't use are dropped.
+pub fn parse_filename(
+    _config: &Config,
+    filename: &str,
+    axes: Option<ProjectAxes>,
+) -> Result<LayerInfo> {
     // Remove file extension and convert to lowercase
     let filename_lower = filename.to_lowercase();
     let name_without_ext = filename_lower
@@ -33,67 +65,118 @@ pub fn parse_filename(_config: &Config, filename: &str) -> Result<LayerInfo> {
 
     let parts: Vec<&str> = name_without_ext.split('_').collect();
 
-    match parts.len() {
-        6 => {
-            // Climate layer: crop_watermodel_climatemodel_scenario_variable_year
-            // All four middle slots accept `null` / `nan` (case-insensitive).
-            Ok(LayerInfo::Climate(ClimateLayerInfo {
-                crop: parts[0].to_string(),
-                water_model: parse_nullable_slot(parts[1]),
-                climate_model: parse_nullable_slot(parts[2]),
-                scenario: parse_nullable_slot(parts[3]),
-                variable: parse_nullable_slot(parts[4]),
-                year: if parts[5].eq_ignore_ascii_case("null") || parts[5].eq_ignore_ascii_case("nan") {
-                    None
-                } else {
-                    Some(parts[5]
-                        .parse()
-                        .map_err(|_| anyhow!("Invalid year in filename: {}", parts[5]))?)
-                },
-            }))
-        }
-        7 => {
-            // Climate layer with percentage unit: crop_watermodel_climatemodel_scenario_variable_unit_year
-            // If the variable slot is a sentinel, `_perc` has nothing to attach to — reject.
-            let unit = parts[5];
-            if unit != "perc" {
-                return Err(anyhow!("Unsupported unit in filename: {}", unit));
-            }
-            let variable = match parse_nullable_slot(parts[4]) {
-                Some(base) => Some(format!("{}_perc", base)),
-                None => return Err(anyhow!(
-                    "Cannot use `_perc` suffix with a null/nan variable slot"
-                )),
-            };
-
-            Ok(LayerInfo::Climate(ClimateLayerInfo {
-                crop: parts[0].to_string(),
-                water_model: parse_nullable_slot(parts[1]),
-                climate_model: parse_nullable_slot(parts[2]),
-                scenario: parse_nullable_slot(parts[3]),
-                variable,
-                year: if parts[6].eq_ignore_ascii_case("null") || parts[6].eq_ignore_ascii_case("nan") {
-                    None
-                } else {
-                    Some(parts[6]
-                        .parse()
-                        .map_err(|_| anyhow!("Invalid year in filename: {}", parts[6]))?)
-                },
-            }))
-        }
-        2..=5 => {
-            // Short form: crop_variable (variable can contain underscores).
-            // Only 2..=5 parts so that the 6-part form above always wins — keeping
-            // the long-form position order stable. Works for crop-specific variables
-            // and also for general variables when a project doesn't use middle axes.
-            let crop = parts[0].to_string();
-            let variable = parts[1..].join("_");
-            Ok(LayerInfo::Crop(CropLayerInfo { crop, variable }))
-        }
-        _ => Err(anyhow!(
-            "Invalid filename format. Expected either {{crop}}_{{watermodel}}_{{climatemodel}}_{{scenario}}_{{variable}}_{{year}}.tif (sentinels `null` or `nan` allowed in any middle slot) or {{crop}}_{{crop_variable}}.tif"
-        )),
+    // Canonical 6-part form is always accepted regardless of project axes — kept
+    // here so scripted renames / generators that always emit the full form work
+    // without project context.
+    if parts.len() == 6 {
+        return Ok(LayerInfo::Climate(ClimateLayerInfo {
+            crop: parts[0].to_string(),
+            water_model: parse_nullable_slot(parts[1]),
+            climate_model: parse_nullable_slot(parts[2]),
+            scenario: parse_nullable_slot(parts[3]),
+            variable: parse_nullable_slot(parts[4]),
+            year: parse_year_slot(parts[5])?,
+        }));
     }
+
+    if parts.len() == 7 {
+        // Climate layer with percentage unit: crop_watermodel_climatemodel_scenario_variable_unit_year
+        // If the variable slot is a sentinel, `_perc` has nothing to attach to — reject.
+        let unit = parts[5];
+        if unit != "perc" {
+            return Err(anyhow!("Unsupported unit in filename: {}", unit));
+        }
+        let variable = match parse_nullable_slot(parts[4]) {
+            Some(base) => Some(format!("{}_perc", base)),
+            None => return Err(anyhow!(
+                "Cannot use `_perc` suffix with a null/nan variable slot"
+            )),
+        };
+
+        return Ok(LayerInfo::Climate(ClimateLayerInfo {
+            crop: parts[0].to_string(),
+            water_model: parse_nullable_slot(parts[1]),
+            climate_model: parse_nullable_slot(parts[2]),
+            scenario: parse_nullable_slot(parts[3]),
+            variable,
+            year: parse_year_slot(parts[6])?,
+        }));
+    }
+
+    // Project-specific minimised form. Shape:
+    //   {crop}_[water_model]_[climate_model]_[scenario]_{variable}_[year].tif
+    // where the bracketed slots only appear when the project uses that axis.
+    // 2-part stays as the crop-specific form (existing semantics); 6-part is
+    // the canonical block above.
+    if let Some(a) = axes {
+        let middle_count =
+            (a.water_model as usize) + (a.climate_model as usize) + (a.scenario as usize);
+        let expected = 1 + middle_count + 1 + (a.year as usize);
+        if parts.len() == expected && parts.len() >= 3 && parts.len() != 6 {
+            let mut i = 0;
+            let crop = parts[i].to_string();
+            i += 1;
+            let water_model = if a.water_model {
+                let v = parse_nullable_slot(parts[i]);
+                i += 1;
+                v
+            } else {
+                None
+            };
+            let climate_model = if a.climate_model {
+                let v = parse_nullable_slot(parts[i]);
+                i += 1;
+                v
+            } else {
+                None
+            };
+            let scenario = if a.scenario {
+                let v = parse_nullable_slot(parts[i]);
+                i += 1;
+                v
+            } else {
+                None
+            };
+            let variable = parse_nullable_slot(parts[i]);
+            i += 1;
+            let year = if a.year {
+                let y = parse_year_slot(parts[i])?;
+                i += 1;
+                y
+            } else {
+                None
+            };
+            let _ = i;
+            return Ok(LayerInfo::Climate(ClimateLayerInfo {
+                crop,
+                water_model,
+                climate_model,
+                scenario,
+                variable,
+                year,
+            }));
+        }
+        // axes provided but length didn't match minimised — fall through
+        // to the crop short form below for 2..=5 part files. The canonical
+        // 7-part `_perc` form is the only way to express percentage units;
+        // keeping it canonical-only avoids ambiguity with crop-specific
+        // variables whose slug happens to contain `perc`.
+        let _ = is_year_like;
+    }
+
+    if (2..=5).contains(&parts.len()) {
+        // Short form: crop_variable (variable can contain underscores).
+        // Only 2..=5 parts so that the 6-part form above always wins — keeping
+        // the long-form position order stable. Works for crop-specific variables
+        // and also for general variables when a project doesn't use middle axes.
+        let crop = parts[0].to_string();
+        let variable = parts[1..].join("_");
+        return Ok(LayerInfo::Crop(CropLayerInfo { crop, variable }));
+    }
+
+    Err(anyhow!(
+        "Invalid filename format. Expected either {{crop}}_{{watermodel}}_{{climatemodel}}_{{scenario}}_{{variable}}_{{year}}.tif (sentinels `null` or `nan` allowed in any middle slot) or {{crop}}_{{crop_variable}}.tif"
+    ))
 }
 
 /// Sanitizes a raster by replacing infinity values (+inf, -inf) with NaN.

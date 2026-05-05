@@ -3,7 +3,7 @@ use super::models::{
     GetPixelValueParams, LayerInfo, PixelValueResponse, UploadError, UploadQueryParams,
 };
 use super::utils::{
-    convert_to_cog_in_memory, get_global_average_of_raster, get_min_max_of_raster,
+    ProjectAxes, convert_to_cog_in_memory, get_global_average_of_raster, get_min_max_of_raster,
     parse_filename,
 };
 use crate::common::auth::Role;
@@ -60,6 +60,43 @@ fn db_upload_err(e: sea_orm::DbErr) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         UploadError::new("internal", "Database error").with_error(e.to_string()),
     )
+}
+
+/// Reads which axes a project uses so the filename parser can accept the
+/// project-specific minimised form. An axis is "used" when the project has at
+/// least one junction row (for water_model/climate_model/scenario) or, for
+/// year, when `project.year_axis` is set.
+async fn load_project_axes(
+    db: &sea_orm::DatabaseConnection,
+    project_id: Uuid,
+) -> Result<ProjectAxes, sea_orm::DbErr> {
+    let project = crate::routes::projects::db::Entity::find_by_id(project_id)
+        .one(db)
+        .await?;
+    let year = project.as_ref().and_then(|p| p.year_axis.as_ref()).is_some();
+
+    let water_model = crate::routes::projects::project_water_model::Entity::find()
+        .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(project_id))
+        .one(db)
+        .await?
+        .is_some();
+    let climate_model = crate::routes::projects::project_climate_model::Entity::find()
+        .filter(crate::routes::projects::project_climate_model::Column::ProjectId.eq(project_id))
+        .one(db)
+        .await?
+        .is_some();
+    let scenario = crate::routes::projects::project_scenario::Entity::find()
+        .filter(crate::routes::projects::project_scenario::Column::ProjectId.eq(project_id))
+        .one(db)
+        .await?
+        .is_some();
+
+    Ok(ProjectAxes {
+        water_model,
+        climate_model,
+        scenario,
+        year,
+    })
 }
 
 pub fn router(state: &AppState) -> OpenApiRouter {
@@ -640,9 +677,17 @@ pub async fn upload_file(
 
             debug!(size = data.len(), "Successfully read bytes");
 
-            // Parse filename to extract layer information
+            // Parse filename to extract layer information.
+            // When a project_id is supplied we look up which axes the project
+            // uses (year_axis on the project record + presence of junction
+            // rows for water/climate/scenario) so the parser can also accept
+            // the project-specific minimised filename form.
             debug!("Parsing filename");
-            let layer_info = parse_filename(&config, &filename).map_err(|e| {
+            let project_axes = match params.project_id {
+                Some(pid) => Some(load_project_axes(db, pid).await.map_err(db_upload_err)?),
+                None => None,
+            };
+            let layer_info = parse_filename(&config, &filename, project_axes).map_err(|e| {
                 error!(filename, error = %e, "Error parsing filename");
                 upload_err_json(
                     StatusCode::BAD_REQUEST,

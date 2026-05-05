@@ -20,6 +20,9 @@ pub struct Model {
     pub sort_order: i32,
     #[crudcrate(filterable)]
     pub parent_id: Option<Uuid>,
+    #[crudcrate(filterable)]
+    pub required_crop_id: Option<Uuid>,
+    pub display_stacked: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

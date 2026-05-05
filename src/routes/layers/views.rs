@@ -258,6 +258,13 @@ pub async fn get_groups(
         }
         if !crops.is_empty() { groups.insert("crop".to_string(), crops); }
 
+        let crop_slug_map: std::collections::HashMap<uuid::Uuid, String> =
+            crate::routes::crops::db::Entity::find()
+                .all(db).await.map_err(db_err)?
+                .into_iter()
+                .map(|c| (c.id, c.slug))
+                .collect();
+
         // Water models from project_water_model junction
         let wm_junctions = crate::routes::projects::project_water_model::Entity::find()
             .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(pid))
@@ -324,11 +331,13 @@ pub async fn get_groups(
         for junc in &var_junctions {
             if let Some(v) = crate::routes::variables::db::Entity::find_by_id(junc.variable_id)
                 .one(db).await.map_err(db_err)? {
-                let (tier1_group, tier1_help_text, tier1_sort_order, group_name, group_help_text, group_sort_order) =
+                let (tier1_group, tier1_help_text, tier1_sort_order, group_name, group_help_text, group_sort_order, required_crop_id, display_stacked) =
                     if let Some(gid) = v.group_id {
                         if let Some(group) = all_groups.get(&gid) {
                             if let Some(pid) = group.parent_id {
                                 let parent = all_groups.get(&pid);
+                                let rc = group.required_crop_id.or(parent.and_then(|p| p.required_crop_id));
+                                let ds = if group.display_stacked { true } else { parent.map_or(false, |p| p.display_stacked) };
                                 (
                                     parent.map(|p| p.name.as_str()),
                                     parent.and_then(|p| p.help_text.as_deref()),
@@ -336,6 +345,8 @@ pub async fn get_groups(
                                     Some(group.name.as_str()),
                                     group.help_text.as_deref(),
                                     group.sort_order,
+                                    rc,
+                                    ds,
                                 )
                             } else {
                                 (
@@ -345,14 +356,17 @@ pub async fn get_groups(
                                     None,
                                     None,
                                     0,
+                                    group.required_crop_id,
+                                    group.display_stacked,
                                 )
                             }
                         } else {
-                            (None, None, 0, v.group_name.as_deref(), None, 0)
+                            (None, None, 0, v.group_name.as_deref(), None, 0, None, false)
                         }
                     } else {
-                        (None, None, 0, v.group_name.as_deref(), None, 0)
+                        (None, None, 0, v.group_name.as_deref(), None, 0, None, false)
                     };
+                let required_crop_slug = required_crop_id.and_then(|cid| crop_slug_map.get(&cid).cloned());
                 variables.push(serde_json::json!({
                     "id": v.id, "slug": v.slug, "name": v.name,
                     "abbreviation": v.abbreviation, "subscript": v.subscript,
@@ -365,6 +379,8 @@ pub async fn get_groups(
                     "tier1_help_text": tier1_help_text,
                     "tier1_sort_order": tier1_sort_order,
                     "sort_order": junc.sort_order,
+                    "required_crop_slug": required_crop_slug,
+                    "display_stacked": display_stacked,
                 }));
             }
         }

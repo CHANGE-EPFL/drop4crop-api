@@ -11,6 +11,27 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tracing::info;
 
+fn center_zoom_from_extent(extent: &Option<serde_json::Value>) -> (f64, f64, u32) {
+    if let Some(ext) = extent {
+        if let (Some(sw), Some(ne)) = (ext.get(0), ext.get(1)) {
+            let sw_lat = sw.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let sw_lng = sw.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ne_lat = ne.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ne_lng = ne.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let lat = (sw_lat + ne_lat) / 2.0;
+            let lon = (sw_lng + ne_lng) / 2.0;
+            let span = (ne_lng - sw_lng).abs().max((ne_lat - sw_lat).abs());
+            let z = if span > 0.0 {
+                (360.0_f64 / span).log2().floor().max(1.0) as u32
+            } else {
+                4
+            };
+            return (lat, lon, z);
+        }
+    }
+    (0.0, 0.0, 2)
+}
+
 fn lat_lon_to_tile(lat: f64, lon: f64, zoom: u32) -> (u32, u32) {
     let n = 2_u32.pow(zoom) as f64;
     let x = ((lon + 180.0) / 360.0 * n).floor() as u32;
@@ -177,8 +198,8 @@ pub async fn warm_card_tiles_for_project(
     let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
     let style_id = project.card_style_id.or(layer_record.style_id);
-    let z = project.zoom_level.max(1) as u32;
-    let (cx, cy) = lat_lon_to_tile(project.latitude, project.longitude, z);
+    let (lat, lon, z) = center_zoom_from_extent(&project.extent);
+    let (cx, cy) = lat_lon_to_tile(lat, lon, z);
     let mut warmed = 0u32;
 
     for (x, y) in tiles_around(cx, cy, z, 1) {
@@ -322,8 +343,8 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
             if let Some(card_layer_id) = p.card_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(card_layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let z = p.zoom_level.max(1) as u32;
-                        let (cx, cy) = lat_lon_to_tile(p.latitude, p.longitude, z);
+                        let (lat, lon, z) = center_zoom_from_extent(&p.extent);
+                        let (cx, cy) = lat_lon_to_tile(lat, lon, z);
                         let key = cache::build_cache_key(
                             &config,
                             &format!("png-card/{}/{}/{}/{}/{}", p.slug, name, z, cx, cy),

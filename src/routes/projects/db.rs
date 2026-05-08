@@ -19,11 +19,6 @@ pub struct Model {
     #[crudcrate(filterable, fulltext)]
     pub title: String,
     pub description: Option<String>,
-    #[sea_orm(column_type = "Double")]
-    pub latitude: f64,
-    #[sea_orm(column_type = "Double")]
-    pub longitude: f64,
-    pub zoom_level: i32,
     #[crudcrate(filterable)]
     pub enabled: bool,
     #[crudcrate(sortable)]
@@ -41,8 +36,7 @@ pub struct Model {
     /// Optional style override applied to `card_layer_id` on the splash card
     /// preview. Falls back to the layer's own `style_id` when null.
     pub card_style_id: Option<Uuid>,
-    #[crudcrate(filterable, default_value = "false")]
-    pub use_card_as_extent: bool,
+    pub extent: Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

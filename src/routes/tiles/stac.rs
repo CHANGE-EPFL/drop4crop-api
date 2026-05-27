@@ -47,6 +47,7 @@ fn make_link_titled(href: String, rel: &str, mime: &str, title: &str) -> Link {
 #[derive(Deserialize)]
 pub struct SearchParams {
     limit: Option<usize>,
+    offset: Option<u64>,
     #[serde(rename = "bbox")]
     _bbox: Option<String>,
     datetime: Option<String>,
@@ -538,9 +539,15 @@ async fn search_items(
     }
 
     query = query.order_by_asc(layer::Column::LayerName);
-    let limit = params.limit.unwrap_or(10000).min(10000);
+    let limit = params.limit.unwrap_or(100).min(10000);
+    let offset = params.offset.unwrap_or(0);
 
-    let layers = query.limit(limit as u64).all(db).await.map_err(err)?;
+    let matched = query.clone().count(db).await.map_err(err)?;
+
+    let layers = query
+        .offset(offset)
+        .limit(limit as u64)
+        .all(db).await.map_err(err)?;
 
     let crop_map: HashMap<Uuid, String> = crop::Entity::find().all(db).await.map_err(err)?
         .into_iter().map(|m| (m.id, m.slug)).collect();
@@ -584,7 +591,7 @@ async fn search_items(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     item_collection.links.push(
-        Link::new(format!("{}/api/stac/search?limit={}", base_url, limit), "self")
+        Link::new(format!("{}/api/stac/search?limit={}&offset={}", base_url, limit, offset), "self")
             .r#type(Some("application/geo+json".to_string()))
     );
     item_collection.links.push(
@@ -592,14 +599,32 @@ async fn search_items(
             .r#type(Some("application/json".to_string()))
     );
 
+    let next_offset = offset + item_count as u64;
+    if next_offset < matched {
+        item_collection.links.push(
+            Link::new(format!("{}/api/stac/search?limit={}&offset={}", base_url, limit, next_offset), "next")
+                .r#type(Some("application/geo+json".to_string()))
+        );
+    }
+    if offset > 0 {
+        let prev_offset = offset.saturating_sub(limit as u64);
+        item_collection.links.push(
+            Link::new(format!("{}/api/stac/search?limit={}&offset={}", base_url, limit, prev_offset), "prev")
+                .r#type(Some("application/geo+json".to_string()))
+        );
+    }
+
     item_collection.context = Some(Context {
         returned: item_count as u64,
         limit: Some(limit as u64),
-        matched: None,
+        matched: Some(matched),
         additional_fields: Default::default(),
     });
 
-    Ok(Json(serde_json::to_value(item_collection).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+    let mut response = serde_json::to_value(item_collection).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    response["numberMatched"] = json!(matched);
+    response["numberReturned"] = json!(item_count);
+    Ok(Json(response))
 }
 
 fn build_item(

@@ -37,6 +37,8 @@ pub struct Model {
     /// preview. Falls back to the layer's own `style_id` when null.
     pub card_style_id: Option<Uuid>,
     pub extent: Option<serde_json::Value>,
+    pub citation: Option<serde_json::Value>,
+    pub unavailable_message: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

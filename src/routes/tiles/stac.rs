@@ -654,11 +654,33 @@ fn build_item(
     let label_display_mode = style_opt.map(|s| s.label_display_mode.as_str()).unwrap_or("auto");
     let label_count = style_opt.and_then(|s| s.label_count);
 
-    let crop_d = if crop_slug.is_empty() { "unknown" } else { &crop_slug };
-    let wm_d = if wm_slug.is_empty() { "unknown" } else { &wm_slug };
-    let cm_d = if cm_slug.is_empty() { "unknown" } else { &cm_slug };
-    let sc_d = if sc_slug.is_empty() { "unknown" } else { &sc_slug };
     let var_d = if var_slug.is_empty() { "unknown" } else { &var_slug };
+
+    let title_parts: Vec<&str> = [
+        if crop_slug.is_empty() { None } else { Some(crop_slug.as_str()) },
+        if wm_slug.is_empty() { None } else { Some(wm_slug.as_str()) },
+        if cm_slug.is_empty() { None } else { Some(cm_slug.as_str()) },
+        if sc_slug.is_empty() { None } else { Some(sc_slug.as_str()) },
+    ].into_iter().flatten().collect();
+
+    let title = if title_parts.is_empty() {
+        format!("{} ({})", year, var_d)
+    } else {
+        format!("{} {} ({})", title_parts.join(" "), year, var_d)
+    };
+
+    let desc_parts: Vec<String> = [
+        if crop_slug.is_empty() { None } else { Some(format!("crop: {}", crop_slug)) },
+        if wm_slug.is_empty() { None } else { Some(format!("water model: {}", wm_slug)) },
+        if cm_slug.is_empty() { None } else { Some(format!("climate model: {}", cm_slug)) },
+        if sc_slug.is_empty() { None } else { Some(format!("scenario: {}", sc_slug)) },
+    ].into_iter().flatten().collect();
+
+    let description = if desc_parts.is_empty() {
+        format!("{} for year {}", var_d, year)
+    } else {
+        format!("{} — {}", var_d, desc_parts.join(", "))
+    };
 
     let [west, south, east, north] = bbox;
     let geometry = json!({
@@ -682,8 +704,8 @@ fn build_item(
             "datetime": format!("{}-01-01T00:00:00Z", year),
             "start_datetime": format!("{}-01-01T00:00:00Z", year),
             "end_datetime": format!("{}-12-31T23:59:59Z", year),
-            "title": format!("{} - {} {} {} {} ({})", crop_d, wm_d, cm_d, sc_d, year, var_d),
-            "description": format!("Agricultural impact data for {} using {} water model and {} climate model under {} scenario", crop_d, wm_d, cm_d, sc_d),
+            "title": title,
+            "description": description,
             "drop4crop:crop": crop_slug,
             "drop4crop:water_model": wm_slug,
             "drop4crop:climate_model": cm_slug,

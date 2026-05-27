@@ -201,7 +201,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
 /// This provides a clean S3-like path structure for COG files
 pub fn cog_router(state: &AppState) -> OpenApiRouter {
     OpenApiRouter::new()
-        .routes(routes!(super::cog::views::get_cog_data))
+        .routes(routes!(super::cog::views::get_cog_data, super::cog::views::head_cog_data))
         .with_state(state.clone())
 }
 

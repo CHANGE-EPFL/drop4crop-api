@@ -39,6 +39,9 @@ pub struct Model {
     pub extent: Option<serde_json::Value>,
     pub citation: Option<serde_json::Value>,
     pub unavailable_message: Option<String>,
+    pub license: Option<String>,
+    pub providers: Option<serde_json::Value>,
+    pub keywords: Option<serde_json::Value>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

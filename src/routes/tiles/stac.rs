@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{StatusCode, HeaderMap, header},
     Json,
 };
@@ -11,12 +11,38 @@ use crate::routes::water_models::db as water_model;
 use crate::routes::climate_models::db as climate_model;
 use crate::routes::scenarios::db as scenario;
 use crate::routes::variables::db as variable;
+use crate::routes::projects::db as project;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use stac::{Catalog, Collection, Link};
+use stac::{Catalog, Link};
 use stac_api::{Conformance, ItemCollection, Context};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+const DROP4CROP_EXT: &str = "https://drop4crop.epfl.ch/stac/drop4crop-extension/v1.0.0/schema.json";
+const SCIENTIFIC_EXT: &str = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json";
+const PROJECTION_EXT: &str = "https://stac-extensions.github.io/projection/v1.1.0/schema.json";
+const RASTER_EXT: &str = "https://stac-extensions.github.io/raster/v1.1.0/schema.json";
+
+fn make_link(href: String, rel: &str, mime: &str) -> Link {
+    Link {
+        href,
+        rel: rel.to_string(),
+        r#type: Some(mime.to_string()),
+        title: None,
+        method: None,
+        headers: None,
+        body: None,
+        merge: None,
+        additional_fields: Default::default(),
+    }
+}
+
+fn make_link_titled(href: String, rel: &str, mime: &str, title: &str) -> Link {
+    let mut link = make_link(href, rel, mime);
+    link.title = Some(title.to_string());
+    link
+}
 
 #[derive(Deserialize)]
 pub struct SearchParams {
@@ -24,197 +50,212 @@ pub struct SearchParams {
     #[serde(rename = "bbox")]
     _bbox: Option<String>,
     datetime: Option<String>,
-    // STAC query parameters
     crop: Option<String>,
     water_model: Option<String>,
     climate_model: Option<String>,
     scenario: Option<String>,
     variable: Option<String>,
-    /// Optional project slug to scope results to a specific project
     project: Option<String>,
 }
 
-/// STAC API root endpoint (landing page)
-pub async fn stac_root(headers: HeaderMap) -> Json<Catalog> {
-    let base_url = get_base_url(&headers);
-
-    let mut catalog = Catalog::new("drop4crop", "Drop4Crop: Agricultural Water Stress and Crop Yield Data");
-    catalog.description = "Spatiotemporal Asset Catalog providing global agricultural water stress and crop yield projections. Data and content provided by F. Bassani, Q. Sun, and S. Bonetti from the CHANGE Lab at EPFL.".to_string();
-
-    catalog.links.push(Link {
-        href: format!("{}/api/stac", base_url),
-        rel: "self".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
-
-    catalog.links.push(Link {
-        href: format!("{}/api/stac", base_url),
-        rel: "root".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
-
-    catalog.links.push(Link {
-        href: format!("{}/api/stac/collections", base_url),
-        rel: "data".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
-
-    catalog.links.push(Link {
-        href: format!("{}/api/stac/search", base_url),
-        rel: "search".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
-
-    catalog.links.push(Link {
-        href: format!("{}/api/stac/conformance", base_url),
-        rel: "conformance".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
-
-    // Add conformsTo field
-    catalog.additional_fields.insert(
-        "conformsTo".to_string(),
-        json!([
-            "https://api.stacspec.org/v1.0.0/core",
-            "https://api.stacspec.org/v1.0.0/collections",
-            "https://api.stacspec.org/v1.0.0/item-search"
-        ])
-    );
-
-    Json(catalog)
+fn default_providers() -> Value {
+    json!([{
+        "name": "CHANGE Lab - EPFL",
+        "description": "Data and content provided by the CHANGE lab at EPFL",
+        "roles": ["producer", "processor", "host"],
+        "url": "https://www.epfl.ch/labs/change/"
+    }])
 }
 
-/// STAC conformance endpoint
-pub async fn stac_conformance() -> Json<Conformance> {
-    let conformance = Conformance {
-        conforms_to: vec![
-            "https://api.stacspec.org/v1.0.0/core".to_string(),
-            "https://api.stacspec.org/v1.0.0/collections".to_string(),
-            "https://api.stacspec.org/v1.0.0/item-search".to_string(),
-            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core".to_string(),
-            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson".to_string(),
-        ],
-    };
-    Json(conformance)
+fn extract_doi(paper_url: &str) -> Option<String> {
+    if let Some(rest) = paper_url.strip_prefix("https://doi.org/") {
+        Some(rest.to_string())
+    } else if let Some(rest) = paper_url.strip_prefix("http://doi.org/") {
+        Some(rest.to_string())
+    } else if paper_url.starts_with("10.") {
+        Some(paper_url.to_string())
+    } else {
+        None
+    }
 }
 
-/// STAC collections endpoint - returns a single collection for all Drop4Crop data
-pub async fn stac_collections(
-    headers: HeaderMap,
-    State(app_state): State<AppState>,
-) -> Result<Json<Value>, StatusCode> {
-    let base_url = get_base_url(&headers);
-    let db = &app_state.db;
+fn project_extent_to_bbox(extent: &Value) -> Option<[f64; 4]> {
+    let arr = extent.as_array()?;
+    if arr.len() != 2 { return None; }
+    let sw = arr[0].as_array()?;
+    let ne = arr[1].as_array()?;
+    if sw.len() != 2 || ne.len() != 2 { return None; }
+    let sw_lat = sw[0].as_f64()?;
+    let sw_lng = sw[1].as_f64()?;
+    let ne_lat = ne[0].as_f64()?;
+    let ne_lng = ne[1].as_f64()?;
+    Some([sw_lng, sw_lat, ne_lng, ne_lat])
+}
 
-    // Get count of enabled layers
-    let count = layer::Entity::find()
+struct CollectionData {
+    crop_slugs: Vec<String>,
+    water_model_slugs: Vec<String>,
+    climate_model_slugs: Vec<String>,
+    scenario_slugs: Vec<String>,
+    variable_slugs: Vec<String>,
+    min_year: Option<i32>,
+    max_year: Option<i32>,
+    layer_count: u64,
+}
+
+async fn gather_collection_data(
+    project_id: Uuid,
+    db: &sea_orm::DatabaseConnection,
+) -> Result<CollectionData, StatusCode> {
+    let err = |_| StatusCode::INTERNAL_SERVER_ERROR;
+
+    let crop_junctions = crate::routes::projects::project_crop::Entity::find()
+        .filter(crate::routes::projects::project_crop::Column::ProjectId.eq(project_id))
+        .order_by_asc(crate::routes::projects::project_crop::Column::SortOrder)
+        .all(db).await.map_err(err)?;
+    let mut crop_slugs = Vec::new();
+    for j in &crop_junctions {
+        if let Some(c) = crop::Entity::find_by_id(j.crop_id).one(db).await.map_err(err)? {
+            crop_slugs.push(c.slug);
+        }
+    }
+
+    let wm_junctions = crate::routes::projects::project_water_model::Entity::find()
+        .filter(crate::routes::projects::project_water_model::Column::ProjectId.eq(project_id))
+        .order_by_asc(crate::routes::projects::project_water_model::Column::SortOrder)
+        .all(db).await.map_err(err)?;
+    let mut water_model_slugs = Vec::new();
+    for j in &wm_junctions {
+        if let Some(w) = water_model::Entity::find_by_id(j.water_model_id).one(db).await.map_err(err)? {
+            water_model_slugs.push(w.slug);
+        }
+    }
+
+    let cm_junctions = crate::routes::projects::project_climate_model::Entity::find()
+        .filter(crate::routes::projects::project_climate_model::Column::ProjectId.eq(project_id))
+        .order_by_asc(crate::routes::projects::project_climate_model::Column::SortOrder)
+        .all(db).await.map_err(err)?;
+    let mut climate_model_slugs = Vec::new();
+    for j in &cm_junctions {
+        if let Some(c) = climate_model::Entity::find_by_id(j.climate_model_id).one(db).await.map_err(err)? {
+            climate_model_slugs.push(c.slug);
+        }
+    }
+
+    let sc_junctions = crate::routes::projects::project_scenario::Entity::find()
+        .filter(crate::routes::projects::project_scenario::Column::ProjectId.eq(project_id))
+        .order_by_asc(crate::routes::projects::project_scenario::Column::SortOrder)
+        .all(db).await.map_err(err)?;
+    let mut scenario_slugs = Vec::new();
+    for j in &sc_junctions {
+        if let Some(s) = scenario::Entity::find_by_id(j.scenario_id).one(db).await.map_err(err)? {
+            scenario_slugs.push(s.slug);
+        }
+    }
+
+    let var_junctions = crate::routes::projects::project_variable::Entity::find()
+        .filter(crate::routes::projects::project_variable::Column::ProjectId.eq(project_id))
+        .order_by_asc(crate::routes::projects::project_variable::Column::SortOrder)
+        .all(db).await.map_err(err)?;
+    let mut variable_slugs = Vec::new();
+    for j in &var_junctions {
+        if let Some(v) = variable::Entity::find_by_id(j.variable_id).one(db).await.map_err(err)? {
+            variable_slugs.push(v.slug);
+        }
+    }
+
+    let layer_count = layer::Entity::find()
         .filter(layer::Column::Enabled.eq(true))
-        .count(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .filter(layer::Column::ProjectId.eq(project_id))
+        .count(db).await.map_err(err)?;
 
-    // Create Collection using STAC types
-    let mut collection = Collection::new("drop4crop-tiles", "Drop4Crop: Global Agricultural Impact Projections");
-    collection.description = "Global agricultural water stress and crop yield projections from multiple climate and water models. Data includes historical and future scenarios (SSP2-4.5, SSP5-8.5) for major crops including wheat, maize, rice, and soy. Provided as XYZ tile layers and downloadable GeoTIFFs.".to_string();
-    collection.license = "CC-BY-4.0".to_string();
+    let years: Vec<Option<i32>> = layer::Entity::find()
+        .filter(layer::Column::Enabled.eq(true))
+        .filter(layer::Column::ProjectId.eq(project_id))
+        .select_only()
+        .column(layer::Column::Year)
+        .into_tuple()
+        .all(db).await.map_err(err)?;
 
-    // Set extent (using additional_fields since the types are complex)
-    collection.additional_fields.insert(
-        "extent".to_string(),
-        json!({
-            "spatial": {
-                "bbox": [[-180.0, -90.0, 180.0, 90.0]]
-            },
-            "temporal": {
-                "interval": [["2010-01-01T00:00:00Z", "2100-12-31T23:59:59Z"]]
-            }
-        })
-    );
+    let valid_years: Vec<i32> = years.into_iter().flatten().collect();
+    let min_year = valid_years.iter().copied().min();
+    let max_year = valid_years.iter().copied().max();
 
-    // Add links
-    collection.links.push(Link {
-        href: format!("{}/api/stac/collections/drop4crop-tiles", base_url),
-        rel: "self".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
+    Ok(CollectionData {
+        crop_slugs,
+        water_model_slugs,
+        climate_model_slugs,
+        scenario_slugs,
+        variable_slugs,
+        min_year,
+        max_year,
+        layer_count,
+    })
+}
 
-    collection.links.push(Link {
-        href: format!("{}/api/stac", base_url),
-        rel: "root".to_string(),
-        r#type: Some("application/json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
+fn build_collection(
+    proj: &project::Model,
+    data: &CollectionData,
+    base_url: &str,
+) -> Value {
+    let slug = &proj.slug;
+    let license = proj.license.as_deref().unwrap_or("CC-BY-4.0");
+    let providers = proj.providers.as_ref().cloned().unwrap_or_else(default_providers);
 
-    collection.links.push(Link {
-        href: format!("{}/api/stac/collections/drop4crop-tiles/items", base_url),
-        rel: "items".to_string(),
-        r#type: Some("application/geo+json".to_string()),
-        title: None,
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
+    let bbox = proj.extent.as_ref()
+        .and_then(|e| project_extent_to_bbox(e))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
 
-    // Add tiles link for QGIS/other clients to discover XYZ tile endpoint
-    collection.links.push(Link {
-        href: format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={{layer}}", base_url),
-        rel: "tiles".to_string(),
-        r#type: Some("application/vnd.mapbox-vector-tile".to_string()),
-        title: Some("XYZ Tile Template".to_string()),
-        method: None,
-        headers: None,
-        body: None,
-        merge: None,
-        additional_fields: Default::default(),
-    });
+    let temporal_start = data.min_year
+        .map(|y| format!("{}-01-01T00:00:00Z", y))
+        .unwrap_or_else(|| "null".to_string());
+    let temporal_end = data.max_year
+        .map(|y| format!("{}-12-31T23:59:59Z", y))
+        .unwrap_or_else(|| "null".to_string());
 
-    // Add item_assets template - tells QGIS how to access tiles for each item
-    collection.additional_fields.insert(
-        "item_assets".to_string(),
-        json!({
+    let citation_text = proj.citation.as_ref()
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str());
+    let paper_url = proj.citation.as_ref()
+        .and_then(|c| c.get("paper_url"))
+        .and_then(|u| u.as_str());
+    let doi = paper_url.and_then(extract_doi);
+
+    let mut stac_extensions = vec![];
+    if citation_text.is_some() || doi.is_some() {
+        stac_extensions.push(SCIENTIFIC_EXT);
+    }
+
+    let mut links = vec![
+        make_link(format!("{}/api/stac/collections/{}", base_url, slug), "self", "application/json"),
+        make_link(format!("{}/api/stac", base_url), "root", "application/json"),
+        make_link(format!("{}/api/stac", base_url), "parent", "application/json"),
+        make_link(format!("{}/api/stac/collections/{}/items", base_url, slug), "items", "application/geo+json"),
+        make_link_titled(
+            format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={{layer}}", base_url),
+            "tiles", "application/vnd.mapbox-vector-tile", "XYZ Tile Template",
+        ),
+    ];
+
+    if let Some(url) = paper_url {
+        links.push(make_link_titled(url.to_string(), "cite-as", "text/html", "Publication"));
+    }
+
+    let mut collection_json = json!({
+        "type": "Collection",
+        "id": slug,
+        "stac_version": "1.0.0",
+        "stac_extensions": stac_extensions,
+        "title": proj.title,
+        "description": proj.description.as_deref().unwrap_or(""),
+        "license": license,
+        "extent": {
+            "spatial": { "bbox": [bbox] },
+            "temporal": { "interval": [[temporal_start, temporal_end]] }
+        },
+        "links": links,
+        "providers": providers,
+        "item_assets": {
             "tiles": {
                 "type": "image/png",
                 "roles": ["visual", "tiles"],
@@ -233,117 +274,212 @@ pub async fn stac_collections(
                 "description": "Full resolution Cloud Optimized GeoTIFF with HTTP Range support for streaming",
                 "href": format!("{}/api/layers/cog/{{item_id}}.tif", base_url)
             }
-        })
-    );
+        },
+        "summaries": {
+            "drop4crop:crop": data.crop_slugs,
+            "drop4crop:water_model": data.water_model_slugs,
+            "drop4crop:climate_model": data.climate_model_slugs,
+            "drop4crop:scenario": data.scenario_slugs,
+            "drop4crop:variable": data.variable_slugs,
+        },
+        "item_count": data.layer_count,
+    });
 
-    collection.additional_fields.insert(
-        "summaries".to_string(),
-        json!({
-            "platform": ["CHANGE Lab - EPFL"],
-            "instruments": ["LPJmL"],
-            "gsd": [0.5],  // 0.5 degree resolution
-            "crop": ["wheat", "maize", "rice", "soy"],
-            "scenario": ["historical", "ssp245", "ssp585"],
-            "climate_model": ["gfdl-esm4", "ipsl-cm6a-lr", "mpi-esm1-2-hr", "mri-esm2-0", "ukesm1-0-ll"],
-            "water_model": ["lpjml"],
-            "datetime": ["2010-01-01T00:00:00Z", "2100-12-31T23:59:59Z"]
-        })
-    );
-
-    collection.keywords = Some(vec![
-        "agriculture".to_string(),
-        "water stress".to_string(),
-        "crop yield".to_string(),
-        "climate change".to_string(),
-        "climate projections".to_string(),
-        "LPJmL".to_string(),
-        "irrigation".to_string(),
-        "food security".to_string(),
-        "CMIP6".to_string(),
-        "SSP scenarios".to_string(),
-    ]);
-
-    collection.additional_fields.insert(
-        "providers".to_string(),
-        json!([
-            {
-                "name": "CHANGE Lab - EPFL",
-                "description": "Data and content provided by the CHANGE lab at EPFL",
-                "roles": ["producer", "processor", "host"],
-                "url": "https://www.epfl.ch/labs/change/"
-            },
-            {
-                "name": "Francesca Bassani",
-                "roles": ["producer"],
-                "url": "https://people.epfl.ch/francesca.bassani"
-            },
-            {
-                "name": "Qiming Sun",
-                "roles": ["producer"],
-                "url": "https://people.epfl.ch/qiming.sun"
-            },
-            {
-                "name": "Sara Bonetti",
-                "roles": ["producer"],
-                "url": "https://people.epfl.ch/sara.bonetti"
+    if let Some(kw) = &proj.keywords {
+        if let Some(arr) = kw.as_array() {
+            if !arr.is_empty() {
+                collection_json["keywords"] = kw.clone();
             }
+        }
+    }
+
+    if let Some(text) = citation_text {
+        collection_json["sci:citation"] = json!(text);
+    }
+    if let Some(d) = &doi {
+        collection_json["sci:doi"] = json!(d);
+    }
+
+    collection_json
+}
+
+pub async fn stac_root(
+    headers: HeaderMap,
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, StatusCode> {
+    let base_url = get_base_url(&headers);
+    let db = &app_state.db;
+
+    let projects = project::Entity::find()
+        .filter(project::Column::Enabled.eq(true))
+        .order_by_asc(project::Column::SortOrder)
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut catalog = Catalog::new("drop4crop", "Drop4Crop: Agricultural Water Stress and Crop Yield Data");
+    catalog.description = "Spatiotemporal Asset Catalog providing global agricultural water stress and crop yield projections. Data and content provided by the CHANGE Lab at EPFL.".to_string();
+
+    catalog.links.push(make_link(format!("{}/api/stac", base_url), "self", "application/json"));
+    catalog.links.push(make_link(format!("{}/api/stac", base_url), "root", "application/json"));
+    catalog.links.push(make_link(format!("{}/api/stac/collections", base_url), "data", "application/json"));
+    catalog.links.push(make_link(format!("{}/api/stac/search", base_url), "search", "application/json"));
+    catalog.links.push(make_link(format!("{}/api/stac/conformance", base_url), "conformance", "application/json"));
+
+    for p in &projects {
+        catalog.links.push(make_link_titled(
+            format!("{}/api/stac/collections/{}", base_url, p.slug),
+            "child", "application/json", &p.title,
+        ));
+    }
+
+    catalog.additional_fields.insert(
+        "conformsTo".to_string(),
+        json!([
+            "https://api.stacspec.org/v1.0.0/core",
+            "https://api.stacspec.org/v1.0.0/collections",
+            "https://api.stacspec.org/v1.0.0/item-search",
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson"
         ])
     );
 
-    collection.additional_fields.insert(
-        "item_count".to_string(),
-        json!(count)
-    );
+    Ok(Json(serde_json::to_value(catalog).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+}
 
-    // Add documentation and citation links
-    collection.additional_fields.insert(
-        "sci:citation".to_string(),
-        json!("Bassani, F., Sun, Q., Bonetti, S. (2025). Drop4Crop: Global Agricultural Water Stress and Crop Yield Projections. CHANGE Lab, EPFL.")
-    );
+pub async fn stac_conformance() -> Json<Conformance> {
+    Json(Conformance {
+        conforms_to: vec![
+            "https://api.stacspec.org/v1.0.0/core".to_string(),
+            "https://api.stacspec.org/v1.0.0/collections".to_string(),
+            "https://api.stacspec.org/v1.0.0/item-search".to_string(),
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core".to_string(),
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson".to_string(),
+        ],
+    })
+}
 
-    collection.additional_fields.insert(
-        "sci:doi".to_string(),
-        json!("10.5281/zenodo.XXXXXXX")  // Placeholder - update with actual DOI when available
-    );
+pub async fn stac_collections(
+    headers: HeaderMap,
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, StatusCode> {
+    let base_url = get_base_url(&headers);
+    let db = &app_state.db;
 
-    // Return response with collections array and links
+    let projects = project::Entity::find()
+        .filter(project::Column::Enabled.eq(true))
+        .order_by_asc(project::Column::SortOrder)
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut collections = Vec::new();
+    for proj in &projects {
+        let data = gather_collection_data(proj.id, db).await?;
+        collections.push(build_collection(proj, &data, &base_url));
+    }
+
     Ok(Json(json!({
-        "collections": [collection],
+        "collections": collections,
         "links": [
-            {
-                "rel": "self",
-                "type": "application/json",
-                "href": format!("{}/api/stac/collections", base_url)
-            },
-            {
-                "rel": "root",
-                "type": "application/json",
-                "href": format!("{}/api/stac", base_url)
-            }
+            make_link(format!("{}/api/stac/collections", base_url), "self", "application/json"),
+            make_link(format!("{}/api/stac", base_url), "root", "application/json"),
         ]
     })))
 }
 
-/// STAC single collection endpoint
 pub async fn stac_collection(
     headers: HeaderMap,
+    Path(collection_id): Path<String>,
     State(app_state): State<AppState>,
-) -> Result<Json<Value>, StatusCode> {
-    let response = stac_collections(headers, State(app_state)).await?;
-    let collections = response.0["collections"].as_array().unwrap();
-    Ok(Json(collections[0].clone()))
+) -> Result<Json<Value>, (StatusCode, Json<String>)> {
+    let base_url = get_base_url(&headers);
+    let db = &app_state.db;
+
+    let proj = project::Entity::find()
+        .filter(project::Column::Slug.eq(&collection_id))
+        .one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json("Collection not found".to_string())))?;
+
+    let data = gather_collection_data(proj.id, db).await
+        .map_err(|s| (s, Json("Failed to gather collection data".to_string())))?;
+
+    Ok(Json(build_collection(&proj, &data, &base_url)))
 }
 
-/// STAC items endpoint - returns all layers as STAC items
 pub async fn stac_items(
     headers: HeaderMap,
-    Query(params): Query<SearchParams>,
+    Path(collection_id): Path<String>,
+    Query(mut params): Query<SearchParams>,
     State(app_state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
+    params.project = Some(collection_id);
     search_items(headers, params, &app_state.db).await
 }
 
-/// STAC search endpoint
+pub async fn stac_item(
+    headers: HeaderMap,
+    Path((collection_id, item_id)): Path<(String, String)>,
+    State(app_state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<String>)> {
+    let base_url = get_base_url(&headers);
+    let db = &app_state.db;
+
+    let proj = project::Entity::find()
+        .filter(project::Column::Slug.eq(&collection_id))
+        .one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json("Collection not found".to_string())))?;
+
+    let layer_with_style = layer::Entity::find()
+        .find_also_related(crate::routes::styles::db::Entity)
+        .filter(layer::Column::Enabled.eq(true))
+        .filter(layer::Column::ProjectId.eq(proj.id))
+        .filter(layer::Column::LayerName.eq(&item_id))
+        .one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json("Item not found".to_string())))?;
+
+    let crop_map: HashMap<Uuid, String> = crop::Entity::find().all(db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let water_model_map: HashMap<Uuid, String> = water_model::Entity::find().all(db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let climate_model_map: HashMap<Uuid, String> = climate_model::Entity::find().all(db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let scenario_map: HashMap<Uuid, String> = scenario::Entity::find().all(db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let variable_map: HashMap<Uuid, String> = variable::Entity::find().all(db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())))?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+
+    let bbox = proj.extent.as_ref()
+        .and_then(|e| project_extent_to_bbox(e))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+
+    let item = build_item(
+        &layer_with_style.0,
+        layer_with_style.1.as_ref(),
+        &proj.slug,
+        bbox,
+        &base_url,
+        &crop_map,
+        &water_model_map,
+        &climate_model_map,
+        &scenario_map,
+        &variable_map,
+    );
+
+    Ok(Json(item))
+}
+
 pub async fn stac_search(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
@@ -352,99 +488,49 @@ pub async fn stac_search(
     search_items(headers, params, &app_state.db).await
 }
 
-/// Common search logic for items and search endpoints
 async fn search_items(
     headers: HeaderMap,
     params: SearchParams,
     db: &sea_orm::DatabaseConnection,
 ) -> Result<Json<Value>, StatusCode> {
     let base_url = get_base_url(&headers);
+    let err = |_| StatusCode::INTERNAL_SERVER_ERROR;
 
-    // Build query with filters - join with style table
     let mut query = layer::Entity::find()
         .find_also_related(crate::routes::styles::db::Entity)
         .filter(layer::Column::Enabled.eq(true));
 
     if let Some(crop_slug) = &params.crop {
-        let crop_id = crop::Entity::find()
-            .filter(crop::Column::Slug.eq(crop_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map(|m| m.id);
-        if let Some(id) = crop_id {
-            query = query.filter(layer::Column::CropId.eq(id));
-        } else {
-            // Slug not found -- filter will match nothing
-            query = query.filter(layer::Column::CropId.eq(Uuid::nil()));
-        }
+        let id = crop::Entity::find().filter(crop::Column::Slug.eq(crop_slug.as_str()))
+            .one(db).await.map_err(err)?.map(|m| m.id);
+        query = query.filter(layer::Column::CropId.eq(id.unwrap_or(Uuid::nil())));
     }
     if let Some(wm_slug) = &params.water_model {
-        let wm_id = water_model::Entity::find()
-            .filter(water_model::Column::Slug.eq(wm_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map(|m| m.id);
-        if let Some(id) = wm_id {
-            query = query.filter(layer::Column::WaterModelId.eq(id));
-        } else {
-            query = query.filter(layer::Column::WaterModelId.eq(Uuid::nil()));
-        }
+        let id = water_model::Entity::find().filter(water_model::Column::Slug.eq(wm_slug.as_str()))
+            .one(db).await.map_err(err)?.map(|m| m.id);
+        query = query.filter(layer::Column::WaterModelId.eq(id.unwrap_or(Uuid::nil())));
     }
     if let Some(cm_slug) = &params.climate_model {
-        let cm_id = climate_model::Entity::find()
-            .filter(climate_model::Column::Slug.eq(cm_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map(|m| m.id);
-        if let Some(id) = cm_id {
-            query = query.filter(layer::Column::ClimateModelId.eq(id));
-        } else {
-            query = query.filter(layer::Column::ClimateModelId.eq(Uuid::nil()));
-        }
+        let id = climate_model::Entity::find().filter(climate_model::Column::Slug.eq(cm_slug.as_str()))
+            .one(db).await.map_err(err)?.map(|m| m.id);
+        query = query.filter(layer::Column::ClimateModelId.eq(id.unwrap_or(Uuid::nil())));
     }
     if let Some(sc_slug) = &params.scenario {
-        let sc_id = scenario::Entity::find()
-            .filter(scenario::Column::Slug.eq(sc_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map(|m| m.id);
-        if let Some(id) = sc_id {
-            query = query.filter(layer::Column::ScenarioId.eq(id));
-        } else {
-            query = query.filter(layer::Column::ScenarioId.eq(Uuid::nil()));
-        }
+        let id = scenario::Entity::find().filter(scenario::Column::Slug.eq(sc_slug.as_str()))
+            .one(db).await.map_err(err)?.map(|m| m.id);
+        query = query.filter(layer::Column::ScenarioId.eq(id.unwrap_or(Uuid::nil())));
     }
     if let Some(var_slug) = &params.variable {
-        let var_id = variable::Entity::find()
-            .filter(variable::Column::Slug.eq(var_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map(|m| m.id);
-        if let Some(id) = var_id {
-            query = query.filter(layer::Column::VariableId.eq(id));
-        } else {
-            query = query.filter(layer::Column::VariableId.eq(Uuid::nil()));
-        }
+        let id = variable::Entity::find().filter(variable::Column::Slug.eq(var_slug.as_str()))
+            .one(db).await.map_err(err)?.map(|m| m.id);
+        query = query.filter(layer::Column::VariableId.eq(id.unwrap_or(Uuid::nil())));
     }
     if let Some(project_slug) = &params.project {
-        let project = crate::routes::projects::db::Entity::find()
-            .filter(crate::routes::projects::db::Column::Slug.eq(project_slug.as_str()))
-            .one(db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(p) = project {
-            query = query.filter(layer::Column::ProjectId.eq(p.id));
-        } else {
-            query = query.filter(layer::Column::ProjectId.eq(Uuid::nil()));
-        }
+        let p = project::Entity::find().filter(project::Column::Slug.eq(project_slug.as_str()))
+            .one(db).await.map_err(err)?;
+        query = query.filter(layer::Column::ProjectId.eq(p.map(|p| p.id).unwrap_or(Uuid::nil())));
     }
     if let Some(datetime) = &params.datetime {
-        // Extract year from datetime string (e.g., "2010-01-01" -> 2010)
         if let Some(year_str) = datetime.split('-').next()
             && let Ok(year) = year_str.parse::<i32>() {
                 query = query.filter(layer::Column::Year.eq(year));
@@ -452,248 +538,58 @@ async fn search_items(
     }
 
     query = query.order_by_asc(layer::Column::LayerName);
-
-    // Apply limit (default 10000 for QGIS compatibility, max 10000)
     let limit = params.limit.unwrap_or(10000).min(10000);
 
-    let layers = query
-        .limit(limit as u64)
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let layers = query.limit(limit as u64).all(db).await.map_err(err)?;
 
-    // Pre-load all reference tables into lookup maps (id -> slug)
-    let crop_map: HashMap<Uuid, String> = crop::Entity::find()
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    let crop_map: HashMap<Uuid, String> = crop::Entity::find().all(db).await.map_err(err)?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let water_model_map: HashMap<Uuid, String> = water_model::Entity::find().all(db).await.map_err(err)?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let climate_model_map: HashMap<Uuid, String> = climate_model::Entity::find().all(db).await.map_err(err)?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let scenario_map: HashMap<Uuid, String> = scenario::Entity::find().all(db).await.map_err(err)?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+    let variable_map: HashMap<Uuid, String> = variable::Entity::find().all(db).await.map_err(err)?
+        .into_iter().map(|m| (m.id, m.slug)).collect();
+
+    let project_map: HashMap<Uuid, (String, [f64; 4])> = project::Entity::find()
+        .all(db).await.map_err(err)?
         .into_iter()
-        .map(|m| (m.id, m.slug))
-        .collect();
-
-    let water_model_map: HashMap<Uuid, String> = water_model::Entity::find()
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .map(|m| (m.id, m.slug))
-        .collect();
-
-    let climate_model_map: HashMap<Uuid, String> = climate_model::Entity::find()
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .map(|m| (m.id, m.slug))
-        .collect();
-
-    let scenario_map: HashMap<Uuid, String> = scenario::Entity::find()
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .map(|m| (m.id, m.slug))
-        .collect();
-
-    let variable_map: HashMap<Uuid, String> = variable::Entity::find()
-        .all(db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .into_iter()
-        .map(|m| (m.id, m.slug))
-        .collect();
-
-    // Convert layers to STAC items
-    let features: Vec<Value> = layers
-        .iter()
-        .map(|(layer_record, style_opt)| {
-            let unknown = "unknown".to_string();
-            let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
-            let year = layer_record.year.unwrap_or(2010);
-
-            // Resolve FK UUIDs to slug strings via lookup maps
-            let crop_slug = layer_record.crop_id
-                .and_then(|id| crop_map.get(&id).cloned())
-                .unwrap_or_default();
-            let water_model_slug = layer_record.water_model_id
-                .and_then(|id| water_model_map.get(&id).cloned())
-                .unwrap_or_default();
-            let climate_model_slug = layer_record.climate_model_id
-                .and_then(|id| climate_model_map.get(&id).cloned())
-                .unwrap_or_default();
-            let scenario_slug = layer_record.scenario_id
-                .and_then(|id| scenario_map.get(&id).cloned())
-                .unwrap_or_default();
-            let variable_slug = layer_record.variable_id
-                .and_then(|id| variable_map.get(&id).cloned())
-                .unwrap_or_default();
-
-            // Convert style to JSON if present, and get style settings
-            let style_json = style_opt.as_ref().and_then(|style| {
-                style.style.as_ref()
-            });
-            let interpolation_type = style_opt.as_ref().map(|style| {
-                style.interpolation_type.as_str()
-            }).unwrap_or("linear");
-            let label_display_mode = style_opt.as_ref().map(|style| {
-                style.label_display_mode.as_str()
-            }).unwrap_or("auto");
-            let label_count = style_opt.as_ref().and_then(|style| {
-                style.label_count
-            });
-
-            let crop_display = if crop_slug.is_empty() { "unknown".to_string() } else { crop_slug.clone() };
-            let wm_display = if water_model_slug.is_empty() { "unknown".to_string() } else { water_model_slug.clone() };
-            let cm_display = if climate_model_slug.is_empty() { "unknown".to_string() } else { climate_model_slug.clone() };
-            let sc_display = if scenario_slug.is_empty() { "unknown".to_string() } else { scenario_slug.clone() };
-            let var_display = if variable_slug.is_empty() { "unknown".to_string() } else { variable_slug.clone() };
-
-            json!({
-                "stac_version": "1.0.0",
-                "stac_extensions": [
-                    "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-                    "https://stac-extensions.github.io/raster/v1.1.0/schema.json"
-                ],
-                "type": "Feature",
-                "id": layer_name,
-                "collection": "drop4crop-tiles",
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [[
-                        [-180.0, -90.0],
-                        [180.0, -90.0],
-                        [180.0, 90.0],
-                        [-180.0, 90.0],
-                        [-180.0, -90.0]
-                    ]]
-                },
-                "bbox": [-180.0, -90.0, 180.0, 90.0],
-                "properties": {
-                    "datetime": format!("{}-01-01T00:00:00Z", year),
-                    "start_datetime": format!("{}-01-01T00:00:00Z", year),
-                    "end_datetime": format!("{}-12-31T23:59:59Z", year),
-                    "title": format!("{} - {} {} {} {} ({})",
-                        crop_display,
-                        wm_display,
-                        cm_display,
-                        sc_display,
-                        year,
-                        var_display
-                    ),
-                    "description": format!("Agricultural impact data for {} using {} water model and {} climate model under {} scenario",
-                        crop_display,
-                        wm_display,
-                        cm_display,
-                        sc_display
-                    ),
-                    "crop": crop_slug,
-                    "water_model": water_model_slug,
-                    "climate_model": climate_model_slug,
-                    "scenario": scenario_slug,
-                    "variable": variable_slug,
-                    "year": year,
-                    "global_average": layer_record.global_average,
-                    "min_value": layer_record.min_value,
-                    "max_value": layer_record.max_value,
-                    "style": style_json,
-                    "interpolation_type": interpolation_type,
-                    "label_display_mode": label_display_mode,
-                    "label_count": label_count,
-                },
-                "links": [
-                    {
-                        "rel": "self",
-                        "type": "application/geo+json",
-                        "href": format!("{}/api/stac/collections/drop4crop-tiles/items/{}", base_url, layer_name)
-                    },
-                    {
-                        "rel": "collection",
-                        "type": "application/json",
-                        "href": format!("{}/api/stac/collections/drop4crop-tiles", base_url)
-                    },
-                    {
-                        "rel": "root",
-                        "type": "application/json",
-                        "href": format!("{}/api/stac", base_url)
-                    },
-                    {
-                        "rel": "alternate",
-                        "type": "application/vnd.mapbox-vector-tile",
-                        "title": "XYZ Tiles (Web Mercator)",
-                        "href": format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={}", base_url, layer_name)
-                    },
-                    {
-                        "rel": "preview",
-                        "type": "image/png",
-                        "title": "Visual Preview",
-                        "href": format!("{}/api/tiles/{{z}}/{{x}}/{{y}}?layer={}", base_url, layer_name)
-                    }
-                ],
-                "assets": {
-                    "rendered_preview": {
-                        "href": format!("{}/api/tiles/{{z}}/{{x}}/{{y}}?layer={}", base_url, layer_name),
-                        "type": "image/png",
-                        "roles": ["visual", "overview"],
-                        "title": "XYZ Tiles (EPSG:3857)",
-                        "description": "Pre-rendered PNG tiles for web mapping",
-                        "proj:epsg": 3857,
-                        "proj:shape": [256, 256],
-                        "proj:bbox": [-20037508.34, -20037508.34, 20037508.34, 20037508.34],
-                        "proj:transform": [156543.03392804097, 0.0, -20037508.34, 0.0, -156543.03392804097, 20037508.34],
-                        "tile:tile_matrix_set": "WebMercatorQuad",
-                        "raster:bands": [{
-                            "data_type": "uint8",
-                            "spatial_resolution": 156543.03392804097,
-                            "nodata": 0
-                        }]
-                    },
-                    "data": {
-                        "href": format!("{}/api/layers/cog/{}.tif", base_url, layer_name),
-                        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
-                        "roles": ["data"],
-                        "title": "Cloud Optimized GeoTIFF (EPSG:4326)",
-                        "description": "Full resolution data in WGS84",
-                        "proj:epsg": 4326,
-                        "proj:shape": [360, 720],
-                        "proj:bbox": [-180.0, -90.0, 180.0, 90.0],
-                        "raster:bands": [{
-                            "data_type": "float32",
-                            "spatial_resolution": 0.5,
-                            "unit": var_display,
-                            "statistics": {
-                                "minimum": layer_record.min_value.unwrap_or(0.0),
-                                "maximum": layer_record.max_value.unwrap_or(1.0),
-                                "mean": layer_record.global_average
-                            }
-                        }]
-                    }
-                }
-            })
+        .map(|p| {
+            let bbox = p.extent.as_ref()
+                .and_then(|e| project_extent_to_bbox(e))
+                .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+            (p.id, (p.slug, bbox))
         })
         .collect();
 
-    // Create ItemCollection using stac-api types
-    // Convert JSON Values to Maps for ItemCollection
-    let item_count = features.len();
-    let items: Vec<serde_json::Map<String, Value>> = features.into_iter().filter_map(|f| {
-        f.as_object().cloned()
+    let features: Vec<Value> = layers.iter().map(|(layer_record, style_opt)| {
+        let (proj_slug, proj_bbox) = layer_record.project_id
+            .and_then(|pid| project_map.get(&pid))
+            .map(|(s, b)| (s.as_str(), *b))
+            .unwrap_or(("unknown", [-180.0, -90.0, 180.0, 90.0]));
+
+        build_item(
+            layer_record, style_opt.as_ref(), proj_slug, proj_bbox, &base_url,
+            &crop_map, &water_model_map, &climate_model_map, &scenario_map, &variable_map,
+        )
     }).collect();
+
+    let item_count = features.len();
+    let items: Vec<serde_json::Map<String, Value>> = features.into_iter()
+        .filter_map(|f| f.as_object().cloned()).collect();
 
     let mut item_collection = ItemCollection::new(items)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     item_collection.links.push(
-        Link::new(
-            format!("{}/api/stac/search?limit={}", base_url, limit),
-            "self",
-        ).r#type(Some("application/geo+json".to_string()))
+        Link::new(format!("{}/api/stac/search?limit={}", base_url, limit), "self")
+            .r#type(Some("application/geo+json".to_string()))
     );
-
     item_collection.links.push(
-        Link::new(
-            format!("{}/api/stac", base_url),
-            "root",
-        ).r#type(Some("application/json".to_string()))
+        Link::new(format!("{}/api/stac", base_url), "root")
+            .r#type(Some("application/json".to_string()))
     );
 
     item_collection.context = Some(Context {
@@ -703,8 +599,140 @@ async fn search_items(
         additional_fields: Default::default(),
     });
 
-    Ok(Json(serde_json::to_value(item_collection)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+    Ok(Json(serde_json::to_value(item_collection).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?))
+}
+
+fn build_item(
+    layer_record: &layer::Model,
+    style_opt: Option<&crate::routes::styles::db::Model>,
+    collection_slug: &str,
+    bbox: [f64; 4],
+    base_url: &str,
+    crop_map: &HashMap<Uuid, String>,
+    water_model_map: &HashMap<Uuid, String>,
+    climate_model_map: &HashMap<Uuid, String>,
+    scenario_map: &HashMap<Uuid, String>,
+    variable_map: &HashMap<Uuid, String>,
+) -> Value {
+    let unknown = "unknown".to_string();
+    let layer_name = layer_record.layer_name.as_ref().unwrap_or(&unknown);
+    let year = layer_record.year.unwrap_or(2010);
+
+    let crop_slug = layer_record.crop_id.and_then(|id| crop_map.get(&id).cloned()).unwrap_or_default();
+    let wm_slug = layer_record.water_model_id.and_then(|id| water_model_map.get(&id).cloned()).unwrap_or_default();
+    let cm_slug = layer_record.climate_model_id.and_then(|id| climate_model_map.get(&id).cloned()).unwrap_or_default();
+    let sc_slug = layer_record.scenario_id.and_then(|id| scenario_map.get(&id).cloned()).unwrap_or_default();
+    let var_slug = layer_record.variable_id.and_then(|id| variable_map.get(&id).cloned()).unwrap_or_default();
+
+    let style_json = style_opt.and_then(|s| s.style.as_ref());
+    let interpolation_type = style_opt.map(|s| s.interpolation_type.as_str()).unwrap_or("linear");
+    let label_display_mode = style_opt.map(|s| s.label_display_mode.as_str()).unwrap_or("auto");
+    let label_count = style_opt.and_then(|s| s.label_count);
+
+    let crop_d = if crop_slug.is_empty() { "unknown" } else { &crop_slug };
+    let wm_d = if wm_slug.is_empty() { "unknown" } else { &wm_slug };
+    let cm_d = if cm_slug.is_empty() { "unknown" } else { &cm_slug };
+    let sc_d = if sc_slug.is_empty() { "unknown" } else { &sc_slug };
+    let var_d = if var_slug.is_empty() { "unknown" } else { &var_slug };
+
+    let [west, south, east, north] = bbox;
+    let geometry = json!({
+        "type": "Polygon",
+        "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]]
+    });
+
+    json!({
+        "stac_version": "1.0.0",
+        "stac_extensions": [
+            PROJECTION_EXT,
+            RASTER_EXT,
+            DROP4CROP_EXT,
+        ],
+        "type": "Feature",
+        "id": layer_name,
+        "collection": collection_slug,
+        "geometry": geometry,
+        "bbox": [west, south, east, north],
+        "properties": {
+            "datetime": format!("{}-01-01T00:00:00Z", year),
+            "start_datetime": format!("{}-01-01T00:00:00Z", year),
+            "end_datetime": format!("{}-12-31T23:59:59Z", year),
+            "title": format!("{} - {} {} {} {} ({})", crop_d, wm_d, cm_d, sc_d, year, var_d),
+            "description": format!("Agricultural impact data for {} using {} water model and {} climate model under {} scenario", crop_d, wm_d, cm_d, sc_d),
+            "drop4crop:crop": crop_slug,
+            "drop4crop:water_model": wm_slug,
+            "drop4crop:climate_model": cm_slug,
+            "drop4crop:scenario": sc_slug,
+            "drop4crop:variable": var_slug,
+            "drop4crop:year": year,
+            "drop4crop:global_average": layer_record.global_average,
+            "drop4crop:min_value": layer_record.min_value,
+            "drop4crop:max_value": layer_record.max_value,
+            "drop4crop:style": style_json,
+            "drop4crop:interpolation_type": interpolation_type,
+            "drop4crop:label_display_mode": label_display_mode,
+            "drop4crop:label_count": label_count,
+        },
+        "links": [
+            {
+                "rel": "self",
+                "type": "application/geo+json",
+                "href": format!("{}/api/stac/collections/{}/items/{}", base_url, collection_slug, layer_name)
+            },
+            {
+                "rel": "collection",
+                "type": "application/json",
+                "href": format!("{}/api/stac/collections/{}", base_url, collection_slug)
+            },
+            {
+                "rel": "parent",
+                "type": "application/json",
+                "href": format!("{}/api/stac/collections/{}", base_url, collection_slug)
+            },
+            {
+                "rel": "root",
+                "type": "application/json",
+                "href": format!("{}/api/stac", base_url)
+            },
+        ],
+        "assets": {
+            "rendered_preview": {
+                "href": format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={}", base_url, layer_name),
+                "type": "image/png",
+                "roles": ["visual", "overview"],
+                "title": "XYZ Tiles (EPSG:3857)",
+                "description": "Pre-rendered PNG tiles for web mapping",
+                "proj:epsg": 3857,
+                "proj:shape": [256, 256],
+                "proj:bbox": [-20037508.34, -20037508.34, 20037508.34, 20037508.34],
+                "raster:bands": [{
+                    "data_type": "uint8",
+                    "spatial_resolution": 156543.03392804097,
+                    "nodata": 0
+                }]
+            },
+            "data": {
+                "href": format!("{}/api/layers/cog/{}.tif", base_url, layer_name),
+                "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                "roles": ["data"],
+                "title": "Cloud Optimized GeoTIFF (EPSG:4326)",
+                "description": "Full resolution data in WGS84",
+                "proj:epsg": 4326,
+                "proj:shape": [360, 720],
+                "proj:bbox": [-180.0, -90.0, 180.0, 90.0],
+                "raster:bands": [{
+                    "data_type": "float32",
+                    "spatial_resolution": 0.5,
+                    "unit": var_d,
+                    "statistics": {
+                        "minimum": layer_record.min_value.unwrap_or(0.0),
+                        "maximum": layer_record.max_value.unwrap_or(1.0),
+                        "mean": layer_record.global_average
+                    }
+                }]
+            }
+        }
+    })
 }
 
 fn get_base_url(headers: &HeaderMap) -> String {

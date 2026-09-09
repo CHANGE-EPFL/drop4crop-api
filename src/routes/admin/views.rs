@@ -9,7 +9,9 @@ use crate::common::state::AppState;
 use crate::common::auth::Role;
 use crate::routes::admin::db::layer_statistics;
 use axum_keycloak_auth::{layer::KeycloakAuthLayer, PassthroughMode};
-use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -88,6 +90,41 @@ struct StatsFilter {
     layer_name: Option<String>,
     start_date: Option<String>,
     end_date: Option<String>,
+}
+
+/// The statistics filter after parsing, as the query needs it.
+#[derive(Debug)]
+struct ParsedStatsFilter {
+    layer_name: Option<String>,
+    start_date: Option<chrono::NaiveDate>,
+    end_date: Option<chrono::NaiveDate>,
+}
+
+/// Reads the react-admin `filter` parameter. A filter that cannot be read is a
+/// bad request: answering with an unfiltered page shows the reader the whole
+/// table under the filter they just entered.
+fn parse_stats_filter(raw: Option<&str>) -> Result<Option<ParsedStatsFilter>, StatusCode> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let filter: StatsFilter = serde_json::from_str(raw).map_err(|e| {
+        debug!(error = %e, filter = raw, "Rejecting unreadable statistics filter");
+        StatusCode::BAD_REQUEST
+    })?;
+    let parse_date = |d: &Option<String>| match d {
+        Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .map(Some)
+            .map_err(|e| {
+                debug!(error = %e, date = s, "Rejecting unreadable statistics date");
+                StatusCode::BAD_REQUEST
+            }),
+        None => Ok(None),
+    };
+    Ok(Some(ParsedStatsFilter {
+        start_date: parse_date(&filter.start_date)?,
+        end_date: parse_date(&filter.end_date)?,
+        layer_name: filter.layer_name,
+    }))
 }
 
 #[derive(Serialize)]
@@ -170,6 +207,19 @@ struct AggregatedCacheEntry {
     png_tile_size_mb: f64,
 }
 
+/// Days covered by the summary's weekly total and its daily breakdown.
+const STATS_WINDOW_DAYS: i64 = 7;
+
+/// Inclusive date range covering the `days` most recent days, ending on `today`.
+fn recent_days(today: chrono::NaiveDate, days: i64) -> (chrono::NaiveDate, chrono::NaiveDate) {
+    (today - chrono::Duration::days(days - 1), today)
+}
+
+/// The days of an inclusive range, oldest first.
+fn days_in_range(from: chrono::NaiveDate, to: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    from.iter_days().take_while(|d| *d <= to).collect()
+}
+
 /// GET /api/admin/stats/summary - Dashboard overview
 async fn get_stats_summary(
     State(app_state): State<AppState>,
@@ -179,7 +229,7 @@ async fn get_stats_summary(
 
     let db = &app_state.db;
     let today = chrono::Utc::now().naive_utc().date();
-    let week_ago = today - chrono::Duration::days(7);
+    let (week_start, _) = recent_days(today, STATS_WINDOW_DAYS);
     let day_ago = chrono::Utc::now() - chrono::Duration::hours(24);
 
     // Total requests all time
@@ -226,7 +276,7 @@ async fn get_stats_summary(
 
     // Total requests this week
     let week_stats = layer_statistics::Entity::find()
-        .filter(layer_statistics::Column::StatDate.gte(week_ago))
+        .filter(layer_statistics::Column::StatDate.gte(week_start))
         .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -242,7 +292,7 @@ async fn get_stats_summary(
         })
         .sum();
 
-    // Most accessed layer (past 7 days)
+    // Most accessed layer, over the same window as the totals
     let mut layer_totals: HashMap<uuid::Uuid, i64> = HashMap::new();
     for stat in &week_stats {
         let total = stat.xyz_tile_count as i64
@@ -284,10 +334,9 @@ async fn get_stats_summary(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as i64;
 
-    // Daily breakdown for last 7 days (for charts)
+    // Daily breakdown over the same window, for charts
     let mut daily_requests = Vec::new();
-    for i in (0..7).rev() {
-        let date = today - chrono::Duration::days(i);
+    for date in days_in_range(week_start, today) {
         let date_str = date.format("%Y-%m-%d").to_string();
 
         // Sum all requests for this date across all layers
@@ -325,6 +374,47 @@ async fn get_stats_summary(
     }))
 }
 
+/// The column a statistics list sort orders on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsSort {
+    StatDate,
+    LastAccessedAt,
+    XyzTileCount,
+    CogDownloadCount,
+    PixelQueryCount,
+    StacRequestCount,
+    OtherRequestCount,
+    LayerName,
+    TotalRequests,
+}
+
+/// The sum of the five counters, as SQL, so `total_requests` can be ordered on
+/// in the database rather than after the page has been cut.
+fn total_requests_expr() -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::sea_query::Expr;
+    Expr::col(layer_statistics::Column::XyzTileCount)
+        .add(Expr::col(layer_statistics::Column::CogDownloadCount))
+        .add(Expr::col(layer_statistics::Column::PixelQueryCount))
+        .add(Expr::col(layer_statistics::Column::StacRequestCount))
+        .add(Expr::col(layer_statistics::Column::OtherRequestCount))
+}
+
+fn stats_sort_target(field: Option<&str>) -> Option<StatsSort> {
+    match field {
+        Some("stat_date") => Some(StatsSort::StatDate),
+        Some("last_accessed_at") => Some(StatsSort::LastAccessedAt),
+        Some("xyz_tile_count") => Some(StatsSort::XyzTileCount),
+        Some("cog_download_count") => Some(StatsSort::CogDownloadCount),
+        Some("pixel_query_count") => Some(StatsSort::PixelQueryCount),
+        Some("stac_request_count") => Some(StatsSort::StacRequestCount),
+        Some("other_request_count") => Some(StatsSort::OtherRequestCount),
+        Some("layer_name") => Some(StatsSort::LayerName),
+        Some("total_requests") => Some(StatsSort::TotalRequests),
+        None => Some(StatsSort::LastAccessedAt),
+        Some(_) => None,
+    }
+}
+
 /// GET /api/admin/stats/layers - All layer statistics
 async fn get_layer_stats(
     State(app_state): State<AppState>,
@@ -336,10 +426,7 @@ async fn get_layer_stats(
 
     let db = &app_state.db;
 
-    // Parse filter JSON if provided
-    let filter: Option<StatsFilter> = params.filter.as_ref().and_then(|f| {
-        serde_json::from_str(f).ok()
-    });
+    let filter = parse_stats_filter(params.filter.as_deref())?;
 
     // Parse range using crudcrate utility (returns [start, end])
     let (start, end) = crudcrate::parse_range(params.range.clone());
@@ -389,15 +476,13 @@ async fn get_layer_stats(
         }
 
         // Apply date filters
-        if let Some(ref start) = f.start_date
-            && let Ok(date) = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d") {
-                query = query.filter(layer_statistics::Column::StatDate.gte(date));
-            }
+        if let Some(start) = f.start_date {
+            query = query.filter(layer_statistics::Column::StatDate.gte(start));
+        }
 
-        if let Some(ref end) = f.end_date
-            && let Ok(date) = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d") {
-                query = query.filter(layer_statistics::Column::StatDate.lte(date));
-            }
+        if let Some(end) = f.end_date {
+            query = query.filter(layer_statistics::Column::StatDate.lte(end));
+        }
     } else {
         debug!("No filter provided");
     }
@@ -409,16 +494,35 @@ async fn get_layer_stats(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
 
-    // Apply sorting based on field name
-    let query = match sort_field.as_deref() {
-        Some("stat_date") => query.order_by(layer_statistics::Column::StatDate, sort_order),
-        Some("last_accessed_at") => query.order_by(layer_statistics::Column::LastAccessedAt, sort_order),
-        Some("xyz_tile_count") => query.order_by(layer_statistics::Column::XyzTileCount, sort_order),
-        Some("cog_download_count") => query.order_by(layer_statistics::Column::CogDownloadCount, sort_order),
-        Some("pixel_query_count") => query.order_by(layer_statistics::Column::PixelQueryCount, sort_order),
-        Some("stac_request_count") => query.order_by(layer_statistics::Column::StacRequestCount, sort_order),
-        Some("other_request_count") => query.order_by(layer_statistics::Column::OtherRequestCount, sort_order),
-        _ => query.order_by(layer_statistics::Column::LastAccessedAt, sort_order),
+    let Some(sort_target) = stats_sort_target(sort_field.as_deref()) else {
+        warn!(field = ?sort_field, "Unknown statistics sort field");
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let query = match sort_target {
+        StatsSort::StatDate => query.order_by(layer_statistics::Column::StatDate, sort_order),
+        StatsSort::LastAccessedAt => {
+            query.order_by(layer_statistics::Column::LastAccessedAt, sort_order)
+        }
+        StatsSort::XyzTileCount => query.order_by(layer_statistics::Column::XyzTileCount, sort_order),
+        StatsSort::CogDownloadCount => {
+            query.order_by(layer_statistics::Column::CogDownloadCount, sort_order)
+        }
+        StatsSort::PixelQueryCount => {
+            query.order_by(layer_statistics::Column::PixelQueryCount, sort_order)
+        }
+        StatsSort::StacRequestCount => {
+            query.order_by(layer_statistics::Column::StacRequestCount, sort_order)
+        }
+        StatsSort::OtherRequestCount => {
+            query.order_by(layer_statistics::Column::OtherRequestCount, sort_order)
+        }
+        StatsSort::LayerName => query
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                layer_statistics::Relation::Layer.def(),
+            )
+            .order_by(layer::Column::LayerName, sort_order),
+        StatsSort::TotalRequests => query.order_by(total_requests_expr(), sort_order),
     };
 
     let stats = query
@@ -1199,9 +1303,27 @@ struct LiveLayerStats {
     total_requests: i64,
 }
 
-/// GET /api/admin/stats/live - Get real-time statistics from Redis (today's data)
+impl LiveLayerStats {
+    fn new(layer_name: String, date: String) -> Self {
+        Self {
+            layer_id: None,
+            layer_name,
+            date,
+            xyz_tile_count: 0,
+            cog_download_count: 0,
+            pixel_query_count: 0,
+            stac_request_count: 0,
+            other_request_count: 0,
+            total_requests: 0,
+        }
+    }
+}
+
+/// GET /api/admin/stats/live - Today's statistics: the rows already synced to
+/// Postgres plus the counts still sitting in Redis.
 async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<LiveLayerStats>>, StatusCode> {
-    use crate::routes::layers::db as layer;
+    use super::db::layer_statistics;
+    use crate::routes::stats_sync::{find_layer, parse_layer_identifier};
 
     let db = &app_state.db;
     let config = &app_state.config;
@@ -1219,27 +1341,17 @@ async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<Li
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Group by layer
-    let mut layer_stats_map: HashMap<String, LiveLayerStats> = HashMap::new();
+    // What Redis still holds, keyed by whatever the increment named the layer.
+    let mut pending_by_identifier: HashMap<String, LiveLayerStats> = HashMap::new();
 
     for key in keys {
-        if let Some((date, layer_name, stat_type)) = parse_live_stats_key(&key, &config) {
+        if let Some((date, identifier, stat_type)) = parse_live_stats_key(&key, &config) {
             use redis::AsyncCommands;
             let count: i64 = con.get(&key).await.unwrap_or(0);
 
-            let entry = layer_stats_map
-                .entry(layer_name.clone())
-                .or_insert_with(|| LiveLayerStats {
-                    layer_id: None,  // Will be filled in later
-                    layer_name: layer_name.clone(),
-                    date: date.clone(),
-                    xyz_tile_count: 0,
-                    cog_download_count: 0,
-                    pixel_query_count: 0,
-                    stac_request_count: 0,
-                    other_request_count: 0,
-                    total_requests: 0,
-                });
+            let entry = pending_by_identifier
+                .entry(identifier.clone())
+                .or_insert_with(|| LiveLayerStats::new(identifier.clone(), date.clone()));
 
             match stat_type.as_str() {
                 "xyz" => entry.xyz_tile_count += count,
@@ -1254,24 +1366,82 @@ async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<Li
         }
     }
 
-    // Fetch layer IDs from database
-    let mut results: Vec<LiveLayerStats> = layer_stats_map.into_values().collect();
-    for stat in &mut results {
-        let layer_record = layer::Entity::find()
-            .filter(layer::Column::LayerName.eq(&stat.layer_name))
+    // Resolve each identifier, so a key written under a layer UUID lands on the
+    // same layer as one written under its name.
+    let mut pending: Vec<LiveLayerStats> = Vec::with_capacity(pending_by_identifier.len());
+    for (identifier, mut stats) in pending_by_identifier {
+        if let Ok(Some(layer)) = find_layer(db, &parse_layer_identifier(&identifier)).await {
+            stats.layer_id = Some(layer.id.to_string());
+            if let Some(name) = layer.layer_name {
+                stats.layer_name = name;
+            }
+        }
+        pending.push(stats);
+    }
+
+    let today_date = chrono::Utc::now().date_naive();
+    let rows = layer_statistics::Entity::find()
+        .filter(layer_statistics::Column::StatDate.eq(today_date))
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut stored: Vec<LiveLayerStats> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let layer = crate::routes::layers::db::Entity::find_by_id(row.layer_id)
             .one(db)
             .await
-            .ok()
-            .flatten();
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(layer) = layer else { continue };
+        let Some(layer_name) = layer.layer_name else { continue };
 
-        if let Some(layer) = layer_record {
-            stat.layer_id = Some(layer.id.to_string());
+        stored.push(LiveLayerStats {
+            layer_id: Some(layer.id.to_string()),
+            layer_name,
+            date: today.clone(),
+            xyz_tile_count: i64::from(row.xyz_tile_count),
+            cog_download_count: i64::from(row.cog_download_count),
+            pixel_query_count: i64::from(row.pixel_query_count),
+            stac_request_count: i64::from(row.stac_request_count),
+            other_request_count: i64::from(row.other_request_count),
+            total_requests: i64::from(row.xyz_tile_count)
+                + i64::from(row.cog_download_count)
+                + i64::from(row.pixel_query_count)
+                + i64::from(row.stac_request_count)
+                + i64::from(row.other_request_count),
+        });
+    }
+
+    Ok(Json(merge_live_stats(stored, pending)))
+}
+
+/// Adds the counts still in Redis onto the day's stored counts, layer by layer,
+/// busiest first.
+fn merge_live_stats(stored: Vec<LiveLayerStats>, pending: Vec<LiveLayerStats>) -> Vec<LiveLayerStats> {
+    let mut merged: HashMap<String, LiveLayerStats> = HashMap::new();
+
+    for stats in stored.into_iter().chain(pending) {
+        match merged.get_mut(&stats.layer_name) {
+            Some(entry) => {
+                entry.xyz_tile_count += stats.xyz_tile_count;
+                entry.cog_download_count += stats.cog_download_count;
+                entry.pixel_query_count += stats.pixel_query_count;
+                entry.stac_request_count += stats.stac_request_count;
+                entry.other_request_count += stats.other_request_count;
+                entry.total_requests += stats.total_requests;
+                if entry.layer_id.is_none() {
+                    entry.layer_id = stats.layer_id.clone();
+                }
+            }
+            None => {
+                merged.insert(stats.layer_name.clone(), stats);
+            }
         }
     }
 
+    let mut results: Vec<LiveLayerStats> = merged.into_values().collect();
     results.sort_by(|a, b| b.total_requests.cmp(&a.total_requests));
-
-    Ok(Json(results))
+    results
 }
 
 /// Parses a live stats key from Redis.
@@ -1284,5 +1454,278 @@ fn parse_live_stats_key(key: &str, config: &crate::config::Config) -> Option<(St
         Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn test_recent_days_seven_days_ends_today_and_spans_seven() {
+        let (from, to) = recent_days(date(2026, 9, 9), 7);
+        assert_eq!(to, date(2026, 9, 9));
+        assert_eq!(from, date(2026, 9, 3));
+        // Inclusive on both ends, so the span is exactly seven days
+        assert_eq!((to - from).num_days() + 1, 7);
+    }
+
+    #[test]
+    fn test_recent_days_boundary_excludes_the_day_before_from() {
+        let (from, _to) = recent_days(date(2026, 9, 9), 7);
+        assert_eq!(from, date(2026, 9, 3));
+        assert!(date(2026, 9, 3) >= from);
+        assert!(date(2026, 9, 2) < from);
+    }
+
+    #[test]
+    fn test_recent_days_one_day_is_today_alone() {
+        let (from, to) = recent_days(date(2026, 9, 9), 1);
+        assert_eq!(from, to);
+        assert_eq!(from, date(2026, 9, 9));
+    }
+
+    #[test]
+    fn test_recent_days_crosses_a_month_boundary() {
+        let (from, to) = recent_days(date(2026, 3, 2), 7);
+        assert_eq!(to, date(2026, 3, 2));
+        assert_eq!(from, date(2026, 2, 24));
+    }
+
+    #[test]
+    fn test_days_in_range_covers_the_window_oldest_first() {
+        let (from, to) = recent_days(date(2026, 9, 9), 7);
+        let bars = days_in_range(from, to);
+        assert_eq!(bars.len(), 7);
+        assert_eq!(*bars.first().unwrap(), from);
+        assert_eq!(*bars.last().unwrap(), to);
+        assert_eq!(
+            bars,
+            vec![
+                date(2026, 9, 3),
+                date(2026, 9, 4),
+                date(2026, 9, 5),
+                date(2026, 9, 6),
+                date(2026, 9, 7),
+                date(2026, 9, 8),
+                date(2026, 9, 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_days_in_range_single_day() {
+        let day = date(2026, 9, 9);
+        assert_eq!(days_in_range(day, day), vec![day]);
+    }
+
+    #[test]
+    fn test_days_in_range_inverted_is_empty() {
+        assert!(days_in_range(date(2026, 9, 9), date(2026, 9, 8)).is_empty());
+    }
+
+
+    fn date_str(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn test_parse_stats_filter_absent() {
+        assert!(parse_stats_filter(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_stats_filter_empty_object() {
+        let filter = parse_stats_filter(Some("{}")).unwrap().unwrap();
+        assert!(filter.layer_name.is_none());
+        assert!(filter.start_date.is_none());
+        assert!(filter.end_date.is_none());
+    }
+
+    #[test]
+    fn test_parse_stats_filter_valid() {
+        let filter = parse_stats_filter(Some(
+            r#"{"layer_name":"wheat","start_date":"2026-09-01","end_date":"2026-09-04"}"#,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(filter.layer_name.as_deref(), Some("wheat"));
+        assert_eq!(filter.start_date, Some(date_str("2026-09-01")));
+        assert_eq!(filter.end_date, Some(date_str("2026-09-04")));
+    }
+
+    #[test]
+    fn test_parse_stats_filter_unparseable_date_is_rejected() {
+        assert_eq!(
+            parse_stats_filter(Some(r#"{"start_date":"not-a-date"}"#)).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            parse_stats_filter(Some(r#"{"end_date":"2026-13-01"}"#)).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_stats_filter_wrong_type_is_rejected() {
+        // A number where a date string belongs used to discard the whole filter,
+        // layer_name included.
+        assert_eq!(
+            parse_stats_filter(Some(r#"{"start_date":20260901}"#)).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            parse_stats_filter(Some(r#"{"layer_name":"wheat","start_date":20260901}"#)).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_stats_filter_malformed_json_is_rejected() {
+        assert_eq!(
+            parse_stats_filter(Some("{not json")).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_stats_filter_one_bound_only() {
+        let filter = parse_stats_filter(Some(r#"{"start_date":"2026-09-01"}"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(filter.start_date, Some(date_str("2026-09-01")));
+        assert!(filter.end_date.is_none());
+    }
+
+
+    /// The sources the statistics datagrid renders, each of which react-admin
+    /// offers a sort on.
+    const DATAGRID_SOURCES: [&str; 4] = [
+        "layer_name",
+        "stat_date",
+        "total_requests",
+        "last_accessed_at",
+    ];
+
+    #[test]
+    fn test_stats_sort_target_covers_every_datagrid_column() {
+        assert_eq!(
+            stats_sort_target(Some("layer_name")),
+            Some(StatsSort::LayerName)
+        );
+        assert_eq!(
+            stats_sort_target(Some("total_requests")),
+            Some(StatsSort::TotalRequests)
+        );
+        assert_eq!(
+            stats_sort_target(Some("stat_date")),
+            Some(StatsSort::StatDate)
+        );
+        assert_eq!(
+            stats_sort_target(Some("last_accessed_at")),
+            Some(StatsSort::LastAccessedAt)
+        );
+        let mut targets: Vec<Option<StatsSort>> =
+            DATAGRID_SOURCES.iter().map(|s| stats_sort_target(Some(s))).collect();
+        targets.dedup();
+        assert_eq!(targets.len(), DATAGRID_SOURCES.len(), "two columns share a sort target");
+    }
+
+    #[test]
+    fn test_stats_sort_target_counters() {
+        assert_eq!(stats_sort_target(Some("stat_date")), Some(StatsSort::StatDate));
+        assert_eq!(
+            stats_sort_target(Some("xyz_tile_count")),
+            Some(StatsSort::XyzTileCount)
+        );
+        assert_eq!(
+            stats_sort_target(Some("other_request_count")),
+            Some(StatsSort::OtherRequestCount)
+        );
+    }
+
+    #[test]
+    fn test_stats_sort_target_defaults_without_a_field() {
+        assert_eq!(stats_sort_target(None), Some(StatsSort::LastAccessedAt));
+    }
+
+    #[test]
+    fn test_stats_sort_target_rejects_an_unknown_field() {
+        assert_eq!(stats_sort_target(Some("id")), None);
+        assert_eq!(stats_sort_target(Some("")), None);
+    }
+
+    fn stats(name: &str, xyz: i64, other: i64) -> LiveLayerStats {
+        LiveLayerStats {
+            layer_id: Some(uuid::Uuid::nil().to_string()),
+            layer_name: name.to_string(),
+            date: "2026-09-09".to_string(),
+            xyz_tile_count: xyz,
+            cog_download_count: 0,
+            pixel_query_count: 0,
+            stac_request_count: 0,
+            other_request_count: other,
+            total_requests: xyz + other,
+        }
+    }
+
+    // Scenario: the sync moves today's counts to Postgres every 30 seconds, so a
+    // layer's day is split between the stored row and whatever Redis has taken
+    // since. The card shows the day, which is both.
+    #[test]
+    fn test_merge_live_stats_adds_pending_to_stored() {
+        let merged = merge_live_stats(vec![stats("barley", 6, 0)], vec![stats("barley", 2, 1)]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].xyz_tile_count, 8);
+        assert_eq!(merged[0].other_request_count, 1);
+        assert_eq!(merged[0].total_requests, 9);
+    }
+
+    #[test]
+    fn test_merge_live_stats_keeps_layers_that_are_only_stored() {
+        let merged = merge_live_stats(vec![stats("barley", 6, 0)], vec![]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].total_requests, 6);
+    }
+
+    #[test]
+    fn test_merge_live_stats_keeps_layers_that_are_only_pending() {
+        let merged = merge_live_stats(vec![], vec![stats("barley", 2, 0)]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].total_requests, 2);
+    }
+
+    #[test]
+    fn test_merge_live_stats_orders_by_total_requests() {
+        let merged = merge_live_stats(
+            vec![stats("quiet", 1, 0), stats("busy", 40, 0)],
+            vec![stats("quiet", 1, 0)],
+        );
+
+        let names: Vec<&str> = merged.iter().map(|s| s.layer_name.as_str()).collect();
+        assert_eq!(names, vec!["busy", "quiet"]);
+    }
+
+    #[test]
+    fn test_merge_live_stats_takes_the_layer_id_from_whichever_side_has_it() {
+        let mut stored = stats("barley", 6, 0);
+        stored.layer_id = None;
+
+        let merged = merge_live_stats(vec![stored], vec![stats("barley", 2, 0)]);
+
+        assert_eq!(merged[0].layer_id, Some(uuid::Uuid::nil().to_string()));
+    }
+
+    #[test]
+    fn test_merge_live_stats_empty() {
+        assert!(merge_live_stats(vec![], vec![]).is_empty());
     }
 }

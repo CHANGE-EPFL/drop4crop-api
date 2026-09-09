@@ -92,7 +92,7 @@ pub async fn tile_handler(
     // Rendered-PNG cache: skip the layer lookup, S3 fetch, and styling work
     // entirely on cache hit. The key includes the effective style id so a
     // style override doesn't collide with the default-style cache entry.
-    let png_key = super::cache::build_rendered_tile_key(
+    let png_key = super::cache::rendered_tile_key_for_request(
         config,
         &params.layer,
         params.style_id,

@@ -36,6 +36,33 @@ pub fn build_rendered_tile_key(
     )
 }
 
+/// Cache key for a rendered PNG tile as the xyz tile handler looks it up, given the style
+/// the request asked for.
+pub fn rendered_tile_key_for_request(
+    config: &Config,
+    layer_name: &str,
+    requested_style_id: Option<uuid::Uuid>,
+    z: u32,
+    x: u32,
+    y: u32,
+) -> String {
+    build_rendered_tile_key(config, layer_name, requested_style_id, z, x, y)
+}
+
+/// Cache key a warmed tile is filed under. The layer's own style is applied when the tile is
+/// rendered, but it cannot enter the key: clients request tiles without a style, and the
+/// handler looks those up under `default`.
+pub fn warmed_tile_key(
+    config: &Config,
+    layer_name: &str,
+    _layer_style_id: Option<uuid::Uuid>,
+    z: u32,
+    x: u32,
+    y: u32,
+) -> String {
+    build_rendered_tile_key(config, layer_name, None, z, x, y)
+}
+
 /// Returns a Redis client using the cache DB.
 pub fn get_redis_client(config: &Config) -> redis::Client {
     redis::Client::open(config.tile_cache_uri.clone()).unwrap()
@@ -225,4 +252,54 @@ pub async fn increment_stats(config: Config, layer_id: String, stat_type: String
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        let mut config = Config::for_tests();
+        config.app_name = "drop4crop".to_string();
+        config.deployment = "prod".to_string();
+        config
+    }
+
+    fn style() -> uuid::Uuid {
+        uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap()
+    }
+
+    #[test]
+    fn test_a_styleless_request_keys_under_default() {
+        assert_eq!(
+            rendered_tile_key_for_request(&config(), "wheat", None, 3, 1, 2),
+            "drop4crop-prod/png/wheat/default/3/1/2"
+        );
+    }
+
+    #[test]
+    fn test_a_style_override_keys_under_that_style() {
+        assert_eq!(
+            rendered_tile_key_for_request(&config(), "wheat", Some(style()), 3, 1, 2),
+            format!("drop4crop-prod/png/wheat/{}/3/1/2", style())
+        );
+    }
+
+    #[test]
+    fn test_a_warmed_key_is_the_key_a_styleless_request_reads() {
+        let config = config();
+        assert_eq!(
+            warmed_tile_key(&config, "wheat", Some(style()), 3, 1, 2),
+            rendered_tile_key_for_request(&config, "wheat", None, 3, 1, 2)
+        );
+    }
+
+    #[test]
+    fn test_a_warmed_key_does_not_vary_with_the_layer_style() {
+        let config = config();
+        assert_eq!(
+            warmed_tile_key(&config, "wheat", Some(style()), 3, 1, 2),
+            warmed_tile_key(&config, "wheat", None, 3, 1, 2)
+        );
+    }
 }

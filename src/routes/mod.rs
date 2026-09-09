@@ -131,78 +131,70 @@ impl RateLimitTracker {
     }
 }
 
-/// Tracks layer access statistics based on the request path and query string.
-/// Extracts layer name and determines the access type (xyz, cog, pixel, stac, other).
-fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
-    // Skip non-layer requests
+/// The layer a request touched and the counter it belongs to, or `None` when the
+/// request counts towards no layer. `path` and `query` are the request's own.
+fn classify_layer_request<'a>(uri_path: &'a str, query_string: &'a str) -> Option<(&'a str, &'a str)> {
     if !uri_path.starts_with("/api/layers") && !uri_path.starts_with("/api/stac") {
-        return;
+        return None;
     }
 
-    let (layer_name, stat_type) = if uri_path.starts_with("/api/layers/xyz/") {
-        // XYZ tile request: /api/layers/xyz/{z}/{x}/{y}?layer={name}
+    // The layer segment of a path is only a layer when it is a UUID; the named
+    // endpoints under /api/layers ("recalculate-stats") share the shape.
+    let uuid_segment = |path: &'a str| {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 4
+            && parts[1] == "api"
+            && parts[2] == "layers"
+            && uuid::Uuid::parse_str(parts[3]).is_ok()
+        {
+            Some(parts[3])
+        } else {
+            None
+        }
+    };
+
+    let (layer, stat_type) = if uri_path.starts_with("/api/layers/xyz/") {
         let layer = query_string
             .split('&')
             .find(|p| p.starts_with("layer="))
             .and_then(|p| p.strip_prefix("layer="));
         (layer, "xyz")
     } else if uri_path.starts_with("/api/layers/cog/") {
-        // COG download: /api/layers/cog/{filename}.tif
         let filename = uri_path.strip_prefix("/api/layers/cog/").unwrap_or("");
-        let layer = filename.strip_suffix(".tif");
-        (layer, "cog")
+        (filename.strip_suffix(".tif"), "cog")
     } else if uri_path.contains("/value") {
-        // Pixel value query: /api/layers/{id}/value?lat={}&lon={}
-        // Only record if the segment is a UUID; otherwise it's a named endpoint
-        // (e.g. "recalculate-stats") and has no associated layer.
-        let parts: Vec<&str> = uri_path.split('/').collect();
-        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers"
-            && uuid::Uuid::parse_str(parts[3]).is_ok()
-        {
-            Some(parts[3])
-        } else {
-            None
-        };
-        (layer, "pixel")
+        (uuid_segment(uri_path), "pixel")
     } else if uri_path.starts_with("/api/stac") {
-        // STAC requests: /api/stac/collections/{name} or /api/stac/search
         if uri_path.contains("/collections/") {
             let layer = uri_path
                 .strip_prefix("/api/stac/collections/")
                 .and_then(|s| s.split('/').next());
             (layer, "stac")
         } else {
-            // STAC search or catalog - skip individual tracking
-            return;
+            return None;
         }
     } else if uri_path.starts_with("/api/layers/") && !uri_path.ends_with("/uploads") {
-        // Other layer requests (e.g., GET /api/layers/{id}).
-        // Only record if the segment parses as a UUID; this filters out named
-        // admin endpoints like "recalculate-stats", "recalculate-stats-by-ids",
-        // "recalculate-stats/status", etc., which would otherwise be logged
-        // as missing-layer errors by the background stats sync.
-        let parts: Vec<&str> = uri_path.split('/').collect();
-        let layer = if parts.len() >= 4 && parts[1] == "api" && parts[2] == "layers"
-            && uuid::Uuid::parse_str(parts[3]).is_ok()
-        {
-            Some(parts[3])
-        } else {
-            None
-        };
-        (layer, "other")
+        (uuid_segment(uri_path), "other")
     } else {
+        return None;
+    };
+
+    layer.map(|l| (l, stat_type))
+}
+
+/// Increments the statistics counter a request belongs to, if any.
+fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
+    let Some((layer_id, stat_type)) = classify_layer_request(uri_path, query_string) else {
         return;
     };
 
-    if let Some(layer_id) = layer_name {
-        // Fire-and-forget statistics increment
-        let config = config.clone();
-        let layer_id = layer_id.to_string();
-        let stat_type = stat_type.to_string();
-        tokio::spawn(async move {
-            tiles::cache::increment_stats(config, layer_id, stat_type).await;
-        });
-    }
+    // Fire-and-forget statistics increment
+    let config = config.clone();
+    let layer_id = layer_id.to_string();
+    let stat_type = stat_type.to_string();
+    tokio::spawn(async move {
+        tiles::cache::increment_stats(config, layer_id, stat_type).await;
+    });
 }
 
 fn is_tile_request(path: &str) -> bool {
@@ -396,4 +388,92 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .merge(crate::common::views::router(&app_state)) // Health check routes - no rate limiting
         .nest("/api/stac", tiles::stac_router::router(&app_state).layer(rate_limit_stack)) // STAC with rate limiting
         .merge(Scalar::with_url("/api/docs", api))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_layer_request;
+
+    const LAYER_ID: &str = "0c8a2a5e-1e2a-4f8e-9a6d-2b7c3d4e5f60";
+
+    #[test]
+    fn test_classify_xyz_tile_reads_the_layer_query_parameter() {
+        assert_eq!(
+            classify_layer_request("/api/layers/xyz/3/4/2", "layer=wheat_cwatm_wf_2030"),
+            Some(("wheat_cwatm_wf_2030", "xyz"))
+        );
+        // The parameter is found wherever it sits in the query
+        assert_eq!(
+            classify_layer_request("/api/layers/xyz/3/4/2", "style_id=7&layer=barley"),
+            Some(("barley", "xyz"))
+        );
+    }
+
+    #[test]
+    fn test_classify_xyz_tile_without_a_layer_counts_nothing() {
+        assert_eq!(classify_layer_request("/api/layers/xyz/3/4/2", ""), None);
+    }
+
+    #[test]
+    fn test_classify_cog_download_strips_the_extension() {
+        assert_eq!(
+            classify_layer_request("/api/layers/cog/wheat_cwatm_wf_2030.tif", ""),
+            Some(("wheat_cwatm_wf_2030", "cog"))
+        );
+        assert_eq!(classify_layer_request("/api/layers/cog/wheat", ""), None);
+    }
+
+    #[test]
+    fn test_classify_pixel_query_needs_a_uuid() {
+        assert_eq!(
+            classify_layer_request(&format!("/api/layers/{LAYER_ID}/value"), "lat=1&lon=2"),
+            Some((LAYER_ID, "pixel"))
+        );
+        assert_eq!(
+            classify_layer_request("/api/layers/recalculate-stats/value", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_stac_collection_only() {
+        assert_eq!(
+            classify_layer_request("/api/stac/collections/wheat_cwatm_wf_2030", ""),
+            Some(("wheat_cwatm_wf_2030", "stac"))
+        );
+        assert_eq!(
+            classify_layer_request("/api/stac/collections/wheat_cwatm_wf_2030/items", ""),
+            Some(("wheat_cwatm_wf_2030", "stac"))
+        );
+        assert_eq!(classify_layer_request("/api/stac/search", "limit=1"), None);
+    }
+
+    #[test]
+    fn test_classify_layer_read_needs_a_uuid_and_is_not_an_upload() {
+        assert_eq!(
+            classify_layer_request(&format!("/api/layers/{LAYER_ID}"), ""),
+            Some((LAYER_ID, "other"))
+        );
+        assert_eq!(
+            classify_layer_request(&format!("/api/layers/{LAYER_ID}/uploads"), ""),
+            None
+        );
+        assert_eq!(classify_layer_request("/api/layers/recalculate-stats", ""), None);
+    }
+
+    #[test]
+    fn test_classify_ignores_paths_outside_layers_and_stac() {
+        assert_eq!(
+            classify_layer_request("/api/site-settings/globe-tile/5/16/11", "layer=barley"),
+            None
+        );
+        assert_eq!(
+            classify_layer_request(
+                "/api/projects/crop-water-use/card-tile/3/4/2",
+                "layer=wheat"
+            ),
+            None
+        );
+        assert_eq!(classify_layer_request("/api/projects/active", ""), None);
+    }
 }

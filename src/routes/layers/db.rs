@@ -19,7 +19,8 @@ pub struct LayerStats {
     pub cog_download_count: i32,
     pub pixel_query_count: i32,
     pub stac_request_count: i32,
-    pub other_request_count: i32,
+    pub cache_hit_count: i32,
+    pub cache_miss_count: i32,
     pub last_accessed_at: Option<DateTime<Utc>>,
 }
 
@@ -301,7 +302,8 @@ async fn fetch_layer_stats(
     let mut total_cog = 0;
     let mut total_pixel = 0;
     let mut total_stac = 0;
-    let mut total_other = 0;
+    let mut total_hits = 0;
+    let mut total_misses = 0;
     let mut last_accessed: Option<DateTime<Utc>> = None;
 
     for stat in stats {
@@ -309,7 +311,8 @@ async fn fetch_layer_stats(
         total_cog += stat.cog_download_count;
         total_pixel += stat.pixel_query_count;
         total_stac += stat.stac_request_count;
-        total_other += stat.other_request_count;
+        total_hits += stat.cache_hit_count;
+        total_misses += stat.cache_miss_count;
 
         // Track most recent access
         if last_accessed.is_none() || stat.last_accessed_at > last_accessed.unwrap() {
@@ -318,12 +321,13 @@ async fn fetch_layer_stats(
     }
 
     Ok(Some(LayerStats {
-        total_requests: total_xyz + total_cog + total_pixel + total_stac + total_other,
+        total_requests: total_xyz + total_cog + total_pixel + total_stac,
         xyz_tile_count: total_xyz,
         cog_download_count: total_cog,
         pixel_query_count: total_pixel,
         stac_request_count: total_stac,
-        other_request_count: total_other,
+        cache_hit_count: total_hits,
+        cache_miss_count: total_misses,
         last_accessed_at: last_accessed,
     }))
 }

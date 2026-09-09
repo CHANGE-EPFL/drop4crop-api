@@ -16,7 +16,8 @@ pub mod layer_statistics {
         pub cog_download_count: i32,
         pub pixel_query_count: i32,
         pub stac_request_count: i32,
-        pub other_request_count: i32,
+        pub cache_hit_count: i32,
+        pub cache_miss_count: i32,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

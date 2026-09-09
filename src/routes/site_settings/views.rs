@@ -251,6 +251,12 @@ pub async fn get_globe_tile(
         )
         .await
     {
+        crate::routes::tiles::cache::increment_cache_outcome(
+            config,
+            &params.layer,
+            crate::routes::tiles::cache::CacheOutcome::Hit,
+        )
+        .await;
         return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
     }
 
@@ -274,6 +280,13 @@ pub async fn get_globe_tile(
             debug!(layer = %params.layer, "Layer not found");
             StatusCode::NOT_FOUND
         })?;
+
+    crate::routes::tiles::cache::increment_cache_outcome(
+        config,
+        &params.layer,
+        crate::routes::tiles::cache::CacheOutcome::Miss,
+    )
+    .await;
 
     let xyz_tile = XYZTile { x, y, z };
     let project_id = layer_record.project_id;

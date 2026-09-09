@@ -105,6 +105,12 @@ pub async fn tile_handler(
         && let Ok(Some(cached)) =
             super::cache::redis_get(&mut con, &png_key, config.tile_cache_ttl).await
     {
+        super::cache::increment_cache_outcome(
+            config,
+            &params.layer,
+            super::cache::CacheOutcome::Hit,
+        )
+        .await;
         return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
     }
 
@@ -126,6 +132,9 @@ pub async fn tile_handler(
         }
     };
     let project_id = layer_record.project_id;
+
+    super::cache::increment_cache_outcome(config, &params.layer, super::cache::CacheOutcome::Miss)
+        .await;
 
     let xyz_tile = XYZTile { x, y, z };
     let retry_strategy = FixedInterval::from_millis(200).take(5);

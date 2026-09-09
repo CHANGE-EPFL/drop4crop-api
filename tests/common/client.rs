@@ -11,6 +11,7 @@ use tower::ServiceExt;
 pub struct TestClient {
     router: Router,
     auth_token: Option<String>,
+    headers: Vec<(String, String)>,
 }
 
 impl TestClient {
@@ -18,7 +19,14 @@ impl TestClient {
         Self {
             router,
             auth_token: None,
+            headers: Vec::new(),
         }
+    }
+
+    /// Send an extra header on every request, for the middleware that reads one.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 
     /// Set the authorization token (JWT)
@@ -32,6 +40,10 @@ impl TestClient {
         let mut request = Request::builder()
             .method("GET")
             .uri(uri);
+
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
 
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
@@ -49,6 +61,10 @@ impl TestClient {
             .method("POST")
             .uri(uri)
             .header("content-type", "application/json");
+
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
 
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
@@ -68,6 +84,10 @@ impl TestClient {
             .uri(uri)
             .header("content-type", "application/json");
 
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
         }
@@ -85,6 +105,10 @@ impl TestClient {
             .method("DELETE")
             .uri(uri);
 
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
         }
@@ -101,6 +125,10 @@ impl TestClient {
             .method("DELETE")
             .uri(uri)
             .header("content-type", "application/json");
+
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
 
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
@@ -134,6 +162,10 @@ impl TestClient {
             .uri(uri)
             .header("content-type", format!("multipart/form-data; boundary={}", boundary));
 
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
+
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));
         }
@@ -149,6 +181,10 @@ impl TestClient {
         let mut request = Request::builder()
             .method("GET")
             .uri(uri);
+
+        for (name, value) in &self.headers {
+            request = request.header(name, value);
+        }
 
         if let Some(token) = &self.auth_token {
             request = request.header("authorization", format!("Bearer {}", token));

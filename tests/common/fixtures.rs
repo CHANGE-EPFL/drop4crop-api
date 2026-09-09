@@ -117,7 +117,7 @@ pub const STATS_FIXTURES: &[&str] = &[
     r#"INSERT INTO layer_statistics (
         id, layer_id, stat_date, last_accessed_at,
         xyz_tile_count, cog_download_count, pixel_query_count,
-        stac_request_count, other_request_count
+        stac_request_count
     ) VALUES (
         '750e8400-e29b-41d4-a716-446655440001'::uuid,
         '650e8400-e29b-41d4-a716-446655440001'::uuid,
@@ -126,15 +126,46 @@ pub const STATS_FIXTURES: &[&str] = &[
         1250,
         45,
         120,
+        30
+    )"#,
+
+    // A second in-range day for Layer 1
+    r#"INSERT INTO layer_statistics (
+        id, layer_id, stat_date, last_accessed_at,
+        xyz_tile_count, cog_download_count, pixel_query_count,
+        stac_request_count
+    ) VALUES (
+        '750e8400-e29b-41d4-a716-446655440003'::uuid,
+        '650e8400-e29b-41d4-a716-446655440001'::uuid,
+        '2024-01-21'::date,
+        '2024-01-21T16:45:00+00:00'::timestamptz,
+        10,
+        2,
+        3,
+        4
+    )"#,
+
+    // A day outside the aggregation test's selected range
+    r#"INSERT INTO layer_statistics (
+        id, layer_id, stat_date, last_accessed_at,
+        xyz_tile_count, cog_download_count, pixel_query_count,
+        stac_request_count
+    ) VALUES (
+        '750e8400-e29b-41d4-a716-446655440004'::uuid,
+        '650e8400-e29b-41d4-a716-446655440001'::uuid,
+        '2024-01-22'::date,
+        '2024-01-22T17:00:00+00:00'::timestamptz,
+        100,
+        20,
         30,
-        15
+        40
     )"#,
 
     // Stats for Layer 2
     r#"INSERT INTO layer_statistics (
         id, layer_id, stat_date, last_accessed_at,
         xyz_tile_count, cog_download_count, pixel_query_count,
-        stac_request_count, other_request_count
+        stac_request_count
     ) VALUES (
         '750e8400-e29b-41d4-a716-446655440002'::uuid,
         '650e8400-e29b-41d4-a716-446655440002'::uuid,
@@ -143,8 +174,7 @@ pub const STATS_FIXTURES: &[&str] = &[
         890,
         23,
         67,
-        18,
-        8
+        18
     )"#,
 ];
 

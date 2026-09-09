@@ -106,7 +106,8 @@ async fn sync_stats_to_db(db: &DatabaseConnection, config: &Config, instance_id:
                 "cog" => entry.cog_download_count = add_count(entry.cog_download_count, count),
                 "pixel" => entry.pixel_query_count = add_count(entry.pixel_query_count, count),
                 "stac" => entry.stac_request_count = add_count(entry.stac_request_count, count),
-                "other" => entry.other_request_count = add_count(entry.other_request_count, count),
+                "hit" => entry.cache_hit_count = add_count(entry.cache_hit_count, count),
+                "miss" => entry.cache_miss_count = add_count(entry.cache_miss_count, count),
                 _ => {}
             }
         }
@@ -201,7 +202,8 @@ fn restore_increments(unwritten: &[StatsCounter], config: &Config) -> Vec<(Strin
             ("cog", counter.cog_download_count),
             ("pixel", counter.pixel_query_count),
             ("stac", counter.stac_request_count),
-            ("other", counter.other_request_count),
+            ("hit", counter.cache_hit_count),
+            ("miss", counter.cache_miss_count),
         ] {
             if count != 0 {
                 increments.push((
@@ -304,9 +306,13 @@ async fn write_stats_to_db(
                 active_model.stac_request_count.unwrap(),
                 i64::from(stats.stac_request_count),
             ));
-            active_model.other_request_count = Set(add_count(
-                active_model.other_request_count.unwrap(),
-                i64::from(stats.other_request_count),
+            active_model.cache_hit_count = Set(add_count(
+                active_model.cache_hit_count.unwrap(),
+                i64::from(stats.cache_hit_count),
+            ));
+            active_model.cache_miss_count = Set(add_count(
+                active_model.cache_miss_count.unwrap(),
+                i64::from(stats.cache_miss_count),
             ));
             active_model.last_accessed_at = Set(chrono::Utc::now());
 
@@ -325,7 +331,8 @@ async fn write_stats_to_db(
                 cog_download_count: Set(stats.cog_download_count),
                 pixel_query_count: Set(stats.pixel_query_count),
                 stac_request_count: Set(stats.stac_request_count),
-                other_request_count: Set(stats.other_request_count),
+                cache_hit_count: Set(stats.cache_hit_count),
+                cache_miss_count: Set(stats.cache_miss_count),
             };
 
             stats_entity::Entity::insert(new_record)
@@ -354,7 +361,8 @@ struct StatsCounter {
     cog_download_count: i32,
     pixel_query_count: i32,
     stac_request_count: i32,
-    other_request_count: i32,
+    cache_hit_count: i32,
+    cache_miss_count: i32,
 }
 
 impl StatsCounter {
@@ -366,13 +374,14 @@ impl StatsCounter {
             cog_download_count: 0,
             pixel_query_count: 0,
             stac_request_count: 0,
-            other_request_count: 0,
+            cache_hit_count: 0,
+            cache_miss_count: 0,
         }
     }
 }
 
 /// How a statistics key names its layer. Increments key on the layer UUID for
-/// pixel and admin reads, and on the layer name for tiles, COG downloads and STAC.
+/// pixel reads, and on the layer name for tiles, COG downloads and STAC.
 #[derive(Debug, PartialEq)]
 pub enum LayerIdentifier {
     Id(uuid::Uuid),
@@ -451,14 +460,12 @@ mod tests {
     fn test_restore_increments_puts_back_each_nonzero_counter() {
         let mut counter = StatsCounter::new("maize".to_string(), "2026-09-09".to_string());
         counter.xyz_tile_count = 4;
-        counter.other_request_count = 2;
 
         let mut restored = restore_increments(&[counter], &config());
         restored.sort();
         assert_eq!(
             restored,
             vec![
-                (key("2026-09-09:maize:other"), 2),
                 (key("2026-09-09:maize:xyz"), 4),
             ]
         );
@@ -475,18 +482,36 @@ mod tests {
         assert!(restore_increments(&[], &config()).is_empty());
     }
 
+    // A cache outcome is restored like any other counter, so an unwritten sync
+    // does not lose it.
     #[test]
-    fn test_restore_increments_covers_all_five_counters() {
+    fn test_restore_increments_puts_back_cache_outcomes() {
+        let mut counter = StatsCounter::new("maize".to_string(), "2026-09-09".to_string());
+        counter.cache_hit_count = 7;
+        counter.cache_miss_count = 3;
+
+        let mut restored = restore_increments(&[counter], &config());
+        restored.sort();
+        assert_eq!(
+            restored,
+            vec![
+                (key("2026-09-09:maize:hit"), 7),
+                (key("2026-09-09:maize:miss"), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_restore_increments_covers_all_four_counters() {
         let mut counter = StatsCounter::new("maize".to_string(), "2026-09-09".to_string());
         counter.xyz_tile_count = 1;
         counter.cog_download_count = 2;
         counter.pixel_query_count = 3;
         counter.stac_request_count = 4;
-        counter.other_request_count = 5;
 
         let restored = restore_increments(&[counter], &config());
-        assert_eq!(restored.len(), 5);
-        assert_eq!(restored.iter().map(|(_, n)| n).sum::<i64>(), 15);
+        assert_eq!(restored.len(), 4);
+        assert_eq!(restored.iter().map(|(_, n)| n).sum::<i64>(), 10);
     }
 
     #[test]

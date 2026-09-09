@@ -229,6 +229,12 @@ pub async fn get_project_card_tile(
         )
         .await
     {
+        crate::routes::tiles::cache::increment_cache_outcome(
+            config,
+            &params.layer,
+            crate::routes::tiles::cache::CacheOutcome::Hit,
+        )
+        .await;
         return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
     }
 
@@ -260,6 +266,13 @@ pub async fn get_project_card_tile(
             debug!(layer = %params.layer, slug = %slug, "Layer not found in project");
             StatusCode::NOT_FOUND
         })?;
+
+    crate::routes::tiles::cache::increment_cache_outcome(
+        config,
+        &params.layer,
+        crate::routes::tiles::cache::CacheOutcome::Miss,
+    )
+    .await;
 
     // 3. Fetch and decode the tile from S3.
     let xyz_tile = XYZTile { x, y, z };

@@ -276,6 +276,17 @@ async fn test_cache_management_endpoints() {
     let data = response.json();
     assert!(data.is_array(), "Cache keys should be an array");
 
+    // An uncached layer still has a stable detail response instead of a 404.
+    let response = client.get("/api/cache/layers/definitely-not-cached/detail").await;
+    response.assert_success();
+
+    let data = response.json();
+    assert_eq!(data["total_items"], 0);
+    assert_eq!(data["total_size_bytes"], 0);
+    assert_eq!(data["total_size_mb"], 0.0);
+    assert!(data["cog_file"].is_null());
+    assert_eq!(data["png_tiles"], serde_json::json!([]));
+
     // Test cache TTL endpoint
     let response = client.get("/api/cache/ttl").await;
     response.assert_success();

@@ -231,6 +231,33 @@ pub async fn persist_key(config: &Config, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether a public tile request was served from the rendered-tile cache.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
+
+impl CacheOutcome {
+    /// The statistics counter the outcome belongs to.
+    pub fn stat_type(self) -> &'static str {
+        match self {
+            CacheOutcome::Hit => "hit",
+            CacheOutcome::Miss => "miss",
+        }
+    }
+}
+
+/// Records the cache outcome of one rendered tile against the layer it rendered.
+pub async fn increment_cache_outcome(config: &Config, layer_name: &str, outcome: CacheOutcome) {
+    increment_stats(
+        config.clone(),
+        layer_name.to_string(),
+        outcome.stat_type().to_string(),
+    )
+    .await;
+}
+
 /// Increments a statistics counter in Redis asynchronously.
 /// This is a fire-and-forget operation to avoid blocking the request.
 pub async fn increment_stats(config: Config, layer_id: String, stat_type: String) {
@@ -267,6 +294,29 @@ mod tests {
 
     fn style() -> uuid::Uuid {
         uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap()
+    }
+
+    #[test]
+    fn test_cache_outcome_counters_are_distinct() {
+        assert_eq!(CacheOutcome::Hit.stat_type(), "hit");
+        assert_eq!(CacheOutcome::Miss.stat_type(), "miss");
+    }
+
+    #[test]
+    fn test_cache_outcome_keys_are_per_layer_and_day() {
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let key = |outcome: CacheOutcome| {
+            build_stats_key(&config(), "barley_production", outcome.stat_type())
+        };
+
+        assert_eq!(
+            key(CacheOutcome::Hit),
+            format!("drop4crop-prod/stats:{today}:barley_production:hit")
+        );
+        assert_eq!(
+            key(CacheOutcome::Miss),
+            format!("drop4crop-prod/stats:{today}:barley_production:miss")
+        );
     }
 
     #[test]

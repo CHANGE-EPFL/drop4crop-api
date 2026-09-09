@@ -46,6 +46,37 @@ pub async fn cleanup_test_db(db: &DatabaseConnection) -> Result<(), DbErr> {
 /// Create test app with PostgreSQL database and test configuration
 /// Note: Authentication is disabled for tests (keycloak_auth_instance = None)
 pub async fn create_test_app() -> Router {
+    let (db, config) = prepare_test_db().await;
+
+    // Build test router (without rate limiting)
+    super::test_router::build_test_router(&db, &config)
+}
+
+/// The app as it is mounted in production, for tests that turn on where a layer sits
+/// in the router rather than on what a handler returns.
+pub async fn create_real_app() -> (Router, Config) {
+    use lazy_limit::{Duration, RuleConfig, init_rate_limiter};
+
+    let (db, config) = prepare_test_db().await;
+
+    // The production router carries the governor, which panics unless main's
+    // initialisation has run, and again if it runs twice.
+    static RATE_LIMITER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    RATE_LIMITER
+        .get_or_init(|| async {
+            init_rate_limiter!(
+                default: RuleConfig::new(Duration::seconds(1), 0),
+                routes: []
+            )
+            .await;
+        })
+        .await;
+
+    let router = drop4crop_api::routes::build_router(&db, &config);
+    (router, config)
+}
+
+async fn prepare_test_db() -> (DatabaseConnection, Config) {
     crate::common::init();
 
     // Create test database and run migrations
@@ -121,8 +152,7 @@ pub async fn create_test_app() -> Router {
             .unwrap_or(0),
     };
 
-    // Build test router (without rate limiting)
-    super::test_router::build_test_router(&db, &config)
+    (db, config)
 }
 
 /// Seed the database with test fixtures

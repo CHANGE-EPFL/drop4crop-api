@@ -8,9 +8,11 @@ use axum::{
 use crate::common::state::AppState;
 use crate::common::auth::Role;
 use crate::routes::admin::db::layer_statistics;
+use crate::routes::admin::cache_detail::{cache_entry_for_layer, LayerCacheEntryKind};
 use axum_keycloak_auth::{layer::KeycloakAuthLayer, PassthroughMode};
 use sea_orm::{
-    ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    ColumnTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -22,6 +24,8 @@ use tracing::{info, debug, warn, error};
 pub fn stats_router(state: &AppState) -> OpenApiRouter {
     let mut router = OpenApiRouter::new()
         .route("/summary", get(get_stats_summary))
+        .route("/daily", get(get_daily_stats))
+        .route("/activity", get(super::activity::get_activity))
         .route("/", get(get_layer_stats))  // List all statistics (for React Admin with Content-Range headers)
         .route("/{id}", get(get_layer_stat_detail))  // Get individual statistic
         .route("/{id}/timeline", get(get_layer_timeline))
@@ -52,6 +56,7 @@ pub fn cache_router(state: &AppState) -> OpenApiRouter {
         .route("/info", get(get_cache_info))
         .route("/keys", get(get_cache_keys))
         .route("/aggregated", get(get_cache_aggregated))
+        .route("/layers/{layer_name}/detail", get(get_layer_cache_detail))
         .route("/clear", post(clear_all_cache))
         .route("/layers/{layer_name}", delete(clear_layer_cache))
         .route("/layers/{layer_name}/warm", post(warm_layer_cache))
@@ -87,6 +92,7 @@ struct StatsQuery {
 
 #[derive(Deserialize)]
 struct StatsFilter {
+    layer_id: Option<String>,
     layer_name: Option<String>,
     start_date: Option<String>,
     end_date: Option<String>,
@@ -95,6 +101,7 @@ struct StatsFilter {
 /// The statistics filter after parsing, as the query needs it.
 #[derive(Debug)]
 struct ParsedStatsFilter {
+    layer_id: Option<uuid::Uuid>,
     layer_name: Option<String>,
     start_date: Option<chrono::NaiveDate>,
     end_date: Option<chrono::NaiveDate>,
@@ -120,7 +127,17 @@ fn parse_stats_filter(raw: Option<&str>) -> Result<Option<ParsedStatsFilter>, St
             }),
         None => Ok(None),
     };
+    let layer_id = filter
+        .layer_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|e| {
+            debug!(error = %e, "Rejecting unreadable layer ID");
+            StatusCode::BAD_REQUEST
+        })?;
     Ok(Some(ParsedStatsFilter {
+        layer_id,
         start_date: parse_date(&filter.start_date)?,
         end_date: parse_date(&filter.end_date)?,
         layer_name: filter.layer_name,
@@ -146,7 +163,6 @@ struct StatsSummary {
     cog_download_count_today: i64,
     pixel_query_count_today: i64,
     stac_request_count_today: i64,
-    other_request_count_today: i64,
     // Daily breakdown for last 7 days (for charts)
     daily_requests: Vec<DailyRequests>,
 }
@@ -168,8 +184,33 @@ struct LayerStatDetail {
     cog_download_count: i32,
     pixel_query_count: i32,
     stac_request_count: i32,
-    other_request_count: i32,
+    cache_hit_count: i32,
+    cache_miss_count: i32,
     total_requests: i32,
+}
+
+#[derive(FromQueryResult)]
+struct AggregatedLayerStat {
+    layer_id: uuid::Uuid,
+    layer_name: Option<String>,
+    last_accessed_at: chrono::DateTime<chrono::Utc>,
+    xyz_tile_count: i64,
+    cog_download_count: i64,
+    pixel_query_count: i64,
+    stac_request_count: i64,
+}
+
+#[derive(Serialize)]
+struct LayerStatSummary {
+    id: String,
+    layer_id: String,
+    layer_name: String,
+    last_accessed_at: String,
+    xyz_tile_count: i64,
+    cog_download_count: i64,
+    pixel_query_count: i64,
+    stac_request_count: i64,
+    total_requests: i64,
 }
 
 #[derive(Serialize)]
@@ -205,6 +246,26 @@ struct AggregatedCacheEntry {
     cog_ttl_hours: Option<f64>,
     png_tile_count: usize,
     png_tile_size_mb: f64,
+}
+
+#[derive(Serialize)]
+struct CacheObjectDetail {
+    cache_key: String,
+    size_bytes: usize,
+    size_mb: f64,
+    ttl_seconds: Option<i64>,
+    ttl_hours: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tile_coords: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LayerCacheDetail {
+    total_items: usize,
+    total_size_bytes: usize,
+    total_size_mb: f64,
+    cog_file: Option<CacheObjectDetail>,
+    png_tiles: Vec<CacheObjectDetail>,
 }
 
 /// Days covered by the summary's weekly total and its daily breakdown.
@@ -245,7 +306,6 @@ async fn get_stats_summary(
                 + s.cog_download_count as i64
                 + s.pixel_query_count as i64
                 + s.stac_request_count as i64
-                + s.other_request_count as i64
         })
         .sum();
 
@@ -263,7 +323,6 @@ async fn get_stats_summary(
                 + s.cog_download_count as i64
                 + s.pixel_query_count as i64
                 + s.stac_request_count as i64
-                + s.other_request_count as i64
         })
         .sum();
 
@@ -272,7 +331,6 @@ async fn get_stats_summary(
     let cog_download_count_today: i64 = today_stats.iter().map(|s| s.cog_download_count as i64).sum();
     let pixel_query_count_today: i64 = today_stats.iter().map(|s| s.pixel_query_count as i64).sum();
     let stac_request_count_today: i64 = today_stats.iter().map(|s| s.stac_request_count as i64).sum();
-    let other_request_count_today: i64 = today_stats.iter().map(|s| s.other_request_count as i64).sum();
 
     // Total requests this week
     let week_stats = layer_statistics::Entity::find()
@@ -288,7 +346,6 @@ async fn get_stats_summary(
                 + s.cog_download_count as i64
                 + s.pixel_query_count as i64
                 + s.stac_request_count as i64
-                + s.other_request_count as i64
         })
         .sum();
 
@@ -298,8 +355,7 @@ async fn get_stats_summary(
         let total = stat.xyz_tile_count as i64
             + stat.cog_download_count as i64
             + stat.pixel_query_count as i64
-            + stat.stac_request_count as i64
-            + stat.other_request_count as i64;
+            + stat.stac_request_count as i64;
         *layer_totals.entry(stat.layer_id).or_insert(0) += total;
     }
 
@@ -348,7 +404,6 @@ async fn get_stats_summary(
                     + s.cog_download_count as i64
                     + s.pixel_query_count as i64
                     + s.stac_request_count as i64
-                    + s.other_request_count as i64
             })
             .sum();
 
@@ -369,7 +424,6 @@ async fn get_stats_summary(
         cog_download_count_today,
         pixel_query_count_today,
         stac_request_count_today,
-        other_request_count_today,
         daily_requests,
     }))
 }
@@ -377,37 +431,31 @@ async fn get_stats_summary(
 /// The column a statistics list sort orders on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatsSort {
-    StatDate,
     LastAccessedAt,
     XyzTileCount,
     CogDownloadCount,
     PixelQueryCount,
     StacRequestCount,
-    OtherRequestCount,
     LayerName,
     TotalRequests,
 }
 
-/// The sum of the five counters, as SQL, so `total_requests` can be ordered on
-/// in the database rather than after the page has been cut.
-fn total_requests_expr() -> sea_orm::sea_query::SimpleExpr {
+fn aggregated_total_requests_expr() -> sea_orm::sea_query::SimpleExpr {
     use sea_orm::sea_query::Expr;
     Expr::col(layer_statistics::Column::XyzTileCount)
-        .add(Expr::col(layer_statistics::Column::CogDownloadCount))
-        .add(Expr::col(layer_statistics::Column::PixelQueryCount))
-        .add(Expr::col(layer_statistics::Column::StacRequestCount))
-        .add(Expr::col(layer_statistics::Column::OtherRequestCount))
+        .sum()
+        .add(Expr::col(layer_statistics::Column::CogDownloadCount).sum())
+        .add(Expr::col(layer_statistics::Column::PixelQueryCount).sum())
+        .add(Expr::col(layer_statistics::Column::StacRequestCount).sum())
 }
 
 fn stats_sort_target(field: Option<&str>) -> Option<StatsSort> {
     match field {
-        Some("stat_date") => Some(StatsSort::StatDate),
         Some("last_accessed_at") => Some(StatsSort::LastAccessedAt),
         Some("xyz_tile_count") => Some(StatsSort::XyzTileCount),
         Some("cog_download_count") => Some(StatsSort::CogDownloadCount),
         Some("pixel_query_count") => Some(StatsSort::PixelQueryCount),
         Some("stac_request_count") => Some(StatsSort::StacRequestCount),
-        Some("other_request_count") => Some(StatsSort::OtherRequestCount),
         Some("layer_name") => Some(StatsSort::LayerName),
         Some("total_requests") => Some(StatsSort::TotalRequests),
         None => Some(StatsSort::LastAccessedAt),
@@ -449,30 +497,19 @@ async fn get_layer_stats(
         (None, Order::Desc)
     };
 
-    let mut query = layer_statistics::Entity::find();
+    let mut query = layer_statistics::Entity::find().join(
+        sea_orm::JoinType::InnerJoin,
+        layer_statistics::Relation::Layer.def(),
+    );
 
-    // Apply layer_name filter
+    // Apply layer filters
     if let Some(ref f) = filter {
+        if let Some(layer_id) = f.layer_id {
+            query = query.filter(layer_statistics::Column::LayerId.eq(layer_id));
+        }
         if let Some(ref layer_name) = f.layer_name {
             debug!(layer_name, "Filtering statistics by layer_name");
-            // Find the layer by name first
-            let layer_record = layer::Entity::find()
-                .filter(layer::Column::LayerName.eq(layer_name))
-                .one(db)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if let Some(layer) = layer_record {
-                debug!(layer_id = %layer.id, "Found layer, filtering statistics");
-                // Filter statistics by layer_id
-                query = query.filter(layer_statistics::Column::LayerId.eq(layer.id));
-            } else {
-                debug!(layer_name, "Layer not found, returning empty results");
-                // If layer not found, return empty results
-                let mut headers = crudcrate::calculate_content_range(0, 0, 0, "statistics");
-                headers.insert("Access-Control-Expose-Headers", "Content-Range".parse().unwrap());
-                return Ok((headers, Json(vec![])));
-            }
+            query = query.filter(layer::Column::LayerName.eq(layer_name));
         }
 
         // Apply date filters
@@ -487,9 +524,12 @@ async fn get_layer_stats(
         debug!("No filter provided");
     }
 
-    // Get total count for Content-Range header
+    // Count layers after filtering, before cutting the page.
     let total_count = query
         .clone()
+        .select_only()
+        .column(layer_statistics::Column::LayerId)
+        .distinct()
         .count(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
@@ -499,78 +539,177 @@ async fn get_layer_stats(
         return Err(StatusCode::BAD_REQUEST);
     };
     let query = match sort_target {
-        StatsSort::StatDate => query.order_by(layer_statistics::Column::StatDate, sort_order),
-        StatsSort::LastAccessedAt => {
-            query.order_by(layer_statistics::Column::LastAccessedAt, sort_order)
-        }
-        StatsSort::XyzTileCount => query.order_by(layer_statistics::Column::XyzTileCount, sort_order),
-        StatsSort::CogDownloadCount => {
-            query.order_by(layer_statistics::Column::CogDownloadCount, sort_order)
-        }
-        StatsSort::PixelQueryCount => {
-            query.order_by(layer_statistics::Column::PixelQueryCount, sort_order)
-        }
-        StatsSort::StacRequestCount => {
-            query.order_by(layer_statistics::Column::StacRequestCount, sort_order)
-        }
-        StatsSort::OtherRequestCount => {
-            query.order_by(layer_statistics::Column::OtherRequestCount, sort_order)
-        }
-        StatsSort::LayerName => query
-            .join(
-                sea_orm::JoinType::InnerJoin,
-                layer_statistics::Relation::Layer.def(),
-            )
-            .order_by(layer::Column::LayerName, sort_order),
-        StatsSort::TotalRequests => query.order_by(total_requests_expr(), sort_order),
+        StatsSort::LastAccessedAt => query.order_by(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::LastAccessedAt).max(),
+            sort_order,
+        ),
+        StatsSort::XyzTileCount => query.order_by(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::XyzTileCount).sum(),
+            sort_order,
+        ),
+        StatsSort::CogDownloadCount => query.order_by(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::CogDownloadCount).sum(),
+            sort_order,
+        ),
+        StatsSort::PixelQueryCount => query.order_by(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::PixelQueryCount).sum(),
+            sort_order,
+        ),
+        StatsSort::StacRequestCount => query.order_by(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::StacRequestCount).sum(),
+            sort_order,
+        ),
+        StatsSort::LayerName => query.order_by(layer::Column::LayerName, sort_order),
+        StatsSort::TotalRequests => query.order_by(aggregated_total_requests_expr(), sort_order),
     };
 
     let stats = query
+        .select_only()
+        .column(layer_statistics::Column::LayerId)
+        .column(layer::Column::LayerName)
+        .column_as(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::LastAccessedAt).max(),
+            "last_accessed_at",
+        )
+        .column_as(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::XyzTileCount).sum(),
+            "xyz_tile_count",
+        )
+        .column_as(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::CogDownloadCount).sum(),
+            "cog_download_count",
+        )
+        .column_as(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::PixelQueryCount).sum(),
+            "pixel_query_count",
+        )
+        .column_as(
+            sea_orm::sea_query::Expr::col(layer_statistics::Column::StacRequestCount).sum(),
+            "stac_request_count",
+        )
+        .group_by(layer_statistics::Column::LayerId)
+        .group_by(layer::Column::LayerName)
+        .limit(limit)
+        .offset(offset)
+        .into_model::<AggregatedLayerStat>()
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let results: Vec<LayerStatSummary> = stats
+        .into_iter()
+        .map(|stat| {
+            let id = stat.layer_id.to_string();
+            LayerStatSummary {
+                id: id.clone(),
+                layer_id: id,
+                layer_name: stat.layer_name.unwrap_or_else(|| stat.layer_id.to_string()),
+                last_accessed_at: stat.last_accessed_at.to_rfc3339(),
+                xyz_tile_count: stat.xyz_tile_count,
+                cog_download_count: stat.cog_download_count,
+                pixel_query_count: stat.pixel_query_count,
+                stac_request_count: stat.stac_request_count,
+                total_requests: stat.xyz_tile_count
+                    + stat.cog_download_count
+                    + stat.pixel_query_count
+                    + stat.stac_request_count,
+            }
+        })
+        .collect();
+
+    // Build Content-Range header using crudcrate utility
+    let mut headers = crudcrate::calculate_content_range(offset, limit, total_count as u64, "statistics");
+    headers.insert("Access-Control-Expose-Headers", "Content-Range".parse().unwrap());
+
+    Ok((headers, Json(results)))
+}
+
+async fn get_daily_stats(
+    State(app_state): State<AppState>,
+    Query(params): Query<StatsQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    use crate::routes::layers::db as layer;
+    use sea_orm::Order;
+
+    let db = &app_state.db;
+    let filter = parse_stats_filter(params.filter.as_deref())?;
+    let (start, end) = crudcrate::parse_range(params.range.clone());
+    let limit = end - start + 1;
+    let offset = start;
+    let sort_order = params
+        .sort
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .and_then(|sort| sort.get(1).cloned())
+        .map_or(Order::Desc, |order| {
+            if order.eq_ignore_ascii_case("ASC") { Order::Asc } else { Order::Desc }
+        });
+
+    let mut query = layer_statistics::Entity::find();
+    if let Some(filter) = filter {
+        if let Some(layer_id) = filter.layer_id {
+            query = query.filter(layer_statistics::Column::LayerId.eq(layer_id));
+        }
+        if let Some(layer_name) = filter.layer_name {
+            query = query
+                .join(
+                    sea_orm::JoinType::InnerJoin,
+                    layer_statistics::Relation::Layer.def(),
+                )
+                .filter(layer::Column::LayerName.eq(layer_name));
+        }
+        if let Some(start) = filter.start_date {
+            query = query.filter(layer_statistics::Column::StatDate.gte(start));
+        }
+        if let Some(end) = filter.end_date {
+            query = query.filter(layer_statistics::Column::StatDate.lte(end));
+        }
+    }
+
+    let total_count = query
+        .clone()
+        .count(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? as usize;
+    let stats = query
+        .order_by(layer_statistics::Column::StatDate, sort_order)
         .limit(limit)
         .offset(offset)
         .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Fetch all layer names in a single query to avoid N+1 problem
-    let layer_ids: Vec<uuid::Uuid> = stats.iter().map(|s| s.layer_id).collect();
+    let layer_ids: Vec<uuid::Uuid> = stats.iter().map(|stat| stat.layer_id).collect();
     let layers = layer::Entity::find()
         .filter(layer::Column::Id.is_in(layer_ids))
         .all(db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Create a map for quick lookup
-    let layer_map: std::collections::HashMap<uuid::Uuid, String> = layers
+    let layer_names: HashMap<uuid::Uuid, String> = layers
         .into_iter()
-        .map(|l| (l.id, l.layer_name.unwrap_or_else(|| l.id.to_string())))
+        .map(|layer| (layer.id, layer.layer_name.unwrap_or_else(|| layer.id.to_string())))
         .collect();
-
-    // Build results with layer names
     let results: Vec<LayerStatDetail> = stats
         .into_iter()
         .filter_map(|stat| {
-            layer_map.get(&stat.layer_id).map(|layer_name| LayerStatDetail {
-                id: stat.id.to_string(),  // React-Admin requires id field
+            layer_names.get(&stat.layer_id).map(|layer_name| LayerStatDetail {
+                id: stat.id.to_string(),
                 layer_id: stat.layer_id.to_string(),
                 layer_name: layer_name.clone(),
                 stat_date: stat.stat_date.to_string(),
-                last_accessed_at: stat.last_accessed_at.to_string(),
+                last_accessed_at: stat.last_accessed_at.to_rfc3339(),
                 xyz_tile_count: stat.xyz_tile_count,
                 cog_download_count: stat.cog_download_count,
                 pixel_query_count: stat.pixel_query_count,
                 stac_request_count: stat.stac_request_count,
-                other_request_count: stat.other_request_count,
+                cache_hit_count: stat.cache_hit_count,
+                cache_miss_count: stat.cache_miss_count,
                 total_requests: stat.xyz_tile_count
                     + stat.cog_download_count
                     + stat.pixel_query_count
-                    + stat.stac_request_count
-                    + stat.other_request_count,
+                    + stat.stac_request_count,
             })
         })
         .collect();
-
-    // Build Content-Range header using crudcrate utility
     let mut headers = crudcrate::calculate_content_range(offset, limit, total_count as u64, "statistics");
     headers.insert("Access-Control-Expose-Headers", "Content-Range".parse().unwrap());
 
@@ -616,12 +755,12 @@ async fn get_layer_stat_detail(
         cog_download_count: stat.cog_download_count,
         pixel_query_count: stat.pixel_query_count,
         stac_request_count: stat.stac_request_count,
-        other_request_count: stat.other_request_count,
+        cache_hit_count: stat.cache_hit_count,
+        cache_miss_count: stat.cache_miss_count,
         total_requests: stat.xyz_tile_count
             + stat.cog_download_count
             + stat.pixel_query_count
-            + stat.stac_request_count
-            + stat.other_request_count,
+            + stat.stac_request_count,
     };
 
     Ok(Json(result))
@@ -693,8 +832,9 @@ async fn get_layer_timeline(
                 cog_download_count: s.cog_download_count,
                 pixel_query_count: s.pixel_query_count,
                 stac_request_count: s.stac_request_count,
-                other_request_count: s.other_request_count,
-                total_requests: s.xyz_tile_count + s.cog_download_count + s.pixel_query_count + s.stac_request_count + s.other_request_count,
+                cache_hit_count: s.cache_hit_count,
+                cache_miss_count: s.cache_miss_count,
+                total_requests: s.xyz_tile_count + s.cog_download_count + s.pixel_query_count + s.stac_request_count,
             });
         } else {
             // No data for this day - fill with zeros
@@ -708,7 +848,8 @@ async fn get_layer_timeline(
                 cog_download_count: 0,
                 pixel_query_count: 0,
                 stac_request_count: 0,
-                other_request_count: 0,
+                cache_hit_count: 0,
+                cache_miss_count: 0,
                 total_requests: 0,
             });
         }
@@ -1038,6 +1179,86 @@ async fn get_cache_aggregated(
     Ok(Json(entries))
 }
 
+/// GET /api/admin/cache/layers/:layer_name/detail - All cached objects for one layer.
+async fn get_layer_cache_detail(
+    State(app_state): State<AppState>,
+    Path(layer_name): Path<String>,
+) -> Result<Json<LayerCacheDetail>, StatusCode> {
+    let config = &app_state.config;
+    let redis_client = crate::routes::tiles::cache::get_redis_client(config);
+    let mut con = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let prefix = format!("{}-{}/", config.app_name, config.deployment);
+    let pattern = format!("{}*", prefix);
+    let mut matching_keys: Vec<(String, LayerCacheEntryKind)> =
+        crate::routes::tiles::cache::scan_keys(&mut con, &pattern)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .into_iter()
+            .filter_map(|key| {
+                cache_entry_for_layer(&key, &prefix, &layer_name).map(|kind| (key, kind))
+            })
+            .collect();
+    matching_keys.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut cog_file = None;
+    let mut png_tiles = Vec::new();
+    let mut total_size_bytes = 0usize;
+
+    for (cache_key, kind) in matching_keys {
+        if matches!(kind, LayerCacheEntryKind::Cog) && cog_file.is_some() {
+            continue;
+        }
+        let size_bytes: usize = redis::cmd("STRLEN")
+            .arg(&cache_key)
+            .query_async(&mut con)
+            .await
+            .unwrap_or(0);
+        let redis_ttl: i64 = redis::cmd("TTL")
+            .arg(&cache_key)
+            .query_async(&mut con)
+            .await
+            .unwrap_or(-2);
+        let ttl_seconds = (redis_ttl >= 0).then_some(redis_ttl);
+        let ttl_hours = (redis_ttl > 0).then_some(redis_ttl as f64 / 3600.0);
+        total_size_bytes += size_bytes;
+
+        let tile_coords = match &kind {
+            LayerCacheEntryKind::Cog => None,
+            LayerCacheEntryKind::Png { tile_coords } => Some(tile_coords.clone()),
+        };
+        let detail = CacheObjectDetail {
+            cache_key,
+            size_bytes,
+            size_mb: size_bytes as f64 / (1024.0 * 1024.0),
+            ttl_seconds,
+            ttl_hours,
+            tile_coords,
+        };
+
+        match kind {
+            LayerCacheEntryKind::Cog => {
+                if cog_file.is_none() {
+                    cog_file = Some(detail);
+                }
+            }
+            LayerCacheEntryKind::Png { .. } => png_tiles.push(detail),
+        }
+    }
+
+    let total_items = png_tiles.len() + usize::from(cog_file.is_some());
+    Ok(Json(LayerCacheDetail {
+        total_items,
+        total_size_bytes,
+        total_size_mb: total_size_bytes as f64 / (1024.0 * 1024.0),
+        cog_file,
+        png_tiles,
+    }))
+}
+
 /// POST /api/admin/cache/clear - Clear all cache
 async fn clear_all_cache(
     State(app_state): State<AppState>,
@@ -1299,7 +1520,8 @@ struct LiveLayerStats {
     cog_download_count: i64,
     pixel_query_count: i64,
     stac_request_count: i64,
-    other_request_count: i64,
+    cache_hit_count: i64,
+    cache_miss_count: i64,
     total_requests: i64,
 }
 
@@ -1313,7 +1535,8 @@ impl LiveLayerStats {
             cog_download_count: 0,
             pixel_query_count: 0,
             stac_request_count: 0,
-            other_request_count: 0,
+            cache_hit_count: 0,
+            cache_miss_count: 0,
             total_requests: 0,
         }
     }
@@ -1358,7 +1581,16 @@ async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<Li
                 "cog" => entry.cog_download_count += count,
                 "pixel" => entry.pixel_query_count += count,
                 "stac" => entry.stac_request_count += count,
-                "other" => entry.other_request_count += count,
+                // A cache outcome is a property of a tile request already counted,
+                // so it stays out of the total.
+                "hit" => {
+                    entry.cache_hit_count += count;
+                    continue;
+                }
+                "miss" => {
+                    entry.cache_miss_count += count;
+                    continue;
+                }
                 _ => {}
             }
 
@@ -1403,12 +1635,12 @@ async fn get_live_stats(State(app_state): State<AppState>) -> Result<Json<Vec<Li
             cog_download_count: i64::from(row.cog_download_count),
             pixel_query_count: i64::from(row.pixel_query_count),
             stac_request_count: i64::from(row.stac_request_count),
-            other_request_count: i64::from(row.other_request_count),
+            cache_hit_count: i64::from(row.cache_hit_count),
+            cache_miss_count: i64::from(row.cache_miss_count),
             total_requests: i64::from(row.xyz_tile_count)
                 + i64::from(row.cog_download_count)
                 + i64::from(row.pixel_query_count)
-                + i64::from(row.stac_request_count)
-                + i64::from(row.other_request_count),
+                + i64::from(row.stac_request_count),
         });
     }
 
@@ -1427,7 +1659,8 @@ fn merge_live_stats(stored: Vec<LiveLayerStats>, pending: Vec<LiveLayerStats>) -
                 entry.cog_download_count += stats.cog_download_count;
                 entry.pixel_query_count += stats.pixel_query_count;
                 entry.stac_request_count += stats.stac_request_count;
-                entry.other_request_count += stats.other_request_count;
+                entry.cache_hit_count += stats.cache_hit_count;
+                entry.cache_miss_count += stats.cache_miss_count;
                 entry.total_requests += stats.total_requests;
                 if entry.layer_id.is_none() {
                     entry.layer_id = stats.layer_id.clone();
@@ -1542,6 +1775,7 @@ mod tests {
     #[test]
     fn test_parse_stats_filter_empty_object() {
         let filter = parse_stats_filter(Some("{}")).unwrap().unwrap();
+        assert!(filter.layer_id.is_none());
         assert!(filter.layer_name.is_none());
         assert!(filter.start_date.is_none());
         assert!(filter.end_date.is_none());
@@ -1550,10 +1784,16 @@ mod tests {
     #[test]
     fn test_parse_stats_filter_valid() {
         let filter = parse_stats_filter(Some(
-            r#"{"layer_name":"wheat","start_date":"2026-09-01","end_date":"2026-09-04"}"#,
+            r#"{"layer_id":"650e8400-e29b-41d4-a716-446655440001","layer_name":"wheat","start_date":"2026-09-01","end_date":"2026-09-04"}"#,
         ))
         .unwrap()
         .unwrap();
+        assert_eq!(
+            filter.layer_id,
+            Some(
+                uuid::Uuid::parse_str("650e8400-e29b-41d4-a716-446655440001").unwrap()
+            )
+        );
         assert_eq!(filter.layer_name.as_deref(), Some("wheat"));
         assert_eq!(filter.start_date, Some(date_str("2026-09-01")));
         assert_eq!(filter.end_date, Some(date_str("2026-09-04")));
@@ -1567,6 +1807,14 @@ mod tests {
         );
         assert_eq!(
             parse_stats_filter(Some(r#"{"end_date":"2026-13-01"}"#)).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_stats_filter_unparseable_layer_id_is_rejected() {
+        assert_eq!(
+            parse_stats_filter(Some(r#"{"layer_id":"not-a-uuid"}"#)).unwrap_err(),
             StatusCode::BAD_REQUEST
         );
     }
@@ -1605,9 +1853,8 @@ mod tests {
 
     /// The sources the statistics datagrid renders, each of which react-admin
     /// offers a sort on.
-    const DATAGRID_SOURCES: [&str; 4] = [
+    const DATAGRID_SOURCES: [&str; 3] = [
         "layer_name",
-        "stat_date",
         "total_requests",
         "last_accessed_at",
     ];
@@ -1623,10 +1870,6 @@ mod tests {
             Some(StatsSort::TotalRequests)
         );
         assert_eq!(
-            stats_sort_target(Some("stat_date")),
-            Some(StatsSort::StatDate)
-        );
-        assert_eq!(
             stats_sort_target(Some("last_accessed_at")),
             Some(StatsSort::LastAccessedAt)
         );
@@ -1638,14 +1881,9 @@ mod tests {
 
     #[test]
     fn test_stats_sort_target_counters() {
-        assert_eq!(stats_sort_target(Some("stat_date")), Some(StatsSort::StatDate));
         assert_eq!(
             stats_sort_target(Some("xyz_tile_count")),
             Some(StatsSort::XyzTileCount)
-        );
-        assert_eq!(
-            stats_sort_target(Some("other_request_count")),
-            Some(StatsSort::OtherRequestCount)
         );
     }
 
@@ -1657,10 +1895,11 @@ mod tests {
     #[test]
     fn test_stats_sort_target_rejects_an_unknown_field() {
         assert_eq!(stats_sort_target(Some("id")), None);
+        assert_eq!(stats_sort_target(Some("stat_date")), None);
         assert_eq!(stats_sort_target(Some("")), None);
     }
 
-    fn stats(name: &str, xyz: i64, other: i64) -> LiveLayerStats {
+    fn stats(name: &str, xyz: i64) -> LiveLayerStats {
         LiveLayerStats {
             layer_id: Some(uuid::Uuid::nil().to_string()),
             layer_name: name.to_string(),
@@ -1669,8 +1908,9 @@ mod tests {
             cog_download_count: 0,
             pixel_query_count: 0,
             stac_request_count: 0,
-            other_request_count: other,
-            total_requests: xyz + other,
+            cache_hit_count: 0,
+            cache_miss_count: 0,
+            total_requests: xyz,
         }
     }
 
@@ -1679,17 +1919,16 @@ mod tests {
     // since. The card shows the day, which is both.
     #[test]
     fn test_merge_live_stats_adds_pending_to_stored() {
-        let merged = merge_live_stats(vec![stats("barley", 6, 0)], vec![stats("barley", 2, 1)]);
+        let merged = merge_live_stats(vec![stats("barley", 6)], vec![stats("barley", 2)]);
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].xyz_tile_count, 8);
-        assert_eq!(merged[0].other_request_count, 1);
-        assert_eq!(merged[0].total_requests, 9);
+        assert_eq!(merged[0].total_requests, 8);
     }
 
     #[test]
     fn test_merge_live_stats_keeps_layers_that_are_only_stored() {
-        let merged = merge_live_stats(vec![stats("barley", 6, 0)], vec![]);
+        let merged = merge_live_stats(vec![stats("barley", 6)], vec![]);
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].total_requests, 6);
@@ -1697,7 +1936,7 @@ mod tests {
 
     #[test]
     fn test_merge_live_stats_keeps_layers_that_are_only_pending() {
-        let merged = merge_live_stats(vec![], vec![stats("barley", 2, 0)]);
+        let merged = merge_live_stats(vec![], vec![stats("barley", 2)]);
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].total_requests, 2);
@@ -1706,8 +1945,8 @@ mod tests {
     #[test]
     fn test_merge_live_stats_orders_by_total_requests() {
         let merged = merge_live_stats(
-            vec![stats("quiet", 1, 0), stats("busy", 40, 0)],
-            vec![stats("quiet", 1, 0)],
+            vec![stats("quiet", 1), stats("busy", 40)],
+            vec![stats("quiet", 1)],
         );
 
         let names: Vec<&str> = merged.iter().map(|s| s.layer_name.as_str()).collect();
@@ -1716,10 +1955,10 @@ mod tests {
 
     #[test]
     fn test_merge_live_stats_takes_the_layer_id_from_whichever_side_has_it() {
-        let mut stored = stats("barley", 6, 0);
+        let mut stored = stats("barley", 6);
         stored.layer_id = None;
 
-        let merged = merge_live_stats(vec![stored], vec![stats("barley", 2, 0)]);
+        let merged = merge_live_stats(vec![stored], vec![stats("barley", 2)]);
 
         assert_eq!(merged[0].layer_id, Some(uuid::Uuid::nil().to_string()));
     }

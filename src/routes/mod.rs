@@ -134,6 +134,18 @@ impl RateLimitTracker {
 /// The layer a request touched and the counter it belongs to, or `None` when the
 /// request counts towards no layer. `path` and `query` are the request's own.
 fn classify_layer_request<'a>(uri_path: &'a str, query_string: &'a str) -> Option<(&'a str, &'a str)> {
+    let layer_query = || {
+        query_string
+            .split('&')
+            .find(|p| p.starts_with("layer="))
+            .and_then(|p| p.strip_prefix("layer="))
+    };
+
+    // Every tile path carries the layer it renders in the query string.
+    if is_tile_request(uri_path) {
+        return layer_query().map(|layer| (layer, "xyz"));
+    }
+
     if !uri_path.starts_with("/api/layers") && !uri_path.starts_with("/api/stac") {
         return None;
     }
@@ -153,28 +165,20 @@ fn classify_layer_request<'a>(uri_path: &'a str, query_string: &'a str) -> Optio
         }
     };
 
-    let (layer, stat_type) = if uri_path.starts_with("/api/layers/xyz/") {
-        let layer = query_string
-            .split('&')
-            .find(|p| p.starts_with("layer="))
-            .and_then(|p| p.strip_prefix("layer="));
-        (layer, "xyz")
-    } else if uri_path.starts_with("/api/layers/cog/") {
+    let (layer, stat_type) = if uri_path.starts_with("/api/layers/cog/") {
         let filename = uri_path.strip_prefix("/api/layers/cog/").unwrap_or("");
         (filename.strip_suffix(".tif"), "cog")
     } else if uri_path.contains("/value") {
         (uuid_segment(uri_path), "pixel")
     } else if uri_path.starts_with("/api/stac") {
-        if uri_path.contains("/collections/") {
-            let layer = uri_path
-                .strip_prefix("/api/stac/collections/")
-                .and_then(|s| s.split('/').next());
-            (layer, "stac")
-        } else {
-            return None;
-        }
-    } else if uri_path.starts_with("/api/layers/") && !uri_path.ends_with("/uploads") {
-        (uuid_segment(uri_path), "other")
+        // A STAC collection is a project and a STAC item is a layer, so only the
+        // item path names something a counter can belong to.
+        let item = uri_path
+            .strip_prefix("/api/stac/collections/")
+            .and_then(|rest| rest.split_once("/items/"))
+            .map(|(_, item)| item)
+            .filter(|item| !item.is_empty() && !item.contains('/'));
+        (item, "stac")
     } else {
         return None;
     };
@@ -197,6 +201,9 @@ fn track_layer_statistics(uri_path: &str, query_string: &str, config: &Config) {
     });
 }
 
+/// A rendered tile, whichever page asked for it: the map, the splash globe or a
+/// project card. The one definition of a tile path, read by the classifier below
+/// and by the request log.
 fn is_tile_request(path: &str) -> bool {
     path.starts_with("/api/layers/xyz/")
         || path.starts_with("/api/site-settings/globe-tile/")
@@ -213,7 +220,12 @@ async fn log_request_ip(
 ) -> Response {
     let start_time = Utc::now();
     let method = request.method().clone();
-    let uri_path = request.uri().path().to_string();
+    // Nested routers see their own prefix stripped, so the path a layer sees depends
+    // on where it is mounted. OriginalUri is what the client asked for.
+    let uri_path = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| request.uri().path().to_string(), |uri| uri.0.path().to_string());
     let query_string = request.uri().query().unwrap_or("");
 
     let ip_opt = request.extensions().get::<RealIp>().map(|r| r.ip());
@@ -435,24 +447,85 @@ mod tests {
         );
     }
 
+    // A STAC collection is a project and a STAC item is a layer.
     #[test]
-    fn test_classify_stac_collection_only() {
+    fn test_classify_stac_counts_the_item_not_the_collection() {
         assert_eq!(
-            classify_layer_request("/api/stac/collections/wheat_cwatm_wf_2030", ""),
+            classify_layer_request(
+                "/api/stac/collections/crop-water-use/items/wheat_cwatm_wf_2030",
+                ""
+            ),
             Some(("wheat_cwatm_wf_2030", "stac"))
         );
         assert_eq!(
-            classify_layer_request("/api/stac/collections/wheat_cwatm_wf_2030/items", ""),
-            Some(("wheat_cwatm_wf_2030", "stac"))
+            classify_layer_request("/api/stac/collections/crop-water-use", ""),
+            None
+        );
+        assert_eq!(
+            classify_layer_request("/api/stac/collections/crop-water-use/items", ""),
+            None
         );
         assert_eq!(classify_layer_request("/api/stac/search", "limit=1"), None);
     }
 
+    // Q2: a tile is a tile whichever page asked for it.
     #[test]
-    fn test_classify_layer_read_needs_a_uuid_and_is_not_an_upload() {
+    fn test_classify_counts_globe_and_card_tiles_as_tiles() {
+        assert_eq!(
+            classify_layer_request("/api/site-settings/globe-tile/3/4/3", "layer=barley_production"),
+            Some(("barley_production", "xyz"))
+        );
+        assert_eq!(
+            classify_layer_request(
+                "/api/projects/crop-water-use/card-tile/4/8/5",
+                "layer=wheat_cwatm_wf_2030"
+            ),
+            Some(("wheat_cwatm_wf_2030", "xyz"))
+        );
+    }
+
+    #[test]
+    fn test_classify_globe_and_card_tiles_without_a_layer_count_nothing() {
+        assert_eq!(
+            classify_layer_request("/api/site-settings/globe-tile/3/4/3", ""),
+            None
+        );
+        assert_eq!(
+            classify_layer_request("/api/projects/crop-water-use/card-tile/4/8/5", ""),
+            None
+        );
+    }
+
+    // The request log and the counters read one definition of a tile path, so they
+    // cannot drift apart again.
+    #[test]
+    fn test_every_tile_path_classifies_as_a_tile() {
+        for path in [
+            "/api/layers/xyz/3/4/2",
+            "/api/site-settings/globe-tile/3/4/3",
+            "/api/projects/crop-water-use/card-tile/4/8/5",
+        ] {
+            assert!(super::is_tile_request(path), "{path} is a tile path");
+            assert_eq!(
+                classify_layer_request(path, "layer=barley_production"),
+                Some(("barley_production", "xyz")),
+                "{path} counts as a tile"
+            );
+        }
+
+        for path in [
+            "/api/layers/cog/barley_production.tif",
+            "/api/stac/collections/crop-water-use/items/barley_production",
+        ] {
+            assert!(!super::is_tile_request(path), "{path} is not a tile path");
+        }
+    }
+
+    #[test]
+    fn test_classify_admin_layer_reads_as_no_traffic() {
         assert_eq!(
             classify_layer_request(&format!("/api/layers/{LAYER_ID}"), ""),
-            Some((LAYER_ID, "other"))
+            None
         );
         assert_eq!(
             classify_layer_request(&format!("/api/layers/{LAYER_ID}/uploads"), ""),
@@ -462,18 +535,9 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_ignores_paths_outside_layers_and_stac() {
-        assert_eq!(
-            classify_layer_request("/api/site-settings/globe-tile/5/16/11", "layer=barley"),
-            None
-        );
-        assert_eq!(
-            classify_layer_request(
-                "/api/projects/crop-water-use/card-tile/3/4/2",
-                "layer=wheat"
-            ),
-            None
-        );
+    fn test_classify_ignores_paths_that_render_no_tile() {
         assert_eq!(classify_layer_request("/api/projects/active", ""), None);
+        assert_eq!(classify_layer_request("/api/site-settings/config", ""), None);
+        assert_eq!(classify_layer_request("/healthz", ""), None);
     }
 }

@@ -10,6 +10,7 @@ use crate::common;
 use drop4crop_api::config::Config;
 use serde_json::json;
 use axum::http::StatusCode;
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement, TryGetable};
 use serial_test::serial;
 
 /// Create test app state with PostgreSQL test database
@@ -53,6 +54,48 @@ async fn create_test_app() -> Router {
 
     // Build test router (without rate limiting)
     common::test_router::build_test_router(&db, &config)
+}
+
+#[tokio::test]
+#[serial]
+async fn test_layer_total_views_trigger_sums_four_counters() {
+    common::init();
+    let db = create_test_db().await.unwrap();
+    common::db::cleanup_test_db(&db).await.unwrap();
+    seed_test_data(&db).await.unwrap();
+    let backend = db.get_database_backend();
+
+    let total_views = |db: DatabaseConnection| async move {
+        let row = db
+            .query_one(Statement::from_string(
+                backend,
+                format!("SELECT total_views FROM layer WHERE id = '{}'::uuid", LAYER_1_ID),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        i64::try_get(&row, "", "total_views").unwrap()
+    };
+
+    let before = total_views(db.clone()).await;
+
+    // A day the fixtures do not use: the layer and the day are unique together.
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            r#"INSERT INTO layer_statistics (
+                id, layer_id, stat_date, last_accessed_at,
+                xyz_tile_count, cog_download_count, pixel_query_count, stac_request_count
+            ) VALUES (
+                '{}'::uuid, '{}'::uuid, '2024-03-01'::date, NOW(), 1, 2, 3, 4
+            )"#,
+            new_uuid(), LAYER_1_ID,
+        ),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(total_views(db.clone()).await, before + 1 + 2 + 3 + 4);
 }
 
 // ============================================================================
@@ -370,6 +413,67 @@ async fn test_statistics_list() {
     let data = response.json();
     assert!(data.is_array());
     assert_eq!(data.as_array().unwrap().len(), 2, "Should have 2 statistics");
+}
+
+#[tokio::test]
+async fn test_statistics_list_aggregates_each_layer_in_selected_range() {
+    let router = create_test_app().await;
+    let client = TestClient::new(router);
+
+    let response = client
+        .get("/api/statistics?filter=%7B%22start_date%22%3A%222024-01-20%22%2C%22end_date%22%3A%222024-01-21%22%7D")
+        .await;
+    response.assert_success();
+
+    let data = response.json();
+    let rows = data.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], LAYER_1_ID);
+    assert_eq!(rows[0]["layer_id"], LAYER_1_ID);
+    assert_eq!(rows[0]["xyz_tile_count"], 1260);
+    assert_eq!(rows[0]["cog_download_count"], 47);
+    assert_eq!(rows[0]["pixel_query_count"], 123);
+    assert_eq!(rows[0]["stac_request_count"], 34);
+    assert_eq!(rows[0]["total_requests"], 1464);
+    assert_eq!(rows[0]["last_accessed_at"], "2024-01-21T16:45:00+00:00");
+    assert!(rows[0].get("stat_date").is_none());
+}
+
+#[tokio::test]
+async fn test_statistics_daily_keeps_rows_for_the_activity_chart() {
+    let router = create_test_app().await;
+    let client = TestClient::new(router);
+
+    let response = client
+        .get("/api/statistics/daily?filter=%7B%22start_date%22%3A%222024-01-20%22%2C%22end_date%22%3A%222024-01-21%22%7D&sort=%5B%22stat_date%22%2C%22ASC%22%5D")
+        .await;
+    response.assert_success();
+
+    let rows = response.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["stat_date"], "2024-01-20");
+    assert_eq!(rows[1]["stat_date"], "2024-01-21");
+}
+
+#[tokio::test]
+async fn test_statistics_daily_filters_by_layer_id() {
+    let router = create_test_app().await;
+    let client = TestClient::new(router);
+
+    let response = client
+        .get(&format!(
+            "/api/statistics/daily?filter=%7B%22layer_id%22%3A%22{LAYER_1_ID}%22%7D&range=%5B0%2C9%5D&sort=%5B%22stat_date%22%2C%22ASC%22%5D"
+        ))
+        .await;
+    response.assert_success();
+
+    let rows = response.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row["layer_id"] == LAYER_1_ID));
+    assert_eq!(rows[0]["stat_date"], "2024-01-20");
+    assert_eq!(rows[2]["stat_date"], "2024-01-22");
 }
 
 #[tokio::test]

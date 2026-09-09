@@ -26,6 +26,8 @@ mod m20260505_000001_add_variable_group_options;
 mod m20260507_000001_replace_extent_with_bbox;
 mod m20260527_000001_add_project_citation_and_unavailable_message;
 mod m20260527_000002_add_project_stac_fields;
+mod m20260909_000001_drop_other_request_count;
+mod m20260909_000002_add_cache_outcome_counts;
 
 pub struct Migrator;
 
@@ -59,6 +61,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260507_000001_replace_extent_with_bbox::Migration),
             Box::new(m20260527_000001_add_project_citation_and_unavailable_message::Migration),
             Box::new(m20260527_000002_add_project_stac_fields::Migration),
+            Box::new(m20260909_000001_drop_other_request_count::Migration),
+            Box::new(m20260909_000002_add_cache_outcome_counts::Migration),
         ]
     }
 }

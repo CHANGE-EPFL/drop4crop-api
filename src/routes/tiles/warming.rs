@@ -11,7 +11,7 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tracing::info;
 
-fn center_zoom_from_extent(extent: &Option<serde_json::Value>) -> (f64, f64, u32) {
+fn center_from_extent(extent: &Option<serde_json::Value>) -> Option<(f64, f64)> {
     if let Some(ext) = extent {
         if let (Some(sw), Some(ne)) = (ext.get(0), ext.get(1)) {
             let sw_lat = sw.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -20,16 +20,10 @@ fn center_zoom_from_extent(extent: &Option<serde_json::Value>) -> (f64, f64, u32
             let ne_lng = ne.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let lat = (sw_lat + ne_lat) / 2.0;
             let lon = (sw_lng + ne_lng) / 2.0;
-            let span = (ne_lng - sw_lng).abs().max((ne_lat - sw_lat).abs());
-            let z = if span > 0.0 {
-                (360.0_f64 / span).log2().floor().max(1.0) as u32
-            } else {
-                4
-            };
-            return (lat, lon, z);
+            return Some((lat, lon));
         }
     }
-    (0.0, 0.0, 2)
+    None
 }
 
 fn lat_lon_to_tile(lat: f64, lon: f64, zoom: u32) -> (u32, u32) {
@@ -58,6 +52,7 @@ fn tiles_for_zoom(z: u32) -> Vec<(u32, u32)> {
 /// Zoom levels each warmed target covers.
 const GLOBE_ZOOMS: std::ops::RangeInclusive<u32> = 0..=3;
 const SHOWCASE_ZOOMS: std::ops::RangeInclusive<u32> = 3..=4;
+const CARD_ZOOMS: std::ops::RangeInclusive<u32> = 2..=4;
 const CARD_GRID_RADIUS: u32 = 1;
 
 /// Cache key for one warmed globe tile.
@@ -104,6 +99,27 @@ fn card_tile_set(
         .into_iter()
         .map(|(x, y)| (z, x, y, card_tile_key(config, slug, layer_name, z, x, y)))
         .collect()
+}
+
+fn card_tile_set_for_extent(
+    config: &Config,
+    slug: &str,
+    layer_name: &str,
+    extent: &Option<serde_json::Value>,
+) -> Vec<(u32, u32, u32, String)> {
+    let Some((lat, lon)) = center_from_extent(extent) else {
+        return tiles_for_zoom(2)
+            .into_iter()
+            .map(|(x, y)| (2, x, y, card_tile_key(config, slug, layer_name, 2, x, y)))
+            .collect();
+    };
+
+    let mut set = Vec::new();
+    for z in CARD_ZOOMS {
+        let (cx, cy) = lat_lon_to_tile(lat, lon, z);
+        set.extend(card_tile_set(config, slug, layer_name, z, cx, cy));
+    }
+    set
 }
 
 /// Every showcase tile warming writes for a layer, with its tile coordinate. Keyed as the
@@ -238,7 +254,7 @@ pub async fn warm_globe_tiles(config: &Config, db: &DatabaseConnection) {
     info!(warmed, layer = %layer_name, "Warmed globe tiles");
 }
 
-/// Warm card tiles for a single project (3x3 grid at the project's zoom level).
+/// Warm the card tiles a project's extent can request.
 pub async fn warm_card_tiles_for_project(
     config: &Config,
     db: &DatabaseConnection,
@@ -264,11 +280,11 @@ pub async fn warm_card_tiles_for_project(
     let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
     let style_id = project.card_style_id.or(layer_record.style_id);
-    let (lat, lon, z) = center_zoom_from_extent(&project.extent);
-    let (cx, cy) = lat_lon_to_tile(lat, lon, z);
     let mut warmed = 0u32;
 
-    for (z, x, y, key) in card_tile_set(config, &project.slug, &layer_name, z, cx, cy) {
+    for (z, x, y, key) in
+        card_tile_set_for_extent(config, &project.slug, &layer_name, &project.extent)
+    {
         if render_and_cache_tile(
             config,
             layer_record.project_id,
@@ -401,9 +417,8 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
             if let Some(card_layer_id) = p.card_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(card_layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let (lat, lon, z) = center_zoom_from_extent(&p.extent);
-                        let (cx, cy) = lat_lon_to_tile(lat, lon, z);
-                        let keys = probe_keys(card_tile_set(&config, &p.slug, name, z, cx, cy));
+                        let keys =
+                            probe_keys(card_tile_set_for_extent(&config, &p.slug, name, &p.extent));
                         if any_key_missing(&config, &keys).await {
                             info!(project = %p.slug, "Card tile missing from cache, re-warming");
                             warm_card_tiles_for_project(&config, &db, p).await;
@@ -580,6 +595,38 @@ mod tests {
         let centre = card_tile_key(&config, "crop-water-use", "wheat", 3, 4, 3);
         assert!(probes.len() > 1, "a single probe cannot represent a 3x3 grid");
         assert!(keys(set).contains(&centre));
+    }
+
+    #[test]
+    fn test_card_tile_set_covers_leaflet_zoom_for_project_extent() {
+        let config = config();
+        let extent = Some(serde_json::json!([[5.0909, 42.0117], [37.1603, 112.1484]]));
+        let set = card_tile_set_for_extent(&config, "project", "wheat", &extent);
+        let coordinates: std::collections::HashSet<_> =
+            set.into_iter().map(|(z, x, y, _)| (z, x, y)).collect();
+
+        for x in 4..=6 {
+            for y in 2..=3 {
+                assert!(coordinates.contains(&(3, x, y)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_card_tile_set_without_extent_covers_the_z2_world() {
+        let config = config();
+        let set = card_tile_set_for_extent(&config, "project", "wheat", &None);
+        let coordinates: std::collections::HashSet<_> = set
+            .into_iter()
+            .map(|(z, x, y, _)| (z, x, y))
+            .collect();
+
+        assert_eq!(coordinates.len(), 16);
+        for x in 0..4 {
+            for y in 0..4 {
+                assert!(coordinates.contains(&(2, x, y)));
+            }
+        }
     }
 
     #[test]

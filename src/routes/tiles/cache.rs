@@ -90,6 +90,35 @@ pub async fn push_cache_raw(config: &Config, key: &str, data: &[u8]) -> Result<(
     Ok(())
 }
 
+/// Claims `key` for `ttl_seconds` if nobody holds it. One instance at a time
+/// warms tiles; the rest see `false` and skip.
+pub async fn try_lock(config: &Config, key: &str, ttl_seconds: u64) -> bool {
+    let client = get_redis_client(config);
+    let Ok(mut con) = client.get_multiplexed_async_connection().await else {
+        return false;
+    };
+    let claimed: Result<Option<String>, _> = redis::cmd("SET")
+        .arg(&[key, "locked", "NX", "EX", &ttl_seconds.to_string()])
+        .query_async(&mut con)
+        .await;
+    matches!(claimed, Ok(Some(_)))
+}
+
+/// Releases a lock taken with [`try_lock`].
+pub async fn unlock(config: &Config, key: &str) {
+    let _ = remove_downloading_state_raw(config, key).await;
+}
+
+/// Whether `key` is present.
+pub async fn key_exists(config: &Config, key: &str) -> bool {
+    let client = get_redis_client(config);
+    let Ok(mut con) = client.get_multiplexed_async_connection().await else {
+        return false;
+    };
+    let exists: Result<i32, _> = redis::cmd("EXISTS").arg(key).query_async(&mut con).await;
+    matches!(exists, Ok(n) if n > 0)
+}
+
 /// Records a download failure under `key` for `ttl_seconds`.
 pub async fn push_failure_raw(
     config: &Config,
@@ -97,11 +126,16 @@ pub async fn push_failure_raw(
     reason: &str,
     ttl_seconds: u64,
 ) -> Result<()> {
+    set_flag(config, key, reason, ttl_seconds).await
+}
+
+/// Writes a small marker value under `key` for `ttl_seconds`.
+pub async fn set_flag(config: &Config, key: &str, value: &str, ttl_seconds: u64) -> Result<()> {
     let client = get_redis_client(config);
     let mut con = client.get_multiplexed_async_connection().await?;
     let _: () = redis::cmd("SET")
         .arg(key)
-        .arg(reason)
+        .arg(value)
         .arg("EX")
         .arg(ttl_seconds)
         .query_async(&mut con)

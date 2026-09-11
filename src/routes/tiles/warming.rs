@@ -5,11 +5,11 @@ use crate::routes::showcase_items::db as showcase;
 use crate::routes::site_settings::db as site_settings;
 use crate::routes::styles::db as style;
 use crate::routes::tiles::cache;
+use crate::routes::tiles::storage;
 use crate::routes::tiles::utils::XYZTile;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
-use tokio_retry::strategy::FixedInterval;
-use tokio_retry::RetryIf;
-use tracing::info;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 fn center_from_extent(extent: &Option<serde_json::Value>) -> Option<(f64, f64)> {
     if let Some(ext) = extent {
@@ -55,9 +55,45 @@ const SHOWCASE_ZOOMS: std::ops::RangeInclusive<u32> = 3..=4;
 const CARD_ZOOMS: std::ops::RangeInclusive<u32> = 2..=4;
 const CARD_GRID_RADIUS: u32 = 1;
 
-/// Renders in flight per warmed group. Bounds the S3 and Redis connections and the
-/// styling CPU the three groups take together.
-const WARM_CONCURRENCY: usize = 8;
+/// Renders in flight while warming. The groups run one after another, so this is
+/// also the whole styling load one instance adds on top of live requests.
+const WARM_CONCURRENCY: usize = 4;
+
+/// How long one instance may hold the warming lock before another can take over.
+const WARM_LOCK_TTL_SECS: u64 = 30 * 60;
+
+/// A set the watchdog re-warmed and then found missing again is being evicted, not
+/// expiring. It is left alone for this long before the next attempt.
+const EVICTED_BACKOFF_SECS: u64 = 6 * 60 * 60;
+
+/// Only one instance warms at a time; the others skip.
+fn warming_lock_key(config: &Config) -> String {
+    cache::build_cache_key(config, "warming:lock")
+}
+
+/// Marks a set the watchdog has just re-warmed.
+fn rewarmed_key(config: &Config, set_name: &str) -> String {
+    cache::build_cache_key(config, &format!("warming:rewarmed:{}", set_name))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogAction {
+    Nothing,
+    Rewarm,
+    Skip,
+}
+
+/// What the watchdog does with a set: nothing while it is cached, one re-warm when it
+/// has gone, and a skip when it went missing again right after being re-warmed.
+fn watchdog_action(missing: usize, rewarmed_recently: bool) -> WatchdogAction {
+    if missing == 0 {
+        WatchdogAction::Nothing
+    } else if rewarmed_recently {
+        WatchdogAction::Skip
+    } else {
+        WatchdogAction::Rewarm
+    }
+}
 
 /// The splash globe's geometry, mirroring the constants in
 /// `drop4crop-ui/src/pages/SplashPage.jsx`: the fraction of the viewport the globe fills,
@@ -241,7 +277,7 @@ where
 
 async fn render_and_cache_tile(
     config: &Config,
-    project_id: Option<uuid::Uuid>,
+    object: Arc<Vec<u8>>,
     layer_name: &str,
     style_id: Option<uuid::Uuid>,
     db: &DatabaseConnection,
@@ -251,14 +287,8 @@ async fn render_and_cache_tile(
     cache_key: &str,
 ) -> bool {
     let xyz = XYZTile { x, y, z };
-    let retry_strategy = FixedInterval::from_millis(200).take(3);
-    let img = match RetryIf::spawn(
-        retry_strategy,
-        || xyz.get_one(config, project_id, layer_name),
-        |_: &anyhow::Error| true,
-    )
-    .await
-    {
+    let filename = format!("{}.tif", layer_name);
+    let img = match xyz.render_object(object, &filename).await {
         Ok(img) => img,
         Err(_) => return false,
     };
@@ -309,10 +339,6 @@ pub async fn warm_globe_tiles(config: &Config, db: &DatabaseConnection) {
         None => return,
     };
 
-    // Warm the COG file
-    let filename = format!("{}.tif", layer_name);
-    let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
-
     let style_id = settings.globe_style_id.or(layer_record.style_id);
     let warmed = warm_tiles(
         config,
@@ -347,10 +373,6 @@ pub async fn warm_card_tiles_for_project(
         Some(n) => n.clone(),
         None => return,
     };
-
-    // Warm the COG file
-    let filename = format!("{}.tif", layer_name);
-    let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
     let style_id = project.card_style_id.or(layer_record.style_id);
     let warmed = warm_tiles(
@@ -391,10 +413,6 @@ pub async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
             None => continue,
         };
 
-        // Warm COG
-        let filename = format!("{}.tif", layer_name);
-        let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
-
         let style_id = layer_record.style_id;
         let warmed = warm_tiles(
             config,
@@ -412,69 +430,96 @@ pub async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
     }
 }
 
-/// Warm all important tiles. Called on startup.
+/// Warm all important tiles. Called on startup. Only the instance holding the
+/// warming lock renders; the others return at once.
 pub async fn warm_all_important_tiles(config: &Config, db: &DatabaseConnection) {
+    let lock = warming_lock_key(config);
+    if !cache::try_lock(config, &lock, WARM_LOCK_TTL_SECS).await {
+        info!("Another instance is warming tiles, skipping");
+        return;
+    }
     info!("Starting tile warming...");
 
-    let globe = tokio::spawn({
-        let config = config.clone();
-        let db = db.clone();
-        async move { warm_globe_tiles(&config, &db).await }
-    });
+    warm_globe_tiles(config, db).await;
 
-    let cards = tokio::spawn({
-        let config = config.clone();
-        let db = db.clone();
-        async move {
-            let projects = project::Entity::find()
-                .filter(project::Column::Enabled.eq(true))
-                .order_by_asc(project::Column::SortOrder)
-                .all(&db)
-                .await
-                .unwrap_or_default();
+    let projects = project::Entity::find()
+        .filter(project::Column::Enabled.eq(true))
+        .order_by_asc(project::Column::SortOrder)
+        .all(db)
+        .await
+        .unwrap_or_default();
+    for project in &projects {
+        warm_card_tiles_for_project(config, db, project).await;
+    }
 
-            for project in &projects {
-                warm_card_tiles_for_project(&config, &db, project).await;
-            }
-        }
-    });
+    warm_showcase_tiles(config, db).await;
 
-    let showcase = tokio::spawn({
-        let config = config.clone();
-        let db = db.clone();
-        async move { warm_showcase_tiles(&config, &db).await }
-    });
-
-    let _ = tokio::join!(globe, cards, showcase);
-
+    cache::unlock(config, &lock).await;
     info!("Tile warming complete");
 }
 
+/// Re-warms a set the watchdog found incomplete, unless it was re-warmed on the
+/// previous pass and has been evicted since.
+async fn rewarm_if_expired(
+    config: &Config,
+    db: &DatabaseConnection,
+    set_name: &str,
+    project_id: Option<uuid::Uuid>,
+    layer_name: &str,
+    style_id: Option<uuid::Uuid>,
+    set: Vec<(u32, u32, u32, String)>,
+    interval_secs: u64,
+) {
+    let expired = expired_tiles(config, &set).await;
+    let marker = rewarmed_key(config, set_name);
+    match watchdog_action(expired.len(), cache::key_exists(config, &marker).await) {
+        WatchdogAction::Nothing => {}
+        WatchdogAction::Rewarm => {
+            info!(set = set_name, expired = expired.len(), "Tiles missing from cache, re-warming");
+            let _ = cache::set_flag(config, &marker, "rewarmed", interval_secs * 2).await;
+            warm_tiles(config, db, project_id, layer_name, style_id, expired).await;
+        }
+        WatchdogAction::Skip => {
+            warn!(
+                set = set_name,
+                expired = expired.len(),
+                backoff_secs = EVICTED_BACKOFF_SECS,
+                "Tiles re-warmed last pass are missing again: the cache is evicting them, not re-warming"
+            );
+            let _ = cache::set_flag(config, &marker, "evicted", EVICTED_BACKOFF_SECS).await;
+        }
+    }
+}
+
 /// Background loop that periodically checks if important tiles are still cached
-/// and re-warms any that have gone missing. Runs every `interval_secs` seconds.
+/// and re-warms any that have gone missing. Runs every `interval_secs` seconds on
+/// whichever instance takes the warming lock for that pass.
 pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, interval_secs: u64) {
     info!(interval_secs, "Starting cache warming watchdog");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 
-        // Re-render the globe tiles that have expired, not the whole set
+        let lock = warming_lock_key(&config);
+        if !cache::try_lock(&config, &lock, WARM_LOCK_TTL_SECS).await {
+            continue;
+        }
+
         let settings = site_settings::Entity::find().one(&db).await.ok().flatten();
         if let Some(ref s) = settings {
             if let Some(layer_id) = s.globe_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let expired = expired_tiles(&config, &globe_tile_set(&config, name)).await;
-                        if !expired.is_empty() {
-                            info!(expired = expired.len(), "Globe tiles missing from cache, re-warming");
-                            let style_id = s.globe_style_id.or(l.style_id);
-                            warm_tiles(&config, &db, l.project_id, name, style_id, expired).await;
-                        }
+                        let style_id = s.globe_style_id.or(l.style_id);
+                        rewarm_if_expired(
+                            &config, &db, "globe", l.project_id, name, style_id,
+                            globe_tile_set(&config, name), interval_secs,
+                        )
+                        .await;
                     }
                 }
             }
         }
 
-        // Check card tiles for each enabled project
         let projects = project::Entity::find()
             .filter(project::Column::Enabled.eq(true))
             .all(&db)
@@ -485,19 +530,17 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
             if let Some(card_layer_id) = p.card_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(card_layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let set = card_tile_set_for_extent(&config, &p.slug, name, &p.extent);
-                        let expired = expired_tiles(&config, &set).await;
-                        if !expired.is_empty() {
-                            info!(project = %p.slug, expired = expired.len(), "Card tiles missing from cache, re-warming");
-                            let style_id = p.card_style_id.or(l.style_id);
-                            warm_tiles(&config, &db, l.project_id, name, style_id, expired).await;
-                        }
+                        let style_id = p.card_style_id.or(l.style_id);
+                        rewarm_if_expired(
+                            &config, &db, &format!("card:{}", p.slug), l.project_id, name, style_id,
+                            card_tile_set_for_extent(&config, &p.slug, name, &p.extent), interval_secs,
+                        )
+                        .await;
                     }
                 }
             }
         }
 
-        // Showcase tiles expire like any other and nothing else re-warms them
         let showcase_items = showcase::Entity::find()
             .filter(showcase::Column::Enabled.eq(true))
             .all(&db)
@@ -507,15 +550,16 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
         for item in &showcase_items {
             if let Ok(Some(l)) = layer::Entity::find_by_id(item.layer_id).one(&db).await {
                 if let Some(ref name) = l.layer_name {
-                    let set = showcase_tile_set(&config, name, l.style_id);
-                    let expired = expired_tiles(&config, &set).await;
-                    if !expired.is_empty() {
-                        info!(showcase_item = %item.title, expired = expired.len(), "Showcase tiles missing from cache, re-warming");
-                        warm_tiles(&config, &db, l.project_id, name, l.style_id, expired).await;
-                    }
+                    rewarm_if_expired(
+                        &config, &db, &format!("showcase:{}", item.id), l.project_id, name, l.style_id,
+                        showcase_tile_set(&config, name, l.style_id), interval_secs,
+                    )
+                    .await;
                 }
             }
         }
+
+        cache::unlock(&config, &lock).await;
     }
 }
 
@@ -576,7 +620,8 @@ async fn expired_tiles(
     missing_tiles(warmed, &cached_keys(config, &keys).await)
 }
 
-/// Renders each tile of a set and caches it, returning how many succeeded.
+/// Renders each tile of a set and caches it, returning how many succeeded. The
+/// source GeoTIFF is fetched once for the whole set.
 async fn warm_tiles(
     config: &Config,
     db: &DatabaseConnection,
@@ -585,15 +630,24 @@ async fn warm_tiles(
     style_id: Option<uuid::Uuid>,
     tiles: Vec<(u32, u32, u32, String)>,
 ) -> u32 {
+    if tiles.is_empty() {
+        return 0;
+    }
+    let filename = format!("{}.tif", layer_name);
+    let object = match storage::get_object(config, project_id, &filename).await {
+        Ok(o) => Arc::new(o),
+        Err(e) => {
+            warn!(layer = layer_name, error = %e, "Source object unavailable, not warming");
+            return 0;
+        }
+    };
     render_bounded(tiles, WARM_CONCURRENCY, |(z, x, y, key)| {
         let config = config.clone();
         let db = db.clone();
+        let object = object.clone();
         let layer_name = layer_name.to_string();
         async move {
-            render_and_cache_tile(
-                &config, project_id, &layer_name, style_id, &db, z, x, y, &key,
-            )
-            .await
+            render_and_cache_tile(&config, object, &layer_name, style_id, &db, z, x, y, &key).await
         }
     })
     .await
@@ -805,6 +859,31 @@ mod tests {
                 assert!(coordinates.contains(&(2, x, y)));
             }
         }
+    }
+
+    #[test]
+    fn test_watchdog_leaves_a_cached_set_alone() {
+        assert_eq!(watchdog_action(0, false), WatchdogAction::Nothing);
+        assert_eq!(watchdog_action(0, true), WatchdogAction::Nothing);
+    }
+
+    #[test]
+    fn test_watchdog_rewarms_a_set_that_expired() {
+        assert_eq!(watchdog_action(933, false), WatchdogAction::Rewarm);
+    }
+
+    #[test]
+    fn test_watchdog_skips_a_set_evicted_right_after_rewarming() {
+        assert_eq!(watchdog_action(933, true), WatchdogAction::Skip);
+    }
+
+    #[test]
+    fn test_warming_keys_stay_out_of_the_tile_and_stats_namespaces() {
+        let config = config();
+        assert_eq!(warming_lock_key(&config), "drop4crop-prod/warming:lock");
+        assert_eq!(rewarmed_key(&config, "globe"), "drop4crop-prod/warming:rewarmed:globe");
+        assert!(!warming_lock_key(&config).contains("/png"));
+        assert!(!warming_lock_key(&config).contains("/stats:"));
     }
 
     #[tokio::test]

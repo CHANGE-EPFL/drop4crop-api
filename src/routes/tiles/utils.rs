@@ -60,9 +60,19 @@ impl XYZTile {
         project_id: Option<uuid::Uuid>,
         layer_id: &str,
     ) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
-        // Fetch the TIFF bytes from S3 asynchronously.
         let filename = format!("{}.tif", layer_id);
         let object = storage::get_object(config, project_id, &filename).await?;
+        self.render_object(std::sync::Arc::new(object), &filename).await
+    }
+
+    /// Reprojects one tile out of an already fetched GeoTIFF. Warming shares one
+    /// object across every tile of a layer instead of fetching it per tile.
+    pub async fn render_object(
+        &self,
+        object: std::sync::Arc<Vec<u8>>,
+        filename: &str,
+    ) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
+        let filename = filename.to_string();
         let x = self.x;
         let y = self.y;
         let z = self.z;

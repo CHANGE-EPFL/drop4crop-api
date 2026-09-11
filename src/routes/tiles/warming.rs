@@ -50,10 +50,60 @@ fn tiles_for_zoom(z: u32) -> Vec<(u32, u32)> {
 }
 
 /// Zoom levels each warmed target covers.
-const GLOBE_ZOOMS: std::ops::RangeInclusive<u32> = 0..=3;
+const GLOBE_FULL_ZOOMS: std::ops::RangeInclusive<u32> = 0..=3;
 const SHOWCASE_ZOOMS: std::ops::RangeInclusive<u32> = 3..=4;
 const CARD_ZOOMS: std::ops::RangeInclusive<u32> = 2..=4;
 const CARD_GRID_RADIUS: u32 = 1;
+
+/// Renders in flight per warmed group. Bounds the S3 and Redis connections and the
+/// styling CPU the three groups take together.
+const WARM_CONCURRENCY: usize = 8;
+
+/// The splash globe's geometry, mirroring the constants in
+/// `drop4crop-ui/src/pages/SplashPage.jsx`: the fraction of the viewport the globe fills,
+/// the latitude it is centred on, the map's zoom cap and the raster source's tile size.
+const GLOBE_FILL: f64 = 1.20;
+const GLOBE_CENTER_LAT: f64 = 20.0;
+const GLOBE_MAX_MAP_ZOOM: f64 = 4.0;
+const GLOBE_SOURCE_TILE_SIZE: f64 = 256.0;
+
+/// Cesium's imagery `maximumLevel` in the easter egg background
+/// (`drop4crop-ui/src/pages/UniverseBackground.jsx`).
+const GLOBE_EGG_MAX_ZOOM: u32 = 5;
+
+/// The map zoom the splash sets for a viewport.
+fn globe_map_zoom(width: f64, height: f64) -> f64 {
+    let min_dim = width.min(height);
+    let cos_lat = GLOBE_CENTER_LAT.to_radians().cos();
+    ((GLOBE_FILL * min_dim * std::f64::consts::PI * cos_lat) / 512.0)
+        .log2()
+        .min(GLOBE_MAX_MAP_ZOOM)
+}
+
+/// The source zoom the overlay requests at a viewport. MapLibre tiles a 512-unit grid, so a
+/// 256 px source is drawn from one zoom further in than the map's own, rounded.
+fn globe_source_zoom(width: f64, height: f64) -> u32 {
+    let overzoom = (512.0 / GLOBE_SOURCE_TILE_SIZE).log2() as u32;
+    globe_map_zoom(width, height).round().max(0.0) as u32 + overzoom
+}
+
+/// The zooms warmed as a latitude band rather than in full: every zoom past the full levels,
+/// up to the deepest either the splash overlay at its zoom cap or the easter egg can request.
+fn globe_band_zooms() -> std::ops::RangeInclusive<u32> {
+    let deepest = globe_source_zoom(f64::MAX, f64::MAX).max(GLOBE_EGG_MAX_ZOOM);
+    (GLOBE_FULL_ZOOMS.end() + 1)..=deepest
+}
+
+/// The tile rows the rotating globe can reach at a zoom. The visible disc reaches
+/// `asin(1 / GLOBE_FILL)` either side of the centre latitude; above its northern edge the
+/// globe's coverage runs to the pole, so the band starts at row 0.
+fn globe_band_rows(z: u32) -> std::ops::RangeInclusive<u32> {
+    let n = 1u32 << z;
+    let half_span = (1.0 / GLOBE_FILL).asin().to_degrees();
+    let south = GLOBE_CENTER_LAT - half_span;
+    let (_, south_row) = lat_lon_to_tile(south, 0.0, z);
+    0..=(south_row + 1).min(n - 1)
+}
 
 /// Cache key for one warmed globe tile.
 fn globe_tile_key(config: &Config, layer_name: &str, z: u32, x: u32, y: u32) -> String {
@@ -78,9 +128,16 @@ fn card_tile_key(
 /// Every globe tile warming writes, with its tile coordinate.
 fn globe_tile_set(config: &Config, layer_name: &str) -> Vec<(u32, u32, u32, String)> {
     let mut set = Vec::new();
-    for z in GLOBE_ZOOMS {
+    for z in GLOBE_FULL_ZOOMS {
         for (x, y) in tiles_for_zoom(z) {
             set.push((z, x, y, globe_tile_key(config, layer_name, z, x, y)));
+        }
+    }
+    for z in globe_band_zooms() {
+        for y in globe_band_rows(z) {
+            for x in 0..(1u32 << z) {
+                set.push((z, x, y, globe_tile_key(config, layer_name, z, x, y)));
+            }
         }
     }
     set
@@ -157,6 +214,31 @@ fn tiles_around(cx: u32, cy: u32, z: u32, radius: u32) -> Vec<(u32, u32)> {
     tiles
 }
 
+/// Run `render` over every item with at most `bound` in flight, counting the successes.
+async fn render_bounded<T, F, Fut>(items: Vec<T>, bound: usize, render: F) -> u32
+where
+    T: Send + 'static,
+    F: Fn(T) -> Fut,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+    let mut pending = items.into_iter();
+    let mut running = tokio::task::JoinSet::new();
+    for item in pending.by_ref().take(bound.max(1)) {
+        running.spawn(render(item));
+    }
+
+    let mut warmed = 0u32;
+    while let Some(finished) = running.join_next().await {
+        if matches!(finished, Ok(true)) {
+            warmed += 1;
+        }
+        if let Some(item) = pending.next() {
+            running.spawn(render(item));
+        }
+    }
+    warmed
+}
+
 async fn render_and_cache_tile(
     config: &Config,
     project_id: Option<uuid::Uuid>,
@@ -204,7 +286,8 @@ async fn render_and_cache_tile(
         .is_ok()
 }
 
-/// Warm globe tiles (z=0..3, 85 tiles total).
+/// Warm globe tiles: every tile of z0-z3, and the latitude band the rotating globe reaches
+/// at z4 and z5, the zooms the splash and the Cesium easter egg request.
 pub async fn warm_globe_tiles(config: &Config, db: &DatabaseConnection) {
     let settings = match site_settings::Entity::find().one(db).await {
         Ok(Some(s)) => s,
@@ -231,25 +314,15 @@ pub async fn warm_globe_tiles(config: &Config, db: &DatabaseConnection) {
     let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
     let style_id = settings.globe_style_id.or(layer_record.style_id);
-    let mut warmed = 0u32;
-
-    for (z, x, y, key) in globe_tile_set(config, &layer_name) {
-        if render_and_cache_tile(
-            config,
-            layer_record.project_id,
-            &layer_name,
-            style_id,
-            db,
-            z,
-            x,
-            y,
-            &key,
-        )
-        .await
-        {
-            warmed += 1;
-        }
-    }
+    let warmed = warm_tiles(
+        config,
+        db,
+        layer_record.project_id,
+        &layer_name,
+        style_id,
+        globe_tile_set(config, &layer_name),
+    )
+    .await;
 
     info!(warmed, layer = %layer_name, "Warmed globe tiles");
 }
@@ -280,27 +353,15 @@ pub async fn warm_card_tiles_for_project(
     let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
     let style_id = project.card_style_id.or(layer_record.style_id);
-    let mut warmed = 0u32;
-
-    for (z, x, y, key) in
-        card_tile_set_for_extent(config, &project.slug, &layer_name, &project.extent)
-    {
-        if render_and_cache_tile(
-            config,
-            layer_record.project_id,
-            &layer_name,
-            style_id,
-            db,
-            z,
-            x,
-            y,
-            &key,
-        )
-        .await
-        {
-            warmed += 1;
-        }
-    }
+    let warmed = warm_tiles(
+        config,
+        db,
+        layer_record.project_id,
+        &layer_name,
+        style_id,
+        card_tile_set_for_extent(config, &project.slug, &layer_name, &project.extent),
+    )
+    .await;
 
     if warmed > 0 {
         info!(warmed, project = %project.slug, "Warmed card tiles");
@@ -335,25 +396,15 @@ pub async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
         let _ = crate::routes::tiles::storage::get_object(config, layer_record.project_id, &filename).await;
 
         let style_id = layer_record.style_id;
-
-        let mut warmed = 0u32;
-        for (z, x, y, key) in showcase_tile_set(config, &layer_name, style_id) {
-            if render_and_cache_tile(
-                config,
-                layer_record.project_id,
-                &layer_name,
-                style_id,
-                db,
-                z,
-                x,
-                y,
-                &key,
-            )
-            .await
-            {
-                warmed += 1;
-            }
-        }
+        let warmed = warm_tiles(
+            config,
+            db,
+            layer_record.project_id,
+            &layer_name,
+            style_id,
+            showcase_tile_set(config, &layer_name, style_id),
+        )
+        .await;
 
         if warmed > 0 {
             info!(warmed, showcase_item = %item.title, "Warmed showcase tiles");
@@ -365,20 +416,36 @@ pub async fn warm_showcase_tiles(config: &Config, db: &DatabaseConnection) {
 pub async fn warm_all_important_tiles(config: &Config, db: &DatabaseConnection) {
     info!("Starting tile warming...");
 
-    warm_globe_tiles(config, db).await;
+    let globe = tokio::spawn({
+        let config = config.clone();
+        let db = db.clone();
+        async move { warm_globe_tiles(&config, &db).await }
+    });
 
-    let projects = project::Entity::find()
-        .filter(project::Column::Enabled.eq(true))
-        .order_by_asc(project::Column::SortOrder)
-        .all(db)
-        .await
-        .unwrap_or_default();
+    let cards = tokio::spawn({
+        let config = config.clone();
+        let db = db.clone();
+        async move {
+            let projects = project::Entity::find()
+                .filter(project::Column::Enabled.eq(true))
+                .order_by_asc(project::Column::SortOrder)
+                .all(&db)
+                .await
+                .unwrap_or_default();
 
-    for project in &projects {
-        warm_card_tiles_for_project(config, db, project).await;
-    }
+            for project in &projects {
+                warm_card_tiles_for_project(&config, &db, project).await;
+            }
+        }
+    });
 
-    warm_showcase_tiles(config, db).await;
+    let showcase = tokio::spawn({
+        let config = config.clone();
+        let db = db.clone();
+        async move { warm_showcase_tiles(&config, &db).await }
+    });
+
+    let _ = tokio::join!(globe, cards, showcase);
 
     info!("Tile warming complete");
 }
@@ -390,16 +457,17 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 
-        // Check the globe tiles warming wrote — if any of the sample is missing, re-warm all
+        // Re-render the globe tiles that have expired, not the whole set
         let settings = site_settings::Entity::find().one(&db).await.ok().flatten();
         if let Some(ref s) = settings {
             if let Some(layer_id) = s.globe_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let keys = probe_keys(globe_tile_set(&config, name));
-                        if any_key_missing(&config, &keys).await {
-                            info!("Globe tile missing from cache, re-warming");
-                            warm_globe_tiles(&config, &db).await;
+                        let expired = expired_tiles(&config, &globe_tile_set(&config, name)).await;
+                        if !expired.is_empty() {
+                            info!(expired = expired.len(), "Globe tiles missing from cache, re-warming");
+                            let style_id = s.globe_style_id.or(l.style_id);
+                            warm_tiles(&config, &db, l.project_id, name, style_id, expired).await;
                         }
                     }
                 }
@@ -417,11 +485,12 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
             if let Some(card_layer_id) = p.card_layer_id {
                 if let Ok(Some(l)) = layer::Entity::find_by_id(card_layer_id).one(&db).await {
                     if let Some(ref name) = l.layer_name {
-                        let keys =
-                            probe_keys(card_tile_set_for_extent(&config, &p.slug, name, &p.extent));
-                        if any_key_missing(&config, &keys).await {
-                            info!(project = %p.slug, "Card tile missing from cache, re-warming");
-                            warm_card_tiles_for_project(&config, &db, p).await;
+                        let set = card_tile_set_for_extent(&config, &p.slug, name, &p.extent);
+                        let expired = expired_tiles(&config, &set).await;
+                        if !expired.is_empty() {
+                            info!(project = %p.slug, expired = expired.len(), "Card tiles missing from cache, re-warming");
+                            let style_id = p.card_style_id.or(l.style_id);
+                            warm_tiles(&config, &db, l.project_id, name, style_id, expired).await;
                         }
                     }
                 }
@@ -438,11 +507,11 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
         for item in &showcase_items {
             if let Ok(Some(l)) = layer::Entity::find_by_id(item.layer_id).one(&db).await {
                 if let Some(ref name) = l.layer_name {
-                    let keys = probe_keys(showcase_tile_set(&config, name, l.style_id));
-                    if any_key_missing(&config, &keys).await {
-                        info!(showcase_item = %item.title, "Showcase tile missing from cache, re-warming");
-                        warm_showcase_tiles(&config, &db).await;
-                        break;
+                    let set = showcase_tile_set(&config, name, l.style_id);
+                    let expired = expired_tiles(&config, &set).await;
+                    if !expired.is_empty() {
+                        info!(showcase_item = %item.title, expired = expired.len(), "Showcase tiles missing from cache, re-warming");
+                        warm_tiles(&config, &db, l.project_id, name, l.style_id, expired).await;
                     }
                 }
             }
@@ -450,53 +519,84 @@ pub async fn spawn_warming_watchdog(config: Config, db: DatabaseConnection, inte
     }
 }
 
-/// The keys the watchdog checks for a warmed set: one per zoom level, plus the corners of
-/// each level, so a set cannot expire around a probe that happens to survive.
-fn probe_keys(warmed: Vec<(u32, u32, u32, String)>) -> Vec<String> {
-    let mut probes = Vec::new();
-    let zooms: std::collections::BTreeSet<u32> = warmed.iter().map(|(z, _, _, _)| *z).collect();
-
-    for zoom in zooms {
-        let level: Vec<&(u32, u32, u32, String)> =
-            warmed.iter().filter(|(z, _, _, _)| *z == zoom).collect();
-        if let Some(first) = level.first() {
-            probes.push(first.3.clone());
-        }
-        if let Some(last) = level.last()
-            && level.len() > 1
-        {
-            probes.push(last.3.clone());
-        }
-    }
-
-    probes
+/// The tiles of a warmed set whose key is no longer cached.
+fn missing_tiles(
+    warmed: &[(u32, u32, u32, String)],
+    present: &std::collections::HashSet<String>,
+) -> Vec<(u32, u32, u32, String)> {
+    warmed
+        .iter()
+        .filter(|(_, _, _, key)| !present.contains(key))
+        .cloned()
+        .collect()
 }
 
-/// True when any of the keys is gone from the cache.
-async fn any_key_missing(config: &Config, keys: &[String]) -> bool {
-    for key in keys {
-        if !check_key_exists(config, key).await {
-            return true;
-        }
-    }
-    false
-}
+const EXISTS_BATCH: usize = 500;
 
-async fn check_key_exists(config: &Config, key: &str) -> bool {
+/// Which of the keys are still in the cache. A cache that cannot be reached reports
+/// every key present: there is nothing to re-warm into.
+async fn cached_keys(config: &Config, keys: &[String]) -> std::collections::HashSet<String> {
+    let all = || keys.iter().cloned().collect();
+
     let client = match redis::Client::open(config.tile_cache_uri.clone()) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return all(),
     };
     let mut con = match client.get_multiplexed_async_connection().await {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return all(),
     };
-    redis::cmd("EXISTS")
-        .arg(key)
-        .query_async::<i32>(&mut con)
-        .await
-        .unwrap_or(0)
-        > 0
+
+    let mut present = std::collections::HashSet::new();
+    for batch in keys.chunks(EXISTS_BATCH) {
+        let mut pipe = redis::pipe();
+        for key in batch {
+            pipe.cmd("EXISTS").arg(key);
+        }
+        match pipe.query_async::<Vec<i32>>(&mut con).await {
+            Ok(exists) => {
+                for (key, found) in batch.iter().zip(exists) {
+                    if found > 0 {
+                        present.insert(key.clone());
+                    }
+                }
+            }
+            Err(_) => return all(),
+        }
+    }
+    present
+}
+
+/// The tiles of a warmed set that have expired and have to be rendered again.
+async fn expired_tiles(
+    config: &Config,
+    warmed: &[(u32, u32, u32, String)],
+) -> Vec<(u32, u32, u32, String)> {
+    let keys: Vec<String> = warmed.iter().map(|(_, _, _, key)| key.clone()).collect();
+    missing_tiles(warmed, &cached_keys(config, &keys).await)
+}
+
+/// Renders each tile of a set and caches it, returning how many succeeded.
+async fn warm_tiles(
+    config: &Config,
+    db: &DatabaseConnection,
+    project_id: Option<uuid::Uuid>,
+    layer_name: &str,
+    style_id: Option<uuid::Uuid>,
+    tiles: Vec<(u32, u32, u32, String)>,
+) -> u32 {
+    render_bounded(tiles, WARM_CONCURRENCY, |(z, x, y, key)| {
+        let config = config.clone();
+        let db = db.clone();
+        let layer_name = layer_name.to_string();
+        async move {
+            render_and_cache_tile(
+                &config, project_id, &layer_name, style_id, &db, z, x, y, &key,
+            )
+            .await
+        }
+    })
+    .await
 }
 
 /// Called after a style is updated — re-warms globe and card tiles if they use this style.
@@ -557,44 +657,122 @@ mod tests {
         assert_eq!(set.len(), 64 + 256);
     }
 
+    fn all_but(set: &[(u32, u32, u32, String)], gone: &str) -> std::collections::HashSet<String> {
+        keys(set.to_vec())
+            .into_iter()
+            .filter(|key| key != gone)
+            .collect()
+    }
+
+    /// Viewports measured against the live splash, with the source zoom and the tile rows
+    /// the globe requested at each.
+    const MEASURED_VIEWPORTS: [(f64, f64, u32, u32); 3] = [
+        (1366.0, 768.0, 3, 5),
+        (1920.0, 1080.0, 4, 10),
+        (2560.0, 1440.0, 4, 10),
+    ];
+
     #[test]
-    fn test_globe_probe_covers_every_warmed_zoom() {
+    fn test_globe_source_zoom_matches_the_measured_viewports() {
+        for (width, height, zoom, _) in MEASURED_VIEWPORTS {
+            assert_eq!(globe_source_zoom(width, height), zoom, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn test_globe_warming_covers_the_zooms_the_splash_requests() {
+        let config = config();
+        let coordinates: std::collections::HashSet<(u32, u32, u32)> =
+            globe_tile_set(&config, "wheat")
+                .into_iter()
+                .map(|(z, x, y, _)| (z, x, y))
+                .collect();
+
+        for (width, height, _, deepest_row) in MEASURED_VIEWPORTS {
+            let z = globe_source_zoom(width, height);
+            for y in 0..=deepest_row {
+                for x in 0..(1u32 << z) {
+                    assert!(
+                        coordinates.contains(&(z, x, y)),
+                        "globe warming misses the tile {z}/{x}/{y} that {width}x{height} requests"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_globe_band_rows_cover_the_measured_rows() {
+        for (width, height, _, deepest_row) in MEASURED_VIEWPORTS {
+            let rows = globe_band_rows(globe_source_zoom(width, height));
+            assert_eq!(*rows.start(), 0);
+            assert!(*rows.end() >= deepest_row, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn test_globe_warming_reaches_the_easter_egg_zoom() {
+        let config = config();
+        let zooms: std::collections::BTreeSet<u32> = globe_tile_set(&config, "wheat")
+            .into_iter()
+            .map(|(z, _, _, _)| z)
+            .collect();
+
+        assert!(zooms.contains(&GLOBE_EGG_MAX_ZOOM));
+        assert_eq!(*zooms.iter().max().unwrap(), GLOBE_EGG_MAX_ZOOM);
+    }
+
+    #[test]
+    fn test_globe_tile_set_is_the_full_levels_plus_the_band() {
         let config = config();
         let set = globe_tile_set(&config, "wheat");
-        let warmed = keys(set.clone());
-        let probes = probe_keys(set.clone());
+        let band: usize = globe_band_zooms()
+            .map(|z| globe_band_rows(z).count() * (1usize << z))
+            .sum();
 
-        for probe in &probes {
-            assert!(warmed.contains(probe), "probe {probe} is not a warmed key");
-        }
-        for zoom in GLOBE_ZOOMS {
-            assert!(
-                probes.iter().any(|p| p.contains(&format!("/{zoom}/"))),
-                "no probe at zoom {zoom}"
-            );
-        }
+        // z0-z3 in full is 1 + 4 + 16 + 64
+        assert_eq!(set.len(), 85 + band);
+        assert_eq!(band, 11 * 16 + 21 * 32);
     }
 
     #[test]
-    fn test_showcase_probe_is_not_empty() {
+    fn test_only_the_expired_globe_tile_is_rewarmed() {
         let config = config();
-        let probes = probe_keys(showcase_tile_set(&config, "wheat", None));
-        assert!(!probes.is_empty());
-        for zoom in SHOWCASE_ZOOMS {
-            assert!(probes.iter().any(|p| p.contains(&format!("/{zoom}/"))));
-        }
+        let set = globe_tile_set(&config, "wheat");
+        let corner = globe_tile_key(&config, "wheat", 3, 0, 0);
+        assert_eq!(
+            missing_tiles(&set, &all_but(&set, &corner)),
+            vec![(3, 0, 0, corner)]
+        );
     }
 
     #[test]
-    fn test_card_probe_covers_more_than_the_centre_tile() {
+    fn test_an_expired_interior_globe_tile_is_seen() {
+        let config = config();
+        let set = globe_tile_set(&config, "wheat");
+        let interior = globe_tile_key(&config, "wheat", 3, 4, 4);
+        assert_eq!(
+            missing_tiles(&set, &all_but(&set, &interior)),
+            vec![(3, 4, 4, interior)]
+        );
+    }
+
+    #[test]
+    fn test_a_fully_cached_set_is_rewarmed_not_at_all() {
         let config = config();
         let set = card_tile_set(&config, "crop-water-use", "wheat", 3, 4, 3);
-        assert_eq!(set.len(), 9);
+        let present: std::collections::HashSet<String> = keys(set.clone()).into_iter().collect();
+        assert!(missing_tiles(&set, &present).is_empty());
+    }
 
-        let probes = probe_keys(set.clone());
-        let centre = card_tile_key(&config, "crop-water-use", "wheat", 3, 4, 3);
-        assert!(probes.len() > 1, "a single probe cannot represent a 3x3 grid");
-        assert!(keys(set).contains(&centre));
+    #[test]
+    fn test_an_empty_cache_rewarms_the_whole_showcase_set() {
+        let config = config();
+        let set = showcase_tile_set(&config, "wheat", None);
+        assert_eq!(
+            missing_tiles(&set, &std::collections::HashSet::new()),
+            set
+        );
     }
 
     #[test]
@@ -629,15 +807,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_probe_keys_of_one_tile_is_that_tile() {
-        let config = config();
-        let one = vec![(0, 0, 0, globe_tile_key(&config, "wheat", 0, 0, 0))];
-        assert_eq!(probe_keys(one.clone()), keys(one));
+    #[tokio::test]
+    async fn test_render_bounded_holds_the_concurrency_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let tiles: Vec<u32> = (0..40).collect();
+
+        let warmed = render_bounded(tiles, 4, |_| {
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                true
+            }
+        })
+        .await;
+
+        assert_eq!(warmed, 40);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 4, "{peak} renders in flight, bound is 4");
+        assert!(peak > 1, "the renders ran one at a time");
     }
 
-    #[test]
-    fn test_probe_keys_of_nothing_is_nothing() {
-        assert!(probe_keys(Vec::new()).is_empty());
+    #[tokio::test]
+    async fn test_render_bounded_counts_only_the_renders_that_succeeded() {
+        let tiles: Vec<u32> = (0..10).collect();
+        let warmed = render_bounded(tiles, 3, |tile| async move { tile % 2 == 0 }).await;
+        assert_eq!(warmed, 5);
     }
 }

@@ -15,6 +15,13 @@ pub fn build_downloading_key(config: &Config, object_id: &str) -> String {
     format!("{}:downloading", cache_key)
 }
 
+/// Builds the key recording that a download failed, so waiters fail fast and the
+/// next request does not immediately re-fetch a missing or unreachable object.
+pub fn build_failed_key(config: &Config, object_id: &str) -> String {
+    let cache_key = build_cache_key(config, object_id);
+    format!("{}:failed", cache_key)
+}
+
 /// Builds the cache key for a fully-rendered PNG tile. The effective style
 /// id (override or layer default) is part of the key so different style
 /// pickings don't collide.
@@ -78,6 +85,25 @@ pub async fn push_cache_raw(config: &Config, key: &str, data: &[u8]) -> Result<(
         .arg(data)
         .arg("EX")
         .arg(config.tile_cache_ttl) // Apply TTL from config (default: 24 hours)
+        .query_async(&mut con)
+        .await?;
+    Ok(())
+}
+
+/// Records a download failure under `key` for `ttl_seconds`.
+pub async fn push_failure_raw(
+    config: &Config,
+    key: &str,
+    reason: &str,
+    ttl_seconds: u64,
+) -> Result<()> {
+    let client = get_redis_client(config);
+    let mut con = client.get_multiplexed_async_connection().await?;
+    let _: () = redis::cmd("SET")
+        .arg(key)
+        .arg(reason)
+        .arg("EX")
+        .arg(ttl_seconds)
         .query_async(&mut con)
         .await?;
     Ok(())

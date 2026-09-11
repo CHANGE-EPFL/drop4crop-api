@@ -78,6 +78,7 @@ pub async fn head_cog_data(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/tiff")
         .header(header::CONTENT_LENGTH, file_size)
+        .header(header::CONTENT_RANGE, format!("bytes 0-{}/{}", file_size - 1, file_size))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Content-Range, Accept-Ranges, Content-Length")

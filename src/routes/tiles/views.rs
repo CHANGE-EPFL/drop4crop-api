@@ -114,7 +114,7 @@ pub async fn tile_handler(
         return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
     }
 
-    // Resolve the layer row first — we need `project_id` to hit the correct
+    // Resolve the layer row first: we need `project_id` to hit the correct
     // project-scoped S3 subpath, and we already need this record downstream
     // for style resolution.
     let layer_record = match layer::Entity::find()

@@ -100,7 +100,7 @@ pub fn router(state: &AppState) -> OpenApiRouter {
 
 /// Project shape returned by `/active`. Includes the resolved
 /// `card_layer_name` so the UI can build the card-tile URL without a
-/// secondary fetch — the layer UUID alone is not enough since the tile
+/// secondary fetch: the layer UUID alone is not enough since the tile
 /// endpoint identifies layers by `layer_name`.
 #[derive(Serialize, ToSchema)]
 pub struct ActiveProject {
@@ -161,7 +161,7 @@ pub struct CardTileParams {
 }
 
 /// Parse a tile coordinate, handling both integers and floats (truncating).
-/// Mirrors the helper in `tiles::views` — kept local to avoid leaking it as
+/// Mirrors the helper in `tiles::views`, kept local to avoid leaking it as
 /// a public surface from the tiles module.
 fn parse_tile_coord(s: &str) -> Result<u32, StatusCode> {
     if let Ok(v) = s.parse::<u32>() {
@@ -212,8 +212,8 @@ pub async fn get_project_card_tile(
 
     // Rendered-PNG cache: keyed on (layer_name, project_card_style_or_default,
     // z/x/y). We don't yet know which style will be applied without a DB
-    // lookup, so the cache key uses a stable token tied to the project slug
-    // — the style id is resolved server-side from the project record, so the
+    // lookup, so the cache key uses a stable token tied to the project slug;
+    // the style id is resolved server-side from the project record, so the
     // mapping (slug -> effective style) is deterministic.
     // Use the slug as a proxy for the style choice; a style change on the
     // project invalidates by writing a new entry under the same key once the
@@ -296,7 +296,7 @@ pub async fn get_project_card_tile(
     })?;
 
     // 4. Resolve which style to apply: project override wins, otherwise the
-    //    layer's own style. Both are optional — if neither is set we fall
+    //    layer's own style. Both are optional; if neither is set we fall
     //    back to no styling (consistent with the main tile handler).
     let style_id_to_use = project_record.card_style_id.or(layer_record.style_id);
 
@@ -326,7 +326,7 @@ pub async fn get_project_card_tile(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Best-effort cache write — splash cards repeatedly request the same
+    // Best-effort cache write: splash cards repeatedly request the same
     // tiles, so this drops every subsequent request to a single Redis GET.
     let _ = crate::routes::tiles::cache::push_cache_raw(config, &png_key, &png_data).await;
 
@@ -666,7 +666,7 @@ pub async fn set_project_crops(
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?;
 
-    // Insert new junction rows — list position becomes the per-project sort_order.
+    // Insert new junction rows; list position becomes the per-project sort_order.
     for (idx, crop_id) in crop_ids.iter().enumerate() {
         let model = super::project_crop::ActiveModel {
             project_id: Set(id),

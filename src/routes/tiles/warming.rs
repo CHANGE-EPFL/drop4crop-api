@@ -653,7 +653,7 @@ async fn warm_tiles(
     .await
 }
 
-/// Called after a style is updated — re-warms globe and card tiles if they use this style.
+/// Called after a style is updated: re-warms globe and card tiles if they use this style.
 pub async fn warm_after_style_change(
     config: &Config,
     db: &DatabaseConnection,

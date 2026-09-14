@@ -247,7 +247,7 @@ async fn log_request_ip(
     let status = response.status().as_u16();
 
     if is_tile_request(&uri_path) {
-        // Aggregate tile requests — log summary every 30s instead of per-request
+        // Aggregate tile requests: log summary every 30s instead of per-request
         let mut agg = tile_agg.lock().unwrap();
         agg.record(status);
         if let Some((ok, err, secs)) = agg.flush_if_due() {

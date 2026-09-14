@@ -31,7 +31,7 @@ pub struct DownloadQueryParams {
 /// Represents the parsed components of a climate layer filename.
 ///
 /// The 6-part canonical order `{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif`
-/// is fixed — projects that don't use a given axis write the sentinel `null` or `nan`
+/// is fixed: projects that don't use a given axis write the sentinel `null` or `nan`
 /// (both accepted, case-insensitive) in that slot. Keeping the positions stable means
 /// automation that renames / generates files doesn't need to know the project's config.
 /// `water_model`, `climate_model`, `scenario`, and `variable` are all optional for this reason.
@@ -61,7 +61,7 @@ pub enum LayerInfo {
 
 /// Structured error body returned by the upload endpoint.
 ///
-/// `code` is machine-readable — the frontend uses it to route the user into the
+/// `code` is machine-readable: the frontend uses it to route the user into the
 /// resolution panel. `message` stays human-readable so existing clients keep
 /// working. `field` + `slug` let the frontend offer a targeted "create & attach"
 /// or "attach" action without having to parse the message.

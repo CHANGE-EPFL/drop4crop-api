@@ -41,7 +41,7 @@ async fn get_s3_client(config: &crate::config::Config) -> Result<Client> {
 ///
 /// Layers with a `project_id` land under `{project_id}/{filename}` in the bucket
 /// so two projects can legitimately share a filename without clobbering each
-/// other. S3 has no concept of "folders" — a PUT to `{prefix}/{pid}/{file}`
+/// other. S3 has no concept of "folders": a PUT to `{prefix}/{pid}/{file}`
 /// just creates that object; the prefix is implicit, so we never need to
 /// separately `mkdir` the project subpath.
 ///
@@ -239,7 +239,7 @@ pub async fn get_object_range(
 /// request does not immediately retry.
 ///
 /// `stem` is the already-computed `{project_id}/{filename}` (or bare `{filename}`)
-/// stem — passed explicitly so we don't try to recover it by splitting the
+/// stem, passed explicitly so we don't try to recover it by splitting the
 /// cache key (which contains the app-name/deployment prefix too).
 async fn download_and_cache(
     config: &crate::config::Config,
@@ -365,7 +365,7 @@ pub async fn delete_object(config: &crate::config::Config, key: &str) -> Result<
 
 /// Gets the full S3 key (prefix + stem) for a layer identified by
 /// `(project_id, filename)`. This is the single function every read/write
-/// site should go through — one place that knows how the bucket is laid out.
+/// site should go through: one place that knows how the bucket is laid out.
 pub fn get_s3_key(
     config: &crate::config::Config,
     project_id: Option<Uuid>,

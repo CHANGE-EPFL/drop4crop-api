@@ -12,8 +12,8 @@ use super::models::{ClimateLayerInfo, CropLayerInfo, LayerInfo};
 /// Returns `None` when the slot is the sentinel `null` or `nan` (case-insensitive),
 /// otherwise returns `Some(slug)`. The canonical 6-part climate filename is
 /// `{crop}_{water_model}_{climate_model}_{scenario}_{variable}_{year}.tif`; projects
-/// that don't use a given axis use the sentinel rather than shifting positions —
-/// that way scripted renames / generators don't depend on which project the file
+/// that don't use a given axis use the sentinel rather than shifting positions, so
+/// scripted renames / generators don't depend on which project the file
 /// is destined for. All four middle slots accept the sentinel.
 fn parse_nullable_slot(s: &str) -> Option<String> {
     if s.eq_ignore_ascii_case("null") || s.eq_ignore_ascii_case("nan") {
@@ -24,7 +24,7 @@ fn parse_nullable_slot(s: &str) -> Option<String> {
 }
 
 /// Which axes the project uses. Drives project-specific minimised filename
-/// parsing — only the axes that are `true` here appear in the minimised form.
+/// parsing: only the axes that are `true` here appear in the minimised form.
 /// When `None` is passed to `parse_filename`, only the canonical 6/7-part forms
 /// and the crop-specific 2-part form are accepted.
 #[derive(Debug, Clone, Copy, Default)]
@@ -65,7 +65,7 @@ pub fn parse_filename(
 
     let parts: Vec<&str> = name_without_ext.split('_').collect();
 
-    // Canonical 6-part form is always accepted regardless of project axes — kept
+    // Canonical 6-part form is always accepted regardless of project axes, kept
     // here so scripted renames / generators that always emit the full form work
     // without project context.
     if parts.len() == 6 {
@@ -81,7 +81,7 @@ pub fn parse_filename(
 
     if parts.len() == 7 {
         // Climate layer with percentage unit: crop_watermodel_climatemodel_scenario_variable_unit_year
-        // If the variable slot is a sentinel, `_perc` has nothing to attach to — reject.
+        // If the variable slot is a sentinel, `_perc` has nothing to attach to, so reject.
         let unit = parts[5];
         if unit != "perc" {
             return Err(anyhow!("Unsupported unit in filename: {}", unit));
@@ -156,7 +156,7 @@ pub fn parse_filename(
                 year,
             }));
         }
-        // axes provided but length didn't match minimised — fall through
+        // axes provided but length didn't match minimised, fall through
         // to the crop short form below for 2..=5 part files. The canonical
         // 7-part `_perc` form is the only way to express percentage units;
         // keeping it canonical-only avoids ambiguity with crop-specific
@@ -166,7 +166,7 @@ pub fn parse_filename(
 
     if (2..=5).contains(&parts.len()) {
         // Short form: crop_variable (variable can contain underscores).
-        // Only 2..=5 parts so that the 6-part form above always wins — keeping
+        // Only 2..=5 parts so that the 6-part form above always wins, keeping
         // the long-form position order stable. Works for crop-specific variables
         // and also for general variables when a project doesn't use middle axes.
         let crop = parts[0].to_string();

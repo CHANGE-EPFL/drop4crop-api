@@ -51,7 +51,7 @@ impl XYZTile {
     ///
     /// Uses f32 to preserve full precision for data values that may be in the millions.
     ///
-    /// `project_id` is the owning project of the layer — required so the S3
+    /// `project_id` is the owning project of the layer, required so the S3
     /// lookup hits `{s3_prefix}/{project_id}/{layer_id}.tif`. Pass `None`
     /// only for legacy unscoped layers.
     pub async fn get_one(

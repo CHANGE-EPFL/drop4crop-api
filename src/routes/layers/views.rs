@@ -236,7 +236,7 @@ pub async fn get_groups(
     };
 
     // When a project is specified, the project configuration (junction tables)
-    // is the source of truth — not what layers happen to exist. This ensures a
+    // is the source of truth, not what layers happen to exist. This ensures a
     // newly configured project with zero layers still shows its axes.
     if let Some(pid) = project_uuid {
         let db_err = |e: sea_orm::DbErr| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string()));
@@ -519,7 +519,7 @@ pub async fn get_pixel_value(
     // Build the filename for the TIFF.
     let filename = format!("{}.tif", layer_id);
 
-    // Resolve the layer row so we know which project owns the file — the S3
+    // Resolve the layer row so we know which project owns the file. The S3
     // object lives under that project's subpath (see `storage::s3_key_stem`).
     let project_id = super::db::Entity::find()
         .filter(super::db::Column::LayerName.eq(&layer_id))
@@ -728,7 +728,7 @@ pub async fn upload_file(
 
             // Resolve each slug to a UUID via the reference tables. Missing rows return
             // `slug_unknown`. When `project_id` is present, also verify the resolved UUID
-            // is attached to that project's junction table — a globally-known slug that
+            // is attached to that project's junction table: a globally-known slug that
             // isn't attached returns `slug_not_in_project`. The frontend routes both codes
             // into the resolution panel.
             let crop_uuid = crate::routes::crops::db::Entity::find()
@@ -979,7 +979,7 @@ pub async fn upload_file(
                 (None, None, None)
             };
 
-            // Check for duplicate layer — scoped to the current project (project_id filter),
+            // Check for duplicate layer, scoped to the current project (project_id filter),
             // and matching NULL columns with .is_null() rather than .eq(None) since the latter
             // would serialize as `= NULL` which is never true in SQL.
             debug!("Checking for duplicate layers");
@@ -1107,7 +1107,7 @@ pub async fn upload_file(
 
             // Upload to S3 under the project's subpath, so the same filename
             // in two different projects doesn't collide on a single object.
-            // S3 PUTs create the key unconditionally — there is no separate
+            // S3 PUTs create the key unconditionally; there is no separate
             // "folder" to ensure exists.
             let s3_key = storage::get_s3_key(&config, params.project_id, &filename);
             storage::upload_object(&config, &s3_key, &cog_bytes)

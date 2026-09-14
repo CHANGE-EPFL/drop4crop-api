@@ -28,3 +28,12 @@ Tests that need S3 or Redis skip themselves when neither is reachable (`skip_if_
 `skip_if_no_redis!`); the database is not optional.
 
 Pushes and pull requests run the same suite through `.github/workflows/test.yml`.
+
+## Logging
+
+Without `RUST_LOG` the app runs at `info,sqlx=warn`. Per-tile logging is at debug, so set it
+explicitly when working locally:
+
+```bash
+RUST_LOG=info,drop4crop_api=debug,sqlx=warn cargo run
+```

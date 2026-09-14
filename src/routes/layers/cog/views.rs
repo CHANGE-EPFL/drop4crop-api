@@ -39,7 +39,7 @@ fn parse_range(range_header: &str, total_size: i64) -> Option<(i64, i64)> {
     Some((start, end.min(total_size - 1)))
 }
 
-/// HEAD handler for COG files — returns Content-Length without body
+/// HEAD handler for COG files: returns Content-Length without body
 #[utoipa::path(
     head,
     path = "/{filename}",

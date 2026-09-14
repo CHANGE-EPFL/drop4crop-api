@@ -39,7 +39,7 @@ fn parse_range(range_header: &str, total_size: i64) -> Option<(i64, i64)> {
     Some((start, end.min(total_size - 1)))
 }
 
-/// HEAD handler for COG files: returns Content-Length without body
+/// HEAD handler for COG files: refuses the method so clients read the size from a ranged GET
 #[utoipa::path(
     head,
     path = "/{filename}",
@@ -47,44 +47,18 @@ fn parse_range(range_header: &str, total_size: i64) -> Option<(i64, i64)> {
         ("filename" = String, Path, description = "Full filename with .tif extension"),
     ),
     responses(
-        (status = 200, description = "File metadata (no body)"),
-        (status = 404, description = "Layer not found"),
+        (status = 405, description = "HEAD is not served; the size comes from the Content-Range of a ranged GET"),
     ),
     summary = "COG file metadata (HEAD)",
-    description = "Returns Content-Length and Accept-Ranges headers for GDAL /vsicurl/ compatibility."
+    description = "Refuses HEAD. The EPFL edge rewrites Content-Length to 0 on every HEAD response, which GDAL reads as a zero-byte file; refused, GDAL falls back to a ranged GET and takes the total from Content-Range."
 )]
-pub async fn head_cog_data(
-    State(app_state): State<AppState>,
-    Path(filename): Path<String>,
-) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    use crate::routes::layers::db::{Column, Entity as LayerEntity};
-
-    let layer = LayerEntity::find()
-        .filter(Column::Filename.eq(&filename))
-        .one(&app_state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Database error", "error": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"message": "Layer not found"}))))?;
-
-    let file_size = if let Some(size) = layer.file_size {
-        size
-    } else {
-        let data = storage::get_object(&app_state.config, layer.project_id, &filename).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "S3 error", "error": e.to_string()}))))?;
-        data.len() as i64
-    };
-
+pub async fn head_cog_data() -> Response {
     Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/tiff")
-        .header(header::CONTENT_LENGTH, file_size)
-        .header(header::CONTENT_RANGE, format!("bytes 0-{}/{}", file_size - 1, file_size))
-        .header(header::ACCEPT_RANGES, "bytes")
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(header::ALLOW, "GET")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Content-Range, Accept-Ranges, Content-Length")
-        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename))
         .body(Body::empty())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message": "Response error", "error": e.to_string()}))))
+        .expect("a header-only response builds")
 }
 
 /// S3-compatible COG endpoint - serves GeoTIFF files with HTTP Range support
@@ -209,3 +183,7 @@ async fn get_layer_data(
 
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "tests/views.rs"]
+mod tests;

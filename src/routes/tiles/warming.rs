@@ -103,9 +103,10 @@ const GLOBE_CENTER_LAT: f64 = 20.0;
 const GLOBE_MAX_MAP_ZOOM: f64 = 4.0;
 const GLOBE_SOURCE_TILE_SIZE: f64 = 256.0;
 
-/// Cesium's imagery `maximumLevel` in the easter egg background
-/// (`drop4crop-ui/src/pages/UniverseBackground.jsx`).
-const GLOBE_EGG_MAX_ZOOM: u32 = 5;
+/// The largest viewport the globe band is warmed for. A viewport whose shorter side passes
+/// about 1635 px rounds up to the next source zoom and renders it cold, as does the Cesium
+/// easter egg, which asks one level deeper than the splash.
+const GLOBE_WARMED_VIEWPORT: (f64, f64) = (2560.0, 1440.0);
 
 /// The map zoom the splash sets for a viewport.
 fn globe_map_zoom(width: f64, height: f64) -> f64 {
@@ -124,9 +125,10 @@ fn globe_source_zoom(width: f64, height: f64) -> u32 {
 }
 
 /// The zooms warmed as a latitude band rather than in full: every zoom past the full levels,
-/// up to the deepest either the splash overlay at its zoom cap or the easter egg can request.
+/// up to the one the splash overlay requests at `GLOBE_WARMED_VIEWPORT`.
 fn globe_band_zooms() -> std::ops::RangeInclusive<u32> {
-    let deepest = globe_source_zoom(f64::MAX, f64::MAX).max(GLOBE_EGG_MAX_ZOOM);
+    let (width, height) = GLOBE_WARMED_VIEWPORT;
+    let deepest = globe_source_zoom(width, height);
     (GLOBE_FULL_ZOOMS.end() + 1)..=deepest
 }
 
@@ -765,15 +767,25 @@ mod tests {
     }
 
     #[test]
-    fn test_globe_warming_reaches_the_easter_egg_zoom() {
+    fn test_globe_warming_stops_at_the_deepest_splash_source_zoom() {
         let config = config();
-        let zooms: std::collections::BTreeSet<u32> = globe_tile_set(&config, "wheat")
+        let deepest_warmed = globe_tile_set(&config, "wheat")
             .into_iter()
             .map(|(z, _, _, _)| z)
-            .collect();
+            .max()
+            .unwrap();
 
-        assert!(zooms.contains(&GLOBE_EGG_MAX_ZOOM));
-        assert_eq!(*zooms.iter().max().unwrap(), GLOBE_EGG_MAX_ZOOM);
+        let (width, height, zoom, _) = MEASURED_VIEWPORTS[MEASURED_VIEWPORTS.len() - 1];
+        assert_eq!((width, height), GLOBE_WARMED_VIEWPORT);
+        assert_eq!(deepest_warmed, zoom);
+        assert_eq!(deepest_warmed, 4);
+    }
+
+    #[test]
+    fn test_globe_source_zoom_past_the_warmed_viewport_is_one_deeper() {
+        // 3840x2160 rounds the map zoom up to the cap, so the source asks z5
+        assert_eq!(globe_source_zoom(3840.0, 2160.0), 5);
+        assert_eq!(globe_source_zoom(f64::MAX, f64::MAX), 5);
     }
 
     #[test]
@@ -786,7 +798,7 @@ mod tests {
 
         // z0-z3 in full is 1 + 4 + 16 + 64
         assert_eq!(set.len(), 85 + band);
-        assert_eq!(band, 11 * 16 + 21 * 32);
+        assert_eq!(band, 11 * 16);
     }
 
     #[test]

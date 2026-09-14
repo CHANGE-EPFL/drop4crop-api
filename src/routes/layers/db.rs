@@ -96,6 +96,19 @@ pub struct Model {
     /// File size in bytes (from S3)
     #[crudcrate(sortable, exclude(create, update))]
     pub file_size: Option<i64>,
+    /// Raster width in pixels, read from the GeoTIFF
+    #[crudcrate(exclude(create, update))]
+    pub raster_width: Option<i32>,
+    /// Raster height in pixels, read from the GeoTIFF
+    #[crudcrate(exclude(create, update))]
+    pub raster_height: Option<i32>,
+    /// Pixel size in degrees, read from the GeoTIFF
+    #[sea_orm(column_type = "Double", nullable)]
+    #[crudcrate(exclude(create, update))]
+    pub raster_resolution: Option<f64>,
+    /// Band type in the vocabulary of the STAC raster extension, ie. `float64`
+    #[crudcrate(exclude(create, update))]
+    pub raster_data_type: Option<String>,
     // Metadata fields (populated by after_get_one hook, not stored in DB)
     #[sea_orm(ignore)]
     #[crudcrate(non_db_attr = true, exclude(create, update))]

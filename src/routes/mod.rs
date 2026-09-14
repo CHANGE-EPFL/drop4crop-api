@@ -381,6 +381,7 @@ pub fn build_router(db: &DatabaseConnection, config: &Config) -> Router {
         .nest("/api/layers", layers::views::router(&app_state))
         .nest("/api/layers/xyz", tiles::views::xyz_router(&app_state)) // XYZ tiles
         .nest("/api/layers/cog", layers::views::cog_router(&app_state)) // S3-compatible COG endpoint
+        .nest("/api/layers/tilejson", layers::tilejson::router(&app_state))
         .nest("/api/crops", crops::views::router(&app_state))
         .nest("/api/water-models", water_models::views::router(&app_state))
         .nest("/api/climate-models", climate_models::views::router(&app_state))

@@ -555,3 +555,85 @@ pub fn crop_to_bbox(
 
     Ok(cropped_data)
 }
+
+/// Shape, pixel size and band type of a raster, as the STAC projection and raster
+/// extensions express them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasterMetadata {
+    pub width: i32,
+    pub height: i32,
+    pub resolution: f64,
+    pub data_type: String,
+}
+
+/// Maps a GDAL band type onto the `data_type` vocabulary of the STAC raster extension.
+pub fn stac_data_type(data_type: gdal::raster::GdalDataType) -> &'static str {
+    use gdal::raster::GdalDataType as T;
+    match data_type {
+        T::UInt8 => "uint8",
+        T::UInt16 => "uint16",
+        T::Int16 => "int16",
+        T::UInt32 => "uint32",
+        T::Int32 => "int32",
+        T::Float32 => "float32",
+        T::Float64 => "float64",
+        _ => "other",
+    }
+}
+
+/// Reads the raster shape, pixel size and band type of a GeoTIFF.
+pub fn get_metadata_of_raster(input_bytes: &[u8]) -> Result<RasterMetadata> {
+    let vsi_path = format!("/vsimem/meta_{}.tif", uuid::Uuid::new_v4());
+
+    {
+        let c_vsi_path = CString::new(vsi_path.clone()).unwrap();
+        let mode = CString::new("w").unwrap();
+        unsafe {
+            let fp = gdal_sys::VSIFOpenL(c_vsi_path.as_ptr(), mode.as_ptr());
+            if fp.is_null() {
+                return Err(anyhow!("Failed to open vsimem file for metadata read"));
+            }
+            let written = gdal_sys::VSIFWriteL(input_bytes.as_ptr() as *const _, 1, input_bytes.len(), fp);
+            gdal_sys::VSIFCloseL(fp);
+            if written != input_bytes.len() {
+                return Err(anyhow!("Failed to write all data to vsimem"));
+            }
+        }
+    }
+
+    let dataset = Dataset::open(&vsi_path)?;
+    let (width, height) = dataset.raster_size();
+    let geo_transform = dataset.geo_transform()?;
+    let data_type = stac_data_type(dataset.rasterband(1)?.band_type()).to_string();
+
+    {
+        let c_vsi_path = CString::new(vsi_path).unwrap();
+        unsafe {
+            gdal_sys::VSIUnlink(c_vsi_path.as_ptr());
+        }
+    }
+
+    let metadata = RasterMetadata {
+        width: i32::try_from(width).map_err(|_| anyhow!("Raster width {} out of range", width))?,
+        height: i32::try_from(height).map_err(|_| anyhow!("Raster height {} out of range", height))?,
+        resolution: geo_transform[1].abs(),
+        data_type,
+    };
+    debug!(?metadata, "Raster metadata read");
+    Ok(metadata)
+}
+
+/// Reads the raster metadata and writes it onto the layer. A raster whose metadata
+/// cannot be read leaves the columns as they are.
+pub fn set_raster_metadata(layer: &mut super::db::ActiveModel, raster_bytes: &[u8]) {
+    use sea_orm::ActiveValue::Set;
+    match get_metadata_of_raster(raster_bytes) {
+        Ok(metadata) => {
+            layer.raster_width = Set(Some(metadata.width));
+            layer.raster_height = Set(Some(metadata.height));
+            layer.raster_resolution = Set(Some(metadata.resolution));
+            layer.raster_data_type = Set(Some(metadata.data_type));
+        }
+        Err(e) => warn!(error = %e, "Failed to read raster metadata"),
+    }
+}

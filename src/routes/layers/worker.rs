@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::jobs::{self, WORKER_IDLE_POLL_INTERVAL_SECS};
-use super::utils::{get_min_max_of_raster, get_global_average_of_raster};
+use super::utils::{get_min_max_of_raster, get_global_average_of_raster, set_raster_metadata};
 use crate::config::Config;
 use crate::routes::tiles::storage;
 
@@ -221,6 +221,7 @@ async fn process_layer(config: &Config, db: &DatabaseConnection, worker_id: &str
     active_layer.max_value = Set(Some(max_val));
     active_layer.global_average = Set(Some(global_avg));
     active_layer.file_size = Set(Some(file_size));
+    set_raster_metadata(&mut active_layer, &object);
     active_layer.stats_status = Set(Some(serde_json::json!({
         "status": "success",
         "last_run": chrono::Utc::now(),

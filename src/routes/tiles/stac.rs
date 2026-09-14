@@ -19,10 +19,12 @@ use stac_api::{Conformance, ItemCollection, Context};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const DROP4CROP_EXT: &str = "https://drop4crop.epfl.ch/stac/drop4crop-extension/v1.0.0/schema.json";
+const STAC_VERSION: &str = "1.1.0";
+pub const DROP4CROP_EXT_ROUTE: &str = "/extensions/drop4crop/v1.0.0/schema.json";
+const DROP4CROP_EXT_PATH: &str = "/api/stac/extensions/drop4crop/v1.0.0/schema.json";
 const SCIENTIFIC_EXT: &str = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json";
 const PROJECTION_EXT: &str = "https://stac-extensions.github.io/projection/v1.1.0/schema.json";
-const RASTER_EXT: &str = "https://stac-extensions.github.io/raster/v1.1.0/schema.json";
+const RASTER_EXT: &str = "https://stac-extensions.github.io/raster/v2.0.0/schema.json";
 
 fn make_link(href: String, rel: &str, mime: &str) -> Link {
     Link {
@@ -59,15 +61,6 @@ pub struct SearchParams {
     project: Option<String>,
 }
 
-fn default_providers() -> Value {
-    json!([{
-        "name": "CHANGE Lab - EPFL",
-        "description": "Data and content provided by the CHANGE lab at EPFL",
-        "roles": ["producer", "processor", "host"],
-        "url": "https://www.epfl.ch/labs/change/"
-    }])
-}
-
 fn extract_doi(paper_url: &str) -> Option<String> {
     if let Some(rest) = paper_url.strip_prefix("https://doi.org/") {
         Some(rest.to_string())
@@ -80,7 +73,7 @@ fn extract_doi(paper_url: &str) -> Option<String> {
     }
 }
 
-fn project_extent_to_bbox(extent: &Value) -> Option<[f64; 4]> {
+pub fn project_extent_to_bbox(extent: &Value) -> Option<[f64; 4]> {
     let arr = extent.as_array()?;
     if arr.len() != 2 { return None; }
     let sw = arr[0].as_array()?;
@@ -101,7 +94,6 @@ struct CollectionData {
     variable_slugs: Vec<String>,
     min_year: Option<i32>,
     max_year: Option<i32>,
-    layer_count: u64,
 }
 
 async fn gather_collection_data(
@@ -165,11 +157,6 @@ async fn gather_collection_data(
         }
     }
 
-    let layer_count = layer::Entity::find()
-        .filter(layer::Column::Enabled.eq(true))
-        .filter(layer::Column::ProjectId.eq(project_id))
-        .count(db).await.map_err(err)?;
-
     let years: Vec<Option<i32>> = layer::Entity::find()
         .filter(layer::Column::Enabled.eq(true))
         .filter(layer::Column::ProjectId.eq(project_id))
@@ -190,7 +177,6 @@ async fn gather_collection_data(
         variable_slugs,
         min_year,
         max_year,
-        layer_count,
     })
 }
 
@@ -200,8 +186,8 @@ fn build_collection(
     base_url: &str,
 ) -> Value {
     let slug = &proj.slug;
-    let license = proj.license.as_deref().unwrap_or("CC-BY-4.0");
-    let providers = proj.providers.as_ref().cloned().unwrap_or_else(default_providers);
+    // "other" is the STAC placeholder for a collection whose licence is not stated.
+    let license = proj.license.as_deref().unwrap_or("other");
 
     let bbox = proj.extent.as_ref()
         .and_then(|e| project_extent_to_bbox(e))
@@ -222,7 +208,7 @@ fn build_collection(
         .and_then(|u| u.as_str());
     let doi = paper_url.and_then(extract_doi);
 
-    let mut stac_extensions = vec![];
+    let mut stac_extensions: Vec<&str> = Vec::new();
     if citation_text.is_some() || doi.is_some() {
         stac_extensions.push(SCIENTIFIC_EXT);
     }
@@ -233,8 +219,8 @@ fn build_collection(
         make_link(format!("{}/api/stac", base_url), "parent", "application/json"),
         make_link(format!("{}/api/stac/collections/{}/items", base_url, slug), "items", "application/geo+json"),
         make_link_titled(
-            format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={{layer}}", base_url),
-            "tiles", "application/vnd.mapbox-vector-tile", "XYZ Tile Template",
+            format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={{item_id}}", base_url),
+            "tiles", "image/png", "XYZ Tile Template",
         ),
     ];
 
@@ -245,7 +231,7 @@ fn build_collection(
     let mut collection_json = json!({
         "type": "Collection",
         "id": slug,
-        "stac_version": "1.0.0",
+        "stac_version": STAC_VERSION,
         "stac_extensions": stac_extensions,
         "title": proj.title,
         "description": proj.description.as_deref().unwrap_or(""),
@@ -255,25 +241,18 @@ fn build_collection(
             "temporal": { "interval": [[temporal_start, temporal_end]] }
         },
         "links": links,
-        "providers": providers,
         "item_assets": {
-            "tiles": {
-                "type": "image/png",
-                "roles": ["visual", "tiles"],
-                "title": "XYZ Tiles",
-                "description": "Rendered PNG tiles in XYZ (Slippy Map) format",
-                "href": format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={{item_id}}", base_url),
-                "proj:epsg": 3857,
-                "tile:scheme": "xyz",
-                "tile:min_zoom": 0,
-                "tile:max_zoom": 18
+            "tilejson": {
+                "type": "application/json",
+                "roles": ["tiles"],
+                "title": "TileJSON",
+                "description": "XYZ tile template for web mapping"
             },
-            "download": {
+            "data": {
                 "type": "image/tiff; application=geotiff; profile=cloud-optimized",
                 "roles": ["data"],
                 "title": "Cloud Optimized GeoTIFF",
-                "description": "Full resolution Cloud Optimized GeoTIFF with HTTP Range support for streaming",
-                "href": format!("{}/api/layers/cog/{{item_id}}.tif", base_url)
+                "description": "Full resolution Cloud Optimized GeoTIFF with HTTP Range support for streaming"
             }
         },
         "summaries": {
@@ -283,7 +262,6 @@ fn build_collection(
             "drop4crop:scenario": data.scenario_slugs,
             "drop4crop:variable": data.variable_slugs,
         },
-        "item_count": data.layer_count,
     });
 
     if let Some(kw) = &proj.keywords {
@@ -294,6 +272,9 @@ fn build_collection(
         }
     }
 
+    if let Some(providers) = &proj.providers {
+        collection_json["providers"] = providers.clone();
+    }
     if let Some(text) = citation_text {
         collection_json["sci:citation"] = json!(text);
     }
@@ -679,7 +660,7 @@ fn build_item(
     let description = if desc_parts.is_empty() {
         format!("{} for year {}", var_d, year)
     } else {
-        format!("{} — {}", var_d, desc_parts.join(", "))
+        format!("{}: {}", var_d, desc_parts.join(", "))
     };
 
     let [west, south, east, north] = bbox;
@@ -688,12 +669,42 @@ fn build_item(
         "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]]
     });
 
+    let mut band = json!({
+        "unit": var_d,
+        "statistics": {
+            "minimum": layer_record.min_value.unwrap_or(0.0),
+            "maximum": layer_record.max_value.unwrap_or(1.0),
+            "mean": layer_record.global_average
+        }
+    });
+    if let Some(data_type) = layer_record.raster_data_type.as_ref() {
+        band["data_type"] = json!(data_type);
+    }
+    if let Some(resolution) = layer_record.raster_resolution {
+        band["raster:spatial_resolution"] = json!(resolution);
+    }
+
+    let mut data_asset = json!({
+        "href": format!("{}/api/layers/cog/{}.tif", base_url, layer_name),
+        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+        "roles": ["data"],
+        "title": "Cloud Optimized GeoTIFF (EPSG:4326)",
+        "description": "Full resolution data in WGS84",
+        "proj:epsg": 4326,
+        "proj:bbox": [west, south, east, north],
+        "bands": [band]
+    });
+    // proj:shape is [height, width].
+    if let (Some(height), Some(width)) = (layer_record.raster_height, layer_record.raster_width) {
+        data_asset["proj:shape"] = json!([height, width]);
+    }
+
     json!({
-        "stac_version": "1.0.0",
+        "stac_version": STAC_VERSION,
         "stac_extensions": [
             PROJECTION_EXT,
             RASTER_EXT,
-            DROP4CROP_EXT,
+            format!("{}{}", base_url, DROP4CROP_EXT_PATH),
         ],
         "type": "Feature",
         "id": layer_name,
@@ -743,46 +754,57 @@ fn build_item(
             },
         ],
         "assets": {
-            "rendered_preview": {
-                "href": format!("{}/api/layers/xyz/{{z}}/{{x}}/{{y}}?layer={}", base_url, layer_name),
-                "type": "image/png",
-                "roles": ["visual", "overview"],
-                "title": "XYZ Tiles (EPSG:3857)",
-                "description": "Pre-rendered PNG tiles for web mapping",
-                "proj:epsg": 3857,
-                "proj:shape": [256, 256],
-                "proj:bbox": [-20037508.34, -20037508.34, 20037508.34, 20037508.34],
-                "raster:bands": [{
-                    "data_type": "uint8",
-                    "spatial_resolution": 156543.03392804097,
-                    "nodata": 0
-                }]
+            "tilejson": {
+                "href": crate::routes::layers::tilejson::tilejson_href(base_url, layer_name),
+                "type": "application/json",
+                "roles": ["tiles"],
+                "title": "TileJSON",
+                "description": "XYZ tile template for web mapping"
             },
-            "data": {
-                "href": format!("{}/api/layers/cog/{}.tif", base_url, layer_name),
-                "type": "image/tiff; application=geotiff; profile=cloud-optimized",
-                "roles": ["data"],
-                "title": "Cloud Optimized GeoTIFF (EPSG:4326)",
-                "description": "Full resolution data in WGS84",
-                "proj:epsg": 4326,
-                "proj:shape": [360, 720],
-                "proj:bbox": [-180.0, -90.0, 180.0, 90.0],
-                "raster:bands": [{
-                    "data_type": "float32",
-                    "spatial_resolution": 0.5,
-                    "unit": var_d,
-                    "statistics": {
-                        "minimum": layer_record.min_value.unwrap_or(0.0),
-                        "maximum": layer_record.max_value.unwrap_or(1.0),
-                        "mean": layer_record.global_average
-                    }
-                }]
+            "data": data_asset
+        }
+    })
+}
+
+/// JSON Schema for the `drop4crop:` item properties, served at `DROP4CROP_EXT_PATH`
+/// and declared by every item.
+fn drop4crop_extension_schema(base_url: &str) -> Value {
+    json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$id": format!("{}{}", base_url, DROP4CROP_EXT_PATH),
+        "title": "Drop4Crop Extension",
+        "description": "Crop water model axes, layer statistics and rendering style of a drop4crop layer",
+        "type": "object",
+        "required": ["type", "properties"],
+        "properties": {
+            "type": { "const": "Feature" },
+            "properties": {
+                "type": "object",
+                "properties": {
+                    "drop4crop:crop": { "type": "string" },
+                    "drop4crop:water_model": { "type": "string" },
+                    "drop4crop:climate_model": { "type": "string" },
+                    "drop4crop:scenario": { "type": "string" },
+                    "drop4crop:variable": { "type": "string" },
+                    "drop4crop:year": { "type": "integer" },
+                    "drop4crop:global_average": { "type": ["number", "null"] },
+                    "drop4crop:min_value": { "type": ["number", "null"] },
+                    "drop4crop:max_value": { "type": ["number", "null"] },
+                    "drop4crop:style": {},
+                    "drop4crop:interpolation_type": { "type": "string" },
+                    "drop4crop:label_display_mode": { "type": "string" },
+                    "drop4crop:label_count": { "type": ["integer", "null"] }
+                }
             }
         }
     })
 }
 
-fn get_base_url(headers: &HeaderMap) -> String {
+pub async fn stac_extension_schema(headers: HeaderMap) -> Json<Value> {
+    Json(drop4crop_extension_schema(&get_base_url(&headers)))
+}
+
+pub fn get_base_url(headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -794,3 +816,7 @@ fn get_base_url(headers: &HeaderMap) -> String {
         format!("https://{}", host)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/stac.rs"]
+mod tests;

@@ -10,5 +10,6 @@ pub fn router(state: &AppState) -> Router {
         .route("/collections/{collection_id}/items", get(super::stac::stac_items))
         .route("/collections/{collection_id}/items/{item_id}", get(super::stac::stac_item))
         .route("/search", get(super::stac::stac_search))
+        .route(super::stac::DROP4CROP_EXT_ROUTE, get(super::stac::stac_extension_schema))
         .with_state(state.clone())
 }

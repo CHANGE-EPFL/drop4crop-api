@@ -4,7 +4,7 @@ use super::models::{
 };
 use super::utils::{
     ProjectAxes, convert_to_cog_in_memory, get_global_average_of_raster, get_min_max_of_raster,
-    parse_filename,
+    parse_filename, set_raster_metadata,
 };
 use crate::common::auth::Role;
 use crate::common::state::AppState;
@@ -1150,7 +1150,7 @@ pub async fn upload_file(
                 use crate::routes::layers::db::ActiveModel as LayerActiveModel;
                 debug!(filename, "Updating existing layer record");
 
-                let update_model = LayerActiveModel {
+                let mut update_model = LayerActiveModel {
                     id: Set(existing_id),
                     min_value: Set(Some(min_val)),
                     max_value: Set(Some(max_val)),
@@ -1160,6 +1160,7 @@ pub async fn upload_file(
                     last_updated: Set(now),
                     ..Default::default()
                 };
+                set_raster_metadata(&mut update_model, &cog_bytes);
 
                 match update_model.update(db).await {
                     Ok(layer) => {
@@ -1180,7 +1181,7 @@ pub async fn upload_file(
             } else {
                 // Create new layer record
                 debug!(layer_name, "Creating new layer record");
-                let layer_record = match &layer_info {
+                let mut layer_record = match &layer_info {
                     LayerInfo::Climate(info) => {
                         use crate::routes::layers::db::ActiveModel as LayerActiveModel;
                         LayerActiveModel {
@@ -1222,6 +1223,8 @@ pub async fn upload_file(
                         }
                     }
                 };
+
+                set_raster_metadata(&mut layer_record, &cog_bytes);
 
                 match layer_record.insert(db).await {
                     Ok(layer) => {
@@ -1463,6 +1466,7 @@ pub async fn recalculate_layer_stats(
     active_layer.max_value = Set(Some(max_val));
     active_layer.global_average = Set(Some(global_avg));
     active_layer.file_size = Set(Some(file_size));
+    set_raster_metadata(&mut active_layer, &object);
     active_layer.stats_status = Set(Some(serde_json::json!({
         "status": "success",
         "last_run": chrono::Utc::now(),
@@ -2042,6 +2046,7 @@ pub async fn recalculate_stats_by_ids(
         active_layer.max_value = Set(Some(max_val));
         active_layer.global_average = Set(Some(global_avg));
         active_layer.file_size = Set(Some(file_size));
+        set_raster_metadata(&mut active_layer, &object);
         active_layer.stats_status = Set(Some(serde_json::json!({
             "status": "success",
             "last_run": chrono::Utc::now(),

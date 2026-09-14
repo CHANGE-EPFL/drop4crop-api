@@ -636,8 +636,8 @@ async fn warm_tiles(
         return 0;
     }
     let filename = format!("{}.tif", layer_name);
-    let object = match storage::get_object(config, project_id, &filename).await {
-        Ok(o) => Arc::new(o),
+    let object = match storage::get_object_shared(config, project_id, &filename).await {
+        Ok(o) => o,
         Err(e) => {
             warn!(layer = layer_name, error = %e, "Source object unavailable, not warming");
             return 0;

@@ -29,6 +29,8 @@ mod m20260527_000002_add_project_stac_fields;
 mod m20260909_000001_drop_other_request_count;
 mod m20260909_000002_add_cache_outcome_counts;
 mod m20260914_000001_add_layer_raster_metadata;
+mod m20260914_000002_add_layer_project_enabled_year_index;
+mod m20260914_000003_drop_layer_total_views_index;
 
 pub struct Migrator;
 
@@ -65,6 +67,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260909_000001_drop_other_request_count::Migration),
             Box::new(m20260909_000002_add_cache_outcome_counts::Migration),
             Box::new(m20260914_000001_add_layer_raster_metadata::Migration),
+            Box::new(m20260914_000002_add_layer_project_enabled_year_index::Migration),
+            Box::new(m20260914_000003_drop_layer_total_views_index::Migration),
         ]
     }
 }

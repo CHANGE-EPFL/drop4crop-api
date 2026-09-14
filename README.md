@@ -4,9 +4,9 @@ The API for CHANGE's drop4crop project.
 
 ## Tests
 
-The `gdal` crate is pinned to a revision that predates GDAL 3.13, so `cargo test` on a machine with a
-newer system GDAL fails while building the bindings. Run the suite in a container with Debian's GDAL,
-mounting the registry and target directories so a rerun does not rebuild everything:
+The unit tests run on the host with `cargo test --lib`. The rest need Postgres and Redis, so run the
+whole suite in a container, mounting the registry and target directories so a rerun does not rebuild
+everything:
 
 ```bash
 docker network create d4c-test
@@ -19,7 +19,7 @@ docker run --rm --network d4c-test -v "$(pwd)":/app -w /app \
   -v drop4crop-target:/app/target -v drop4crop-cargo:/usr/local/cargo/registry \
   -e TEST_DATABASE_URL=postgresql://postgres:psql@d4c-test-db:5432/drop4crop_test \
   -e TILE_CACHE_URI=redis://d4c-test-redis:6379/0 \
-  rust:1.95.0-bookworm bash -c \
+  rust:1.95.0-trixie bash -c \
   "apt-get update && apt-get install -y libgdal-dev clang libclang1 && cargo test -- --test-threads=1"
 ```
 

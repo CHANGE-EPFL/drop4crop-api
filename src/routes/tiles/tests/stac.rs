@@ -48,7 +48,17 @@ fn test_build_item_data_asset_reports_the_rasters_own_shape() {
     // proj:shape is [height, width]
     assert_eq!(asset["proj:shape"], json!([57, 58]));
     assert_eq!(asset["bands"][0]["data_type"], json!("float64"));
-    assert_eq!(asset["bands"][0]["raster:spatial_resolution"], json!(0.5));
+}
+
+// The stored resolution is the pixel width in degrees, while the raster extension defines
+// spatial_resolution in metres, so the value is published under a drop4crop: property instead.
+#[test]
+fn test_build_item_publishes_the_pixel_size_in_degrees_not_as_a_band_resolution() {
+    let record = layer(Some(58), Some(57), Some(0.5), Some("float64"));
+    let value = item(&record, [42.0117, 5.0909, 112.1484, 37.1603]);
+
+    assert_eq!(value["properties"]["drop4crop:raster_resolution"], json!(0.5));
+    assert!(value["assets"]["data"]["bands"][0].get("raster:spatial_resolution").is_none());
 }
 
 #[test]
@@ -82,7 +92,6 @@ fn test_build_item_omits_raster_fields_a_layer_has_no_values_for() {
 
     assert!(asset.get("proj:shape").is_none());
     assert!(asset["bands"][0].get("data_type").is_none());
-    assert!(asset["bands"][0].get("raster:spatial_resolution").is_none());
 }
 
 fn project() -> project::Model {

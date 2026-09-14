@@ -61,8 +61,8 @@ impl XYZTile {
         layer_id: &str,
     ) -> Result<ImageBuffer<Luma<f32>, Vec<f32>>> {
         let filename = format!("{}.tif", layer_id);
-        let object = storage::get_object(config, project_id, &filename).await?;
-        self.render_object(std::sync::Arc::new(object), &filename).await
+        let object = storage::get_object_shared(config, project_id, &filename).await?;
+        self.render_object(object, &filename).await
     }
 
     /// Reprojects one tile out of an already fetched GeoTIFF. Warming shares one

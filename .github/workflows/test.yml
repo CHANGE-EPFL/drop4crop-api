@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.95.0-bookworm
+      image: rust:1.95.0-trixie
 
     services:
       postgres:

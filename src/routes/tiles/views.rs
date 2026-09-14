@@ -53,6 +53,18 @@ fn parse_tile_coord(s: &str) -> Result<u32, StatusCode> {
     Ok(f.trunc() as u32)
 }
 
+/// Response headers for a tile image. The browser is allowed to hold a tile for as long as
+/// the rendered-PNG cache holds it, so a style edit is no more visible in one than the other.
+fn tile_headers(cache_ttl: u64) -> [(header::HeaderName, String); 2] {
+    [
+        (header::CONTENT_TYPE, "image/png".to_string()),
+        (
+            header::CACHE_CONTROL,
+            format!("public, max-age={cache_ttl}"),
+        ),
+    ]
+}
+
 #[utoipa::path(
     get,
     path = "/{z}/{x}/{y}",
@@ -111,7 +123,7 @@ pub async fn tile_handler(
             super::cache::CacheOutcome::Hit,
         )
         .await;
-        return Ok(([(header::CONTENT_TYPE, "image/png")], cached));
+        return Ok((tile_headers(config.tile_cache_ttl), cached));
     }
 
     // Resolve the layer row first: we need `project_id` to hit the correct
@@ -200,7 +212,7 @@ pub async fn tile_handler(
     // skip the styling step. Cache failures are not fatal.
     let _ = super::cache::push_cache_raw(config, &png_key, &png_data).await;
 
-    let response = ([(header::CONTENT_TYPE, "image/png")], png_data);
+    let response = (tile_headers(config.tile_cache_ttl), png_data);
     Ok(response)
 }
 
@@ -250,5 +262,14 @@ mod tests {
         assert_eq!(parse_tile_coord("0").unwrap(), 0);
         assert_eq!(parse_tile_coord("0.0").unwrap(), 0);
         assert_eq!(parse_tile_coord("0.9").unwrap(), 0); // truncates to 0
+    }
+
+    #[test]
+    fn test_tile_headers_allow_the_browser_to_cache_for_the_cache_ttl() {
+        let headers = tile_headers(86400);
+        assert_eq!(headers[0].0, header::CONTENT_TYPE);
+        assert_eq!(headers[0].1, "image/png");
+        assert_eq!(headers[1].0, header::CACHE_CONTROL);
+        assert_eq!(headers[1].1, "public, max-age=86400");
     }
 }

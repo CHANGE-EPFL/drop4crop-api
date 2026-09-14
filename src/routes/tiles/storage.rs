@@ -4,7 +4,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client, config::Credentials, config::Region};
 use crudcrate::CRUDResource;
 use redis;
+use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tokio::{
     task,
     time::{Duration, sleep},
@@ -184,6 +186,50 @@ pub async fn get_object(
         let wait_time = std::cmp::min(100 * (1 << (start_time.elapsed().as_secs() / 5)), 1000);
         sleep(Duration::from_millis(wait_time)).await;
     }
+}
+
+/// One slot per object stem, holding the object while a renderer still has it.
+type SharedSlot = Arc<tokio::sync::Mutex<Weak<Vec<u8>>>>;
+
+static SHARED_OBJECTS: LazyLock<Mutex<HashMap<String, SharedSlot>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Runs `fetch` for `stem` only when no caller is still holding the object, and hands every
+/// other caller the same `Arc`. The tiles of one grid are separate requests for the same
+/// GeoTIFF, so without this each of them pulls the whole object out of the cache on its own.
+async fn shared_fetch<F, Fut>(stem: &str, fetch: F) -> Result<Arc<Vec<u8>>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>>>,
+{
+    let slot = {
+        let mut slots = SHARED_OBJECTS.lock().unwrap();
+        // Drop the slots whose object is gone and that no caller is inside.
+        slots.retain(|_, s| match s.try_lock() {
+            Ok(held) => held.strong_count() > 0,
+            Err(_) => true,
+        });
+        slots.entry(stem.to_string()).or_default().clone()
+    };
+    let mut held = slot.lock().await;
+    if let Some(object) = held.upgrade() {
+        debug!(stem, "Sharing object already in memory");
+        return Ok(object);
+    }
+    let object = Arc::new(fetch().await?);
+    *held = Arc::downgrade(&object);
+    Ok(object)
+}
+
+/// Fetches an object as [`get_object`] does, sharing one copy between the callers that are
+/// rendering from it at the same time.
+pub async fn get_object_shared(
+    config: &crate::config::Config,
+    project_id: Option<Uuid>,
+    filename: &str,
+) -> Result<Arc<Vec<u8>>> {
+    let stem = s3_key_stem(project_id, filename);
+    shared_fetch(&stem, || get_object(config, project_id, filename)).await
 }
 
 /// Fetches an object directly from S3, bypassing the Redis cache.
@@ -406,6 +452,7 @@ pub async fn delete_s3_object_by_db_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_poll_decision_serves_cached_bytes() {
@@ -440,6 +487,67 @@ mod tests {
     fn test_poll_decision_claims_when_flag_expired() {
         let decision = poll_decision(None, None, false, false);
         assert_eq!(decision, PollDecision::Claim);
+    }
+
+    #[tokio::test]
+    async fn test_shared_fetch_runs_once_for_callers_holding_the_object() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = shared_fetch("wheat.tif", || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![1, 2, 3])
+            }
+        })
+        .await
+        .unwrap();
+        let second = shared_fetch("wheat.tif", || async { Ok(vec![9, 9, 9]) })
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn test_shared_fetch_runs_once_for_a_whole_grid_of_concurrent_tiles() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut grid = tokio::task::JoinSet::new();
+        for _ in 0..48 {
+            let calls = calls.clone();
+            grid.spawn(async move {
+                shared_fetch("rice.tif", || {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![1, 2, 3])
+                    }
+                })
+                .await
+                .unwrap()
+            });
+        }
+        let objects = grid.join_all().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(objects.iter().all(|o| Arc::ptr_eq(o, &objects[0])));
+    }
+
+    #[tokio::test]
+    async fn test_shared_fetch_runs_again_once_nothing_holds_the_object() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetch = || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![1, 2, 3])
+            }
+        };
+        drop(shared_fetch("barley.tif", fetch).await.unwrap());
+        let again = shared_fetch("barley.tif", fetch).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(*again, vec![1, 2, 3]);
     }
 
     #[test]

@@ -680,9 +680,6 @@ fn build_item(
     if let Some(data_type) = layer_record.raster_data_type.as_ref() {
         band["data_type"] = json!(data_type);
     }
-    if let Some(resolution) = layer_record.raster_resolution {
-        band["raster:spatial_resolution"] = json!(resolution);
-    }
 
     let mut data_asset = json!({
         "href": format!("{}/api/layers/cog/{}.tif", base_url, layer_name),
@@ -726,6 +723,7 @@ fn build_item(
             "drop4crop:global_average": layer_record.global_average,
             "drop4crop:min_value": layer_record.min_value,
             "drop4crop:max_value": layer_record.max_value,
+            "drop4crop:raster_resolution": layer_record.raster_resolution,
             "drop4crop:style": style_json,
             "drop4crop:interpolation_type": interpolation_type,
             "drop4crop:label_display_mode": label_display_mode,
@@ -790,6 +788,10 @@ fn drop4crop_extension_schema(base_url: &str) -> Value {
                     "drop4crop:global_average": { "type": ["number", "null"] },
                     "drop4crop:min_value": { "type": ["number", "null"] },
                     "drop4crop:max_value": { "type": ["number", "null"] },
+                    "drop4crop:raster_resolution": {
+                        "type": ["number", "null"],
+                        "description": "Pixel size in degrees"
+                    },
                     "drop4crop:style": {},
                     "drop4crop:interpolation_type": { "type": "string" },
                     "drop4crop:label_display_mode": { "type": "string" },

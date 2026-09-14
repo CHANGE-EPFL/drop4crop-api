@@ -10,13 +10,13 @@ members = [".", "migration"]
 anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["multipart"] }
 axum-keycloak-auth = "0.8.3"
-chrono = "0.4.42"
+chrono = "0.4.45"
 crudcrate = "0.7.2"
 # crudcrate = { path = "../crudcrate/crudcrate" }
 dotenvy = "0.15.7"
-gdal = { git = "https://github.com/georust/gdal.git", rev = "1eaed3cccbfe125618305b4eb190ba49827e215c", features = ["bindgen"] }
-gdal-sys = { git = "https://github.com/georust/gdal.git", rev = "1eaed3cccbfe125618305b4eb190ba49827e215c", features = ["bindgen"] }
-geo-types = "0.7.17"
+gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf", features = ["bindgen"] }
+gdal-sys = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf", features = ["bindgen"] }
+geo-types = "0.7.19"
 georaster = "0.2.0"
 geotiff = "0.1.0"
 hyper = "1.7.0"

@@ -1,4 +1,4 @@
-FROM rust:1.95.0-bookworm AS chef
+FROM rust:1.95.0-trixie AS chef
 RUN cargo install cargo-chef --locked && \
     apt-get update && apt-get install -y libgdal-dev clang libclang1
 WORKDIR /app
@@ -22,9 +22,9 @@ COPY Cargo.lock Cargo.toml /app/
 RUN cargo build --release --bin drop4crop-api
 
 # We do not need the Rust toolchain to run the binary!
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y \
-    libgdal32 \
+    libgdal36 \
     libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

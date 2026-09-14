@@ -1,3 +1,4 @@
+pub mod citation;
 pub mod db;
 pub mod project_climate_model;
 pub mod project_crop;

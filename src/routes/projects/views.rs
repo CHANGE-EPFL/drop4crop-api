@@ -1,4 +1,5 @@
 pub use super::db::Project;
+use super::citation;
 use crate::common::auth::Role;
 use crate::common::state::AppState;
 use crate::routes::layers::db as layer;
@@ -28,6 +29,8 @@ pub fn router(state: &AppState) -> OpenApiRouter {
         .routes(routes!(get_active_projects))
         .routes(routes!(get_project_config))
         .routes(routes!(get_project_card_tile))
+        .routes(routes!(get_project_citation_ris))
+        .routes(routes!(get_project_citation_bibtex))
         .with_state(state.clone());
 
     let mut protected_router = Project::router(&state.db.clone());
@@ -328,6 +331,85 @@ pub async fn get_project_card_tile(
     let _ = crate::routes::tiles::cache::push_cache_raw(config, &png_key, &png_data).await;
 
     Ok(([(header::CONTENT_TYPE, "image/png")], png_data))
+}
+
+// ---------------------------------------------------------------------------
+// GET /{slug}/citation.ris and /{slug}/citation.bib - the citation as a file
+// a reference manager can import
+// ---------------------------------------------------------------------------
+
+/// The citation of a project, as an attachment in the given format.
+async fn project_citation_response(
+    slug: &str,
+    format: citation::Format,
+    app_state: &AppState,
+) -> Result<impl IntoResponse + use<>, (StatusCode, Json<String>)> {
+    let project = super::db::Entity::find()
+        .filter(super::db::Column::Slug.eq(slug))
+        .one(&app_state.db)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(err.to_string())))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json("Project not found".to_string())))?;
+
+    let file = citation::citation_file(project.citation.as_ref(), slug, format).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json("Project has no citation".to_string()),
+        )
+    })?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, file.content_type.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", file.filename),
+            ),
+        ],
+        file.body,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/{slug}/citation.ris",
+    params(
+        ("slug" = String, Path, description = "Project slug")
+    ),
+    responses(
+        (status = 200, description = "Citation in RIS", body = String, content_type = "application/x-research-info-systems"),
+        (status = 404, description = "Project not found, or it carries no citation"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Get a project citation as RIS",
+    description = "Serves the project's citation as an RIS attachment, the content type a reference manager imports."
+)]
+pub async fn get_project_citation_ris(
+    Path(slug): Path<String>,
+    State(app_state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
+    project_citation_response(&slug, citation::Format::Ris, &app_state).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/{slug}/citation.bib",
+    params(
+        ("slug" = String, Path, description = "Project slug")
+    ),
+    responses(
+        (status = 200, description = "Citation in BibTeX", body = String, content_type = "application/x-bibtex"),
+        (status = 404, description = "Project not found, or it carries no citation"),
+        (status = 500, description = "Internal server error")
+    ),
+    summary = "Get a project citation as BibTeX",
+    description = "Serves the project's citation as a BibTeX attachment, the content type a reference manager imports."
+)]
+pub async fn get_project_citation_bibtex(
+    Path(slug): Path<String>,
+    State(app_state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
+    project_citation_response(&slug, citation::Format::Bibtex, &app_state).await
 }
 
 // ---------------------------------------------------------------------------
